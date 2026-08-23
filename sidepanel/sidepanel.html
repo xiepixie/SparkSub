@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SparkSub - 侧边栏</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <main class="app">
+    <!-- Top Header -->
+    <header class="header">
+      <div class="brand-row">
+        <span class="status-dot" id="status-dot" title="连接状态"></span>
+        <h1 id="video-title">等待视频…</h1>
+      </div>
+      <div class="header-actions">
+        <button class="icon-btn settings-toggle" id="settings-toggle" title="偏好设置 (主题/语言)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <button class="icon-btn refresh" id="refresh-button" title="重新解析字幕">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l6.73-5.19"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Settings Drawer (Global Extension Preferences) -->
+    <section class="settings-drawer" id="settings-drawer" hidden>
+      <div class="drawer-header">
+        <span class="drawer-title" id="settings-title">⚙️ 偏好设置</span>
+      </div>
+      <div class="drawer-grid">
+        <div class="drawer-card">
+          <span class="drawer-card-label" id="label-theme">主题</span>
+          <select id="theme-select" name="theme-select" class="drawer-select" aria-label="主题模式">
+            <option value="auto">🌓 自动</option>
+            <option value="dark">🌑 暗曜</option>
+            <option value="light">☀️ 浅色</option>
+            <option value="bilibili">哔哩碧蓝</option>
+            <option value="youtube">油管猩红</option>
+          </select>
+        </div>
+        <div class="drawer-card">
+          <span class="drawer-card-label" id="label-lang">语言</span>
+          <select id="lang-select" name="lang-select" class="drawer-select" aria-label="界面语言">
+            <option value="auto">🌐 自动</option>
+            <option value="zh-CN">简体中文</option>
+            <option value="zh-TW">繁體中文</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+        <div class="drawer-card">
+          <span class="drawer-card-label" id="label-pref">字幕偏好</span>
+          <select id="pref-select" name="pref-select" class="drawer-select" aria-label="默认字幕偏好">
+            <option value="manual-first">中文人工优先，AI兜底</option>
+            <option value="manual-only">仅人工中文</option>
+            <option value="ai-first">AI 优先</option>
+          </select>
+        </div>
+        <div class="drawer-card">
+          <span class="drawer-card-label" id="label-size">正文字号</span>
+          <select id="size-select" name="size-select" class="drawer-select" aria-label="正文字号">
+            <option value="13">小 (13px)</option>
+            <option value="14.5" selected>中 (14.5px)</option>
+            <option value="16.5">大 (16.5px)</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- Video Subtitle Toolbar (Track & Export Controls) -->
+    <section class="video-bar">
+      <div class="video-track-group">
+        <select id="track-select" name="track-select" class="track-select" aria-label="字幕轨道" disabled></select>
+        <span class="meta-pill" id="meta-stats"><span id="cue-count">0</span>条 · <span id="duration">00:00</span></span>
+      </div>
+      <div class="export-group">
+        <button id="batch-button" class="btn-action btn-batch" title="批量导出合集/多P字幕" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h6v6H4V4zm10 0h6v6h-6V4zM4 14h6v6H4v-6zm10 0h6v6h-6v-6z"/></svg>
+          <span id="batch-btn-text">批量</span>
+        </button>
+        <div class="footer-export-group">
+          <select id="format-select" name="format-select" class="format-select" aria-label="导出格式">
+            <option value="txt">TXT</option>
+            <option value="srt">SRT</option>
+            <option value="md">MD</option>
+            <option value="audio">🎵 音频直链</option>
+          </select>
+          <button id="download-button" class="btn-action btn-download" title="下载字幕文件" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <span id="export-text">下载</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tabs: View Mode Selection -->
+    <nav class="tabs-bar">
+      <button class="tab-btn active" data-tab="timestamp" id="tab-timestamp">带时间戳</button>
+      <button class="tab-btn" data-tab="plain" id="tab-plain">纯文本</button>
+      <button class="tab-btn" data-tab="ai" id="tab-ai">AI 总结</button>
+    </nav>
+
+    <!-- Toolbar: Search & Action Bar -->
+    <section class="toolbar" id="toolbar-search">
+      <div class="search-box">
+        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input id="search-input" name="search-input" type="search" placeholder="搜索字幕关键词..." autocomplete="off">
+        <span class="search-count" id="search-count"></span>
+        <button id="search-prev" class="search-nav-btn" title="上一个 (Shift+Enter)">▲</button>
+        <button id="search-next" class="search-nav-btn" title="下一个 (Enter)">▼</button>
+      </div>
+      <div class="actions-row">
+        <button id="follow-button" class="btn-action active" title="跟随播放进度">
+          <span class="dot-indicator"></span><span id="follow-text">跟随</span>
+        </button>
+        <button id="copy-button" class="btn-action" title="复制全部字幕纯文本" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          <span id="copy-text">复制全文</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- AI Prompts View -->
+    <section class="ai-section" id="ai-section" hidden>
+      <div class="ai-header">
+        <span class="ai-title" id="ai-title">🤖 AI 总结与学习助手</span>
+        <span class="ai-tip">点击一键复制提示词与文稿，直接粘贴至 AI</span>
+      </div>
+      <div class="ai-prompts-grid">
+        <button class="ai-prompt-card" data-prompt="notes">
+          <div class="ai-card-top">
+            <span class="ai-card-icon">🎯</span>
+            <strong class="ai-card-title" id="ai-card-notes">结构化深度讲义</strong>
+          </div>
+          <p class="ai-card-desc">去噪纠错、定理脉络、推导动机与避坑边界</p>
+        </button>
+        <button class="ai-prompt-card" data-prompt="summary">
+          <div class="ai-card-top">
+            <span class="ai-card-icon">📝</span>
+            <strong class="ai-card-title" id="ai-card-summary">核心主旨与脉络</strong>
+          </div>
+          <p class="ai-card-desc">精准概括主线脉络、核心结论与关键注意点</p>
+        </button>
+        <button class="ai-prompt-card" data-prompt="keypoints">
+          <div class="ai-card-top">
+            <span class="ai-card-icon">📋</span>
+            <strong class="ai-card-title" id="ai-card-keypoints">关键要点与清单</strong>
+          </div>
+          <p class="ai-card-desc">提炼高密度要点、适用边界与实战动作清单</p>
+        </button>
+        <button class="ai-prompt-card" data-prompt="questions">
+          <div class="ai-card-top">
+            <span class="ai-card-icon">❓</span>
+            <strong class="ai-card-title" id="ai-card-questions">深度复盘与辨析题</strong>
+          </div>
+          <p class="ai-card-desc">生成概念辨析、推导动机与易错边界思考题</p>
+        </button>
+      </div>
+    </section>
+
+    <!-- Transcript Cue List -->
+    <section class="transcript" id="transcript" aria-live="polite">
+      <div class="empty" id="empty-state">
+        <div class="empty-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="9" y1="10" x2="15" y2="10"/></svg>
+        </div>
+        <p id="empty-message">打开 YouTube 或哔哩哔哩视频后，字幕将自动同步出现在这里。</p>
+      </div>
+    </section>
+
+    <!-- Diagnostics Drawer -->
+    <details class="diagnostics" id="diagnostics">
+      <summary class="diag-summary">
+        <div class="diag-summary-left">
+          <span class="diag-icon">⚡</span>
+          <span class="diag-title" id="diag-title">诊断信息</span>
+          <span class="diag-pill" id="diagnostic-summary">等待就绪</span>
+        </div>
+        <div class="diag-summary-right">
+          <button id="copy-diagnostic-button" type="button" class="diag-copy-btn" title="复制完整诊断日志">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <span>复制</span>
+          </button>
+        </div>
+      </summary>
+      <div class="diag-body">
+        <div class="diag-alert" id="diag-alert" hidden>
+          <strong id="diagnostic-code">尚无错误</strong>
+          <span id="diagnostic-hint">提取过程会在这里显示每个请求阶段。</span>
+        </div>
+        <pre class="diag-log-view" id="diagnostic-text">暂无诊断信息</pre>
+      </div>
+    </details>
+  </main>
+
+  <!-- Batch Export Modal Dialog Overlay (Userscript Pro v4.10 Sample) -->
+  <div class="batch-overlay" id="batch-overlay" hidden>
+    <div class="batch-modal">
+      <div class="batch-header">
+        <div class="batch-header-info">
+          <div class="batch-title-row">
+            <span class="batch-icon">📦</span>
+            <strong id="batch-modal-title">批量导出字幕</strong>
+            <span class="batch-type-pill" id="batch-type-pill">合集</span>
+          </div>
+          <span class="batch-selected-summary" id="batch-selected-summary">共 0 个分P</span>
+        </div>
+        <button class="batch-close-btn" id="batch-close-btn" title="关闭">✕</button>
+      </div>
+      <div class="batch-body">
+        <!-- Card 1: Main Hierarchy Tree Card with Granular Selection -->
+        <div class="batch-card" id="batch-tree-card">
+          <div class="batch-card-header">
+            <div class="batch-tree-header-top">
+              <div class="batch-tree-title-group">
+                <span class="batch-card-title">📂 分P与合集架构</span>
+              </div>
+              <span class="batch-tree-selected-summary" id="batch-tree-selected-summary">已选 0 集</span>
+            </div>
+            <div class="batch-tree-toolbar-actions">
+              <button type="button" class="batch-tree-tool-btn" id="batch-tree-btn-all" title="全选所有分P">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                <span>全选</span>
+              </button>
+              <button type="button" class="batch-tree-tool-btn" id="batch-tree-btn-cur" title="仅勾选当前分P">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>
+                <span>仅当前</span>
+              </button>
+              <button type="button" class="batch-tree-tool-btn" id="batch-tree-btn-none" title="清空全部勾选">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                <span>清空</span>
+              </button>
+              <button type="button" class="batch-tree-tool-btn" id="batch-tree-btn-invert" title="反向勾选">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/></svg>
+                <span>反选</span>
+              </button>
+            </div>
+          </div>
+          <div class="batch-quick-range-bar">
+            <div class="batch-quick-range-badge">
+              <span>⚡️</span>
+              <span class="batch-quick-range-label">区间速选</span>
+            </div>
+            <div class="batch-quick-range-inputs">
+              <span>从第</span>
+              <input type="number" id="batch-quick-start" class="batch-range-input" min="1" value="1">
+              <span>至</span>
+              <input type="number" id="batch-quick-end" class="batch-range-input" min="1" value="1">
+              <span>集</span>
+            </div>
+            <button type="button" class="batch-quick-apply-btn" id="batch-quick-apply-btn">应用勾选</button>
+          </div>
+          <div class="batch-tree-list" id="batch-tree-list"></div>
+        </div>
+
+        <!-- Card 2: Output & Format Settings (Focused and Streamlined) -->
+        <div class="batch-card" id="batch-settings-card">
+          <div class="batch-card-header">
+            <span class="batch-card-title">⚙️ 输出与格式设置</span>
+          </div>
+          <div class="batch-settings-stacked">
+            <div class="batch-settings-row">
+              <span class="batch-setting-title">打包输出形式</span>
+              <div class="batch-radio-group">
+                <label class="batch-radio-pill"><input type="radio" name="batch-output" value="zip" checked> <span>ZIP 压缩包（每集独立文件 · 推荐）</span></label>
+                <label class="batch-radio-pill"><input type="radio" name="batch-output" value="merged-md"> <span>合并为一个 Markdown（带目录与总览）</span></label>
+              </div>
+            </div>
+
+            <div class="batch-settings-row" id="batch-format-row">
+              <span class="batch-setting-title">ZIP 内单文件格式</span>
+              <div class="batch-radio-group">
+                <label class="batch-radio-pill"><input type="radio" name="batch-format" value="srt" checked> <span>SRT 字幕（播放器/剪辑外挂）</span></label>
+                <label class="batch-radio-pill"><input type="radio" name="batch-format" value="md"> <span>Markdown 笔记（结构化文档）</span></label>
+                <label class="batch-radio-pill"><input type="radio" name="batch-format" value="txt"> <span>TXT 纯文本（纯文本讲稿）</span></label>
+              </div>
+            </div>
+
+            <div class="batch-settings-row" id="batch-timestamp-row">
+              <span class="batch-setting-title">时间戳选项（适用于 Markdown / TXT）</span>
+              <div class="batch-radio-group">
+                <label class="batch-radio-pill"><input type="radio" name="batch-timestamp" value="false" checked> <span>纯文本讲稿（无时间轴 · 适合阅读与 AI 分析）</span></label>
+                <label class="batch-radio-pill"><input type="radio" name="batch-timestamp" value="true"> <span>保留时间戳（方便精准定位回查）</span></label>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Progress Box -->
+        <div class="batch-progress-box" id="batch-progress-box" hidden>
+          <div class="batch-progress-info">
+            <span id="batch-progress-text">准备开始…</span>
+            <span id="batch-progress-percent" class="batch-prog-val">0%</span>
+          </div>
+          <div class="batch-progress-bar-bg">
+            <div class="batch-progress-bar-fill" id="batch-progress-bar-fill"></div>
+          </div>
+          <div class="batch-counters">
+            <div class="batch-counter-item status-ok">
+              <span>成功</span>
+              <strong id="batch-cnt-success">0</strong>
+            </div>
+            <div class="batch-counter-item status-dim">
+              <span>无字幕</span>
+              <strong id="batch-cnt-nosub">0</strong>
+            </div>
+            <div class="batch-counter-item status-err">
+              <span>失败</span>
+              <strong id="batch-cnt-failed">0</strong>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="batch-footer">
+        <div class="batch-footer-actions">
+          <button class="batch-btn batch-btn-primary" id="batch-start-btn">开始批量导出</button>
+          <button class="batch-btn batch-btn-secondary" id="batch-pause-btn" hidden>暂停</button>
+          <button class="batch-btn batch-btn-danger" id="batch-cancel-btn" hidden>取消</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+  <script src="../core/namespace.js"></script>
+  <script src="../core/utils.js"></script>
+  <script src="../core/jszip.js"></script>
+  <script src="../core/i18n.js"></script>
+  <script src="../core/parsers.js"></script>
+  <script src="../core/formatters.js"></script>
+  <script src="../platform/bilibili.js"></script>
+  <script src="../platform/youtube.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

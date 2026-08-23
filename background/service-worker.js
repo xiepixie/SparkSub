@@ -1,0 +1,537 @@
+'use strict';
+
+/** @type {Map<number, import('../types/bse').AppState>} */
+const tabStates = new Map();
+/** @type {Map<number, Array<import('../types/bse').CapturedCaptionRequest>>} */
+const captionRequests = new Map();
+const MAX_REQUESTS_PER_TAB = 24;
+const MAX_PROXY_BODY_BYTES = 5 * 1024 * 1024;
+const BILIBILI_REQUEST_TIMEOUT_MS = 15000;
+
+const BILIBILI_REFERER_RULE_ID = 1001;
+
+async function setupBilibiliNetRules() {
+  if (!chrome.declarativeNetRequest) return;
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [BILIBILI_REFERER_RULE_ID],
+      addRules: [
+        {
+          id: BILIBILI_REFERER_RULE_ID,
+          priority: 1,
+          action: {
+            type: 'modifyHeaders',
+            requestHeaders: [
+              { header: 'Referer', operation: 'set', value: 'https://www.bilibili.com/' },
+              { header: 'Origin', operation: 'set', value: 'https://www.bilibili.com' },
+              { header: 'User-Agent', operation: 'set', value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+            ]
+          },
+          condition: {
+            urlFilter: '*bilivideo.*',
+            resourceTypes: ['xmlhttprequest', 'media', 'other', 'main_frame', 'sub_frame']
+          }
+        }
+      ]
+    });
+  } catch (err) {
+    console.warn('[BSE] 设置 declarativeNetRequest 规则异常:', err);
+  }
+}
+
+if (typeof chrome !== 'undefined' && chrome.runtime) {
+  chrome.runtime.onInstalled?.addListener(setupBilibiliNetRules);
+  chrome.runtime.onStartup?.addListener(setupBilibiliNetRules);
+}
+setupBilibiliNetRules();
+
+function isBilibiliVideoPage(url = '') {
+  try {
+    if (!url) return true;
+    const parsed = new URL(url);
+    return (parsed.protocol === 'https:' || parsed.protocol === 'http:')
+      && (parsed.hostname.endsWith('bilibili.com') || parsed.hostname.endsWith('biliapi.net'));
+  } catch {
+    return true;
+  }
+}
+
+function isAllowedBilibiliResource(url) {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const isAllowedHost = host === 'api.bilibili.com'
+      || host.endsWith('.bilibili.com')
+      || host.endsWith('.biliapi.net')
+      || host.endsWith('.hdslb.com')
+      || host.endsWith('.hdslb.net')
+      || host.endsWith('.bilivideo.com')
+      || host.endsWith('.bilivideo.cn');
+    return (parsed.protocol === 'https:' || parsed.protocol === 'http:') && isAllowedHost;
+  } catch {
+    return false;
+  }
+}
+
+function classifyNetworkError(error) {
+  if (error?.name === 'TimeoutError' || /超时|timeout/i.test(error?.message || '')) return 'TIMEOUT';
+  if (error?.name === 'AbortError') return 'ABORTED';
+  if (error instanceof TypeError) return 'NETWORK_OR_PERMISSION';
+  return 'BACKGROUND_FETCH_FAILED';
+}
+
+async function fetchBilibiliResource(url, sender) {
+  if (sender?.tab?.url && !isBilibiliVideoPage(sender.tab.url)) {
+    return { success: false, error: { code: 'INVALID_SENDER', message: '请求来源不是哔哩哔视频页' } };
+  }
+  if (!isAllowedBilibiliResource(url)) {
+    return { success: false, error: { code: 'HOST_NOT_ALLOWED', message: '字幕资源域名不在扩展白名单中' } };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(new DOMException(`后台请求超时（${BILIBILI_REQUEST_TIMEOUT_MS}ms）`, 'TimeoutError'));
+  }, BILIBILI_REQUEST_TIMEOUT_MS);
+
+  const fetchUrl = String(url).startsWith('http://') ? url.replace(/^http:\/\//i, 'https://') : url;
+  const headers = {
+    Accept: 'application/json,text/plain;q=0.9,*/*;q=0.5',
+    Referer: 'https://www.bilibili.com/'
+  };
+
+  try {
+    let response;
+    try {
+      response = await fetch(fetchUrl, {
+        credentials: 'include',
+        cache: 'no-store',
+        signal: controller.signal,
+        headers
+      });
+    } catch {
+      try {
+        response = await fetch(fetchUrl, {
+          credentials: 'omit',
+          cache: 'no-store',
+          signal: controller.signal,
+          headers
+        });
+      } catch (err2) {
+        if (fetchUrl !== url) {
+          response = await fetch(url, {
+            credentials: 'omit',
+            cache: 'no-store',
+            signal: controller.signal,
+            headers
+          });
+        } else {
+          throw err2;
+        }
+      }
+    }
+    const finalUrl = new URL(response.url || url);
+    if (!isAllowedBilibiliResource(finalUrl.toString())) {
+      return { success: false, error: { code: 'UNSAFE_REDIRECT', message: '字幕请求被重定向到未授权域名' } };
+    }
+
+    const declaredLength = Number(response.headers.get('content-length') || 0);
+    if (declaredLength > MAX_PROXY_BODY_BYTES) {
+      return { success: false, error: { code: 'BODY_TOO_LARGE', message: '字幕响应超过 5 MiB 安全上限' } };
+    }
+    const text = await response.text();
+    if (new Blob([text]).size > MAX_PROXY_BODY_BYTES) {
+      return { success: false, error: { code: 'BODY_TOO_LARGE', message: '字幕响应超过 5 MiB 安全上限' } };
+    }
+    return {
+      success: true,
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      contentType: response.headers.get('content-type') || '',
+      text,
+      endpoint: `${finalUrl.hostname}${finalUrl.pathname}`
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: {
+        code: classifyNetworkError(error),
+        name: error?.name || 'Error',
+        message: error?.message || String(error)
+      }
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isAllowedYouTubeResource(url) {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const isAllowedHost = host === 'www.youtube.com'
+      || host === 'm.youtube.com'
+      || host === 'youtube.com'
+      || host.endsWith('.youtube.com')
+      || host.endsWith('.googlevideo.com');
+    return (parsed.protocol === 'https:' || parsed.protocol === 'http:')
+      && isAllowedHost
+      && (parsed.pathname === '/api/timedtext' || parsed.pathname.includes('timedtext'));
+  } catch {
+    return false;
+  }
+}
+
+async function fetchYouTubeResource(url, sender) {
+  if (!isAllowedYouTubeResource(url)) {
+    return { success: false, error: { code: 'HOST_NOT_ALLOWED', message: 'YouTube 字幕资源地址不在扩展白名单中' } };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(new DOMException('后台请求超时（8000ms）', 'TimeoutError'));
+  }, 8000);
+
+  const fetchUrl = String(url).startsWith('http://') ? url.replace(/^http:\/\//i, 'https://') : url;
+  const headers = {
+    'Accept': '*/*',
+    'Referer': 'https://www.youtube.com/',
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  };
+
+  try {
+    let response;
+    try {
+      response = await fetch(fetchUrl, {
+        credentials: 'include',
+        cache: 'no-store',
+        signal: controller.signal,
+        headers
+      });
+    } catch {
+      response = await fetch(fetchUrl, {
+        credentials: 'omit',
+        cache: 'no-store',
+        signal: controller.signal,
+        headers
+      });
+    }
+
+    const text = await response.text();
+    return {
+      success: true,
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      contentType: response.headers.get('content-type') || '',
+      text
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: {
+        code: classifyNetworkError(error),
+        name: error?.name || 'Error',
+        message: error?.message || String(error)
+      }
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isMatchingVideoUrl(url = '') {
+  return /(^https?:\/\/)(www\.|m\.)?(youtube\.com\/(watch|shorts)|bilibili\.com\/video)/i.test(url);
+}
+
+async function injectContentScripts(tabId, url = '') {
+  if (!tabId || !chrome.scripting) return false;
+  try {
+    const isYouTube = /(^https?:\/\/)(www\.|m\.)?youtube\.com/i.test(url);
+    if (isYouTube) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        files: ['content/main-world-bridge.js']
+      }).catch(() => {});
+    }
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      files: [
+        'core/namespace.js',
+        'core/utils.js',
+        'core/parsers.js',
+        'core/formatters.js',
+        'platform/youtube.js',
+        'platform/bilibili.js',
+        'content/rolling-panel.js',
+        'content/app.js'
+      ]
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  chrome.tabs.query({}).then((tabs) => {
+    for (const tab of tabs) {
+      if (tab.id && isMatchingVideoUrl(tab.url)) {
+        injectContentScripts(tab.id, tab.url).catch(() => {});
+      }
+    }
+  }).catch(() => {});
+});
+
+function parseCaptionRequest(details) {
+  try {
+    const url = new URL(details.url);
+    if (url.pathname !== '/api/timedtext') return null;
+    const videoId = url.searchParams.get('v');
+    if (!videoId) return null;
+    return {
+      url: url.toString(),
+      videoId,
+      lang: url.searchParams.get('lang') || '',
+      kind: url.searchParams.get('kind') || 'manual',
+      fmt: url.searchParams.get('fmt') || '',
+      hasPoToken: url.searchParams.has('pot'),
+      capturedAt: Date.now()
+    };
+  } catch {
+    return null;
+  }
+}
+
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (details.tabId < 0) return;
+    const request = parseCaptionRequest(details);
+    if (!request) return;
+    const list = captionRequests.get(details.tabId) || [];
+    const next = [request, ...list.filter((item) => item.url !== request.url)].slice(0, MAX_REQUESTS_PER_TAB);
+    captionRequests.set(details.tabId, next);
+    chrome.tabs.sendMessage(details.tabId, {
+      type: 'BSE_CAPTION_REQUEST_CAPTURED',
+      request
+    }).catch(() => {});
+  },
+  { urls: ['*://*.youtube.com/api/timedtext*'] }
+);
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  tabStates.delete(tabId);
+  captionRequests.delete(tabId);
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  getTabState(tabId).then((state) => {
+    chrome.runtime.sendMessage({ type: 'BSE_ACTIVE_TAB_CHANGED', tabId, state }).catch(() => {});
+  }).catch(() => {});
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!changeInfo.url) return;
+  const enabled = isMatchingVideoUrl(changeInfo.url);
+  chrome.sidePanel.setOptions({ tabId, path: 'sidepanel/sidepanel.html', enabled }).catch(() => {});
+  if (!enabled) {
+    tabStates.delete(tabId);
+    captionRequests.delete(tabId);
+  }
+});
+
+async function getActiveTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab || null;
+}
+
+async function getTabState(tabId) {
+  if (tabStates.has(tabId)) return tabStates.get(tabId);
+  try {
+    return await chrome.tabs.sendMessage(tabId, { type: 'BSE_GET_STATE' });
+  } catch {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (tab && isMatchingVideoUrl(tab.url)) {
+      const injected = await injectContentScripts(tabId, tab.url);
+      if (injected) {
+        await new Promise((r) => setTimeout(r, 200));
+        return await chrome.tabs.sendMessage(tabId, { type: 'BSE_GET_STATE' }).catch(() => null);
+      }
+    }
+    return null;
+  }
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message?.type) return false;
+
+  if (message.type === 'BSE_STATE_UPDATE' && sender.tab?.id != null) {
+    const previous = tabStates.get(sender.tab.id);
+    if (previous && Number(message.state?.revision || 0) < Number(previous.revision || 0)) {
+      sendResponse({ ok: true, ignored: 'stale_revision' });
+      return false;
+    }
+    tabStates.set(sender.tab.id, message.state);
+    chrome.runtime.sendMessage({
+      type: 'BSE_STATE_BROADCAST',
+      tabId: sender.tab.id,
+      state: message.state
+    }).catch(() => {});
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === 'BSE_PLAYBACK_UPDATE' && sender.tab?.id != null) {
+    const previous = tabStates.get(sender.tab.id);
+    if (previous) {
+      tabStates.set(sender.tab.id, {
+        ...previous,
+        activeIndex: message.activeIndex,
+        currentTime: message.currentTime
+      });
+    }
+    chrome.runtime.sendMessage({
+      type: 'BSE_PLAYBACK_BROADCAST',
+      tabId: sender.tab.id,
+      activeIndex: message.activeIndex,
+      currentTime: message.currentTime
+    }).catch(() => {});
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === 'BSE_GET_CAPTURED_REQUESTS') {
+    const tabId = sender.tab?.id;
+    sendResponse({ requests: tabId == null ? [] : (captionRequests.get(tabId) || []) });
+    return false;
+  }
+
+  if (message.type === 'BSE_FETCH_BILIBILI_RESOURCE') {
+    fetchBilibiliResource(message.url, sender).then(sendResponse).catch((error) => {
+      sendResponse({
+        success: false,
+        error: { code: 'BACKGROUND_FETCH_FAILED', message: error?.message || String(error) }
+      });
+    });
+    return true;
+  }
+
+  if (message.type === 'BSE_FETCH_YOUTUBE_RESOURCE') {
+    fetchYouTubeResource(message.url, sender).then(sendResponse).catch((error) => {
+      sendResponse({
+        success: false,
+        error: { code: 'BACKGROUND_FETCH_FAILED', message: error?.message || String(error) }
+      });
+    });
+    return true;
+  }
+
+  if (message.type === 'BSE_DOWNLOAD_MEDIA_FILE') {
+    (async () => {
+      const { url, filename } = message;
+      if (!isAllowedBilibiliResource(url)) {
+        return { success: false, error: { message: '音频域名不在白名单中' } };
+      }
+      const safeFilename = filename || 'audio.m4a';
+
+      // 方案 1：优先使用 Chrome 原生下载管理器（带 Referer 标头，支持大文件与断点续传）
+      if (typeof chrome !== 'undefined' && chrome.downloads && typeof chrome.downloads.download === 'function') {
+        try {
+          const downloadId = await chrome.downloads.download({
+            url,
+            filename: safeFilename,
+            headers: [
+              { name: 'Referer', value: 'https://www.bilibili.com/' },
+              { name: 'User-Agent', value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+            ],
+            saveAs: false,
+            conflictAction: 'uniquify'
+          });
+          return { success: true, downloadId, method: 'chrome.downloads' };
+        } catch (dlErr) {
+          console.warn('[BSE] chrome.downloads 异常，回退 fetch blob 模式:', dlErr);
+        }
+      }
+
+      // 方案 2：回退 fetch ArrayBuffer 模式
+      const fetchHeaders = {
+        'Referer': 'https://www.bilibili.com/',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      };
+      let response;
+      try {
+        response = await fetch(url, { headers: fetchHeaders, credentials: 'omit', cache: 'no-store' });
+      } catch {
+        const httpsUrl = url.replace(/^http:\/\//i, 'https://');
+        response = await fetch(httpsUrl, { headers: fetchHeaders, credentials: 'omit', cache: 'no-store' });
+      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const buffer = await response.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      const len = bytes.byteLength;
+      const chunkSize = 0x8000;
+      for (let i = 0; i < len; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+      }
+      return {
+        success: true,
+        base64: btoa(binary),
+        size: len,
+        contentType: response.headers.get('content-type') || 'audio/mp4'
+      };
+    })().then(sendResponse).catch((err) => {
+      sendResponse({ success: false, error: { message: err.message || String(err) } });
+    });
+    return true;
+  }
+
+  if (message.type === 'BSE_OPEN_SIDE_PANEL' && sender.tab?.id != null) {
+    chrome.sidePanel.open({ tabId: sender.tab.id })
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_GET_ACTIVE_STATE') {
+    (async () => {
+      const tab = await getActiveTab();
+      if (!tab?.id) return { tab: null, state: null };
+      return { tab: { id: tab.id, url: tab.url, title: tab.title }, state: await getTabState(tab.id) };
+    })().then(sendResponse).catch((error) => sendResponse({ state: null, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_COMMAND_ACTIVE_TAB') {
+    (async () => {
+      const tab = await getActiveTab();
+      if (!tab?.id) throw new Error('没有可用的视频标签页');
+      try {
+        return await chrome.tabs.sendMessage(tab.id, {
+          type: 'BSE_COMMAND',
+          command: message.command,
+          payload: message.payload || {}
+        });
+      } catch (error) {
+        if (/connection|receiving end/i.test(error?.message || '') && isMatchingVideoUrl(tab.url)) {
+          const injected = await injectContentScripts(tab.id, tab.url);
+          if (injected) {
+            await new Promise((r) => setTimeout(r, 250));
+            return await chrome.tabs.sendMessage(tab.id, {
+              type: 'BSE_COMMAND',
+              command: message.command,
+              payload: message.payload || {}
+            });
+          }
+        }
+        throw error;
+      }
+    })().then(sendResponse).catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  return false;
+});

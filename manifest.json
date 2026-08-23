@@ -1,0 +1,73 @@
+{
+  "manifest_version": 3,
+  "name": "SparkSub - 视频字幕助手 (Sparkle Sub)",
+  "version": "0.2.0",
+  "description": "SparkSub: 为 YouTube 和哔哩哔哩提供播放器旁实时滚动字幕、Chrome 独立侧边栏、合集批量导出与 AI 总结工作流。",
+  "minimum_chrome_version": "114",
+  "permissions": [
+    "storage",
+    "webRequest",
+    "declarativeNetRequest",
+    "sidePanel",
+    "scripting",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://m.youtube.com/*",
+    "https://*.bilibili.com/*",
+    "https://*.biliapi.net/*",
+    "https://*.hdslb.com/*",
+    "https://*.hdslb.net/*",
+    "https://*.bilivideo.com/*",
+    "https://*.bilivideo.cn/*",
+    "http://*.hdslb.com/*",
+    "http://*.bilibili.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "action": {
+    "default_title": "打开字幕侧边栏"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://www.youtube.com/watch*",
+        "*://www.youtube.com/shorts/*",
+        "*://m.youtube.com/watch*"
+      ],
+      "js": ["content/main-world-bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "*://www.youtube.com/watch*",
+        "*://www.youtube.com/shorts/*",
+        "*://m.youtube.com/watch*",
+        "*://www.bilibili.com/video/*"
+      ],
+      "js": [
+        "core/namespace.js",
+        "core/utils.js",
+        "core/jszip.js",
+        "core/i18n.js",
+        "core/parsers.js",
+        "core/formatters.js",
+        "platform/youtube.js",
+        "platform/bilibili.js",
+        "content/rolling-panel.js",
+        "content/app.js"
+      ],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}
