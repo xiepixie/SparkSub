@@ -103,6 +103,7 @@
     tabTracker: document.querySelector('#tab-tracker'),
     trackerUnreadBadge: document.querySelector('#tracker-unread-badge'),
     trackerSection: document.querySelector('#tracker-section'),
+    trackerQuickBar: document.querySelector('#tracker-quick-bar'),
     trackerCurrentSource: document.querySelector('#tracker-current-source'),
     trackerCurrentAuthor: document.querySelector('#tracker-current-author'),
     trackerSubscribeUpBtn: document.querySelector('#tracker-subscribe-up-btn'),
@@ -256,6 +257,12 @@
   }
 
   async function detectCurrentVideoAuthorInfo() {
+    if (!state || !state.mediaKey) {
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'BSE_GET_ACTIVE_STATE' });
+        if (res?.state) state = res.state;
+      } catch {}
+    }
     if (!state) return null;
     const platform = state.platform;
     const url = state.url || '';
@@ -311,8 +318,8 @@
               type: 'up',
               title: owner.name || 'B站 UP 主',
               upName: owner.name || 'UP主',
-              mid: String(owner.mid || ''),
-              targetId: String(owner.mid || ''),
+              mid: String(owner.mid || bvid),
+              targetId: String(owner.mid || bvid),
               avatar: owner.face || '',
               seasonId: ugc?.id || ugc?.season_id ? String(ugc.id || ugc.season_id) : null,
               seasonTitle: ugc?.title || null,
@@ -325,12 +332,12 @@
       return {
         platform: 'bilibili',
         type: 'up',
-        title: state.title || 'B站视频',
+        title: state.title || `B站视频 (${bvid})`,
         upName: state.authorInfo?.name || 'B站 UP 主',
-        mid: state.authorInfo?.mid || '',
-        targetId: state.authorInfo?.targetId || '',
+        mid: state.authorInfo?.mid || bvid,
+        targetId: state.authorInfo?.targetId || bvid,
         avatar: '',
-        videoTitle: state.title || ''
+        videoTitle: state.title || `B站视频 (${bvid})`
       };
     }
 
@@ -346,7 +353,7 @@
         type: 'channel',
         title: state.title || 'YouTube 视频',
         upName: state.authorInfo?.name || 'YouTube 频道',
-        targetId: state.authorInfo?.targetId || videoId || '',
+        targetId: state.authorInfo?.targetId || videoId || 'youtube_channel',
         avatar: state.authorInfo?.avatar || '',
         videoTitle: state.title || ''
       };
