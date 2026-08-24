@@ -448,21 +448,40 @@
             author: v.author || sub.author || ''
           }));
         } else if (type === 'season') {
-          // B站 专区/合集增量查询
-          const seasonId = encodeURIComponent(sub.targetId);
-          const mid = encodeURIComponent(sub.author || '');
-          const url = `https://api.bilibili.com/x/polymer/web-space/seasons_archives_list?mid=${mid}&season_id=${seasonId}&page_num=1&page_size=20`;
-          const resp = await BSE.Utils.fetchWithTimeout(url, { signal, credentials: 'include' }, 6000);
-          const resJson = await resp.json();
-          const archives = resJson?.data?.archives || [];
-          fetchedItems = archives.map((v) => ({
-            id: v.bvid,
-            title: String(v.title || '').trim(),
-            url: `https://www.bilibili.com/video/${v.bvid}`,
-            pubdate: (Number(v.pubdate) || 0) * 1000,
-            duration: Number(v.duration) || 0,
-            author: sub.title || ''
-          }));
+          // B站 专区/合集与分P连载增量查询
+          const targetId = String(sub.targetId || '').trim();
+          if (/^BV[a-zA-Z0-9]+/i.test(targetId)) {
+            // 多P分集连载检查
+            const resp = await BSE.Utils.fetchWithTimeout(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(targetId)}`, { signal }, 6000);
+            const resJson = await resp.json();
+            const pages = resJson?.data?.pages || [];
+            fetchedItems = pages.map((p) => ({
+              id: `${targetId}:p${p.page}`,
+              title: p.part || `第${p.page}P`,
+              url: `https://www.bilibili.com/video/${targetId}?p=${p.page}`,
+              pubdate: Date.now(),
+              duration: Number(p.duration) || 0,
+              author: sub.title || ''
+            }));
+          } else {
+            // UGC 合集/系列增量检查
+            const seasonId = encodeURIComponent(targetId);
+            const mid = encodeURIComponent(sub.author || '');
+            const url = mid
+              ? `https://api.bilibili.com/x/polymer/web-space/seasons_archives_list?mid=${mid}&season_id=${seasonId}&page_num=1&page_size=20`
+              : `https://api.bilibili.com/x/v2/medialist/resource/list?type=1&oid=${seasonId}&ps=20`;
+            const resp = await BSE.Utils.fetchWithTimeout(url, { signal, credentials: 'include' }, 6000);
+            const resJson = await resp.json();
+            const archives = resJson?.data?.archives || resJson?.data?.media_list || [];
+            fetchedItems = archives.map((v) => ({
+              id: v.bvid || (v.bv_id ? v.bv_id : `aid:${v.id}`),
+              title: String(v.title || '').trim(),
+              url: `https://www.bilibili.com/video/${v.bvid || v.bv_id || ''}`,
+              pubdate: (Number(v.pubdate) || 0) * 1000,
+              duration: Number(v.duration) || 0,
+              author: sub.title || ''
+            }));
+          }
         }
       } else if (platform === BSE.PLATFORM.YOUTUBE) {
         // YouTube 官方无鉴权 RSS 订阅流查询

@@ -107,14 +107,14 @@
           if (match) mid = match[1];
         }
 
-        const seasonTitleElem = document.querySelector('.video-sections-head_title, .cur-list-title, .season-title');
+        const seasonTitleElem = document.querySelector('.video-sections-head_title, .cur-list-title, .season-title, .bili-video-pod__title, .bili-video-pod__header .title');
         let seasonTitle = seasonTitleElem?.textContent?.trim() || null;
         let seasonId = null;
 
-        const seasonLink = document.querySelector('.video-sections-head a, .cur-list-title a, a[href*="ugc_season"]');
+        const seasonLink = document.querySelector('.video-sections-head a, .cur-list-title a, a[href*="ugc_season"], a[href*="channel/collectiondetail"], a[href*="channel/seriesdetail"], .bili-video-pod a');
         if (seasonLink?.href) {
-          const sMatch = seasonLink.href.match(/season_id=(\d+)|ugc_season\/(\d+)|mid=\d+&sid=(\d+)/);
-          if (sMatch) seasonId = sMatch[1] || sMatch[2] || sMatch[3];
+          const sMatch = seasonLink.href.match(/season_id=(\d+)|ugc_season\/(\d+)|sid=(\d+)|collectiondetail\?sid=(\d+)|seriesdetail\?sid=(\d+)/i);
+          if (sMatch) seasonId = sMatch[1] || sMatch[2] || sMatch[3] || sMatch[4] || sMatch[5];
         }
 
         return {

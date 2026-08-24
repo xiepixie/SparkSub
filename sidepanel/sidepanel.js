@@ -267,8 +267,8 @@
     const platform = state.platform;
     const url = state.url || '';
 
-    // 1. 如果已通过 content script 提取到了 authorInfo，优先复用
-    if (state.authorInfo && state.authorInfo.name && state.authorInfo.targetId) {
+    // 1. 如果已通过 content script 提取到了完整 authorInfo（包含合集），优先复用
+    if (state.authorInfo && state.authorInfo.name && state.authorInfo.targetId && state.authorInfo.seasonId) {
       return {
         platform,
         type: platform === 'youtube' ? 'channel' : 'up',
@@ -277,67 +277,74 @@
         mid: state.authorInfo.mid || state.authorInfo.targetId,
         targetId: state.authorInfo.targetId,
         avatar: state.authorInfo.avatar || '',
-        seasonId: state.authorInfo.seasonId || null,
-        seasonTitle: state.authorInfo.seasonTitle || null,
+        seasonId: state.authorInfo.seasonId,
+        seasonTitle: state.authorInfo.seasonTitle || '视频合集',
         videoTitle: state.title || ''
       };
     }
 
-    // 2. B 站视频：多通道提取 BV 号并调用后台代理接口获取精准 UP 主与合集
+    // 2. B 站视频：多通道提取 BV 号并调用后台代理接口获取精准 UP 主与合集/系列/分P
     if (platform === 'bilibili') {
       let bvid = BSE.Utils.getBvid(url);
       if (!bvid && state.mediaKey) {
         const match = state.mediaKey.match(/bili:(BV[a-zA-Z0-9]+)/i);
         if (match) bvid = match[1];
       }
-      if (!bvid) {
-        return {
-          platform: 'bilibili',
-          type: 'up',
-          title: state.title || 'B站视频',
-          upName: state.authorInfo?.name || 'B站 UP 主',
-          mid: state.authorInfo?.mid || '',
-          targetId: state.authorInfo?.targetId || '',
-          avatar: '',
-          videoTitle: state.title || ''
-        };
+
+      let owner = {};
+      let ugc = null;
+      let pages = [];
+      let videoTitle = state.title || '';
+
+      if (bvid) {
+        try {
+          const bgRes = await chrome.runtime.sendMessage({
+            type: 'BSE_FETCH_BILIBILI_RESOURCE',
+            url: `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`
+          });
+          if (bgRes?.success && bgRes?.text) {
+            const json = JSON.parse(bgRes.text);
+            if (json?.code === 0 && json?.data) {
+              owner = json.data.owner || {};
+              ugc = json.data.ugc_season;
+              pages = json.data.pages || [];
+              if (json.data.title) videoTitle = json.data.title;
+            }
+          }
+        } catch (err) {
+          console.warn('[BSE Tracker] 后台获取 B站 view 接口异常:', err);
+        }
       }
 
-      try {
-        const bgRes = await chrome.runtime.sendMessage({
-          type: 'BSE_FETCH_BILIBILI_RESOURCE',
-          url: `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`
-        });
-        if (bgRes?.success && bgRes?.text) {
-          const json = JSON.parse(bgRes.text);
-          if (json?.code === 0 && json?.data) {
-            const owner = json.data.owner || {};
-            const ugc = json.data.ugc_season;
-            return {
-              platform: 'bilibili',
-              type: 'up',
-              title: owner.name || 'B站 UP 主',
-              upName: owner.name || 'UP主',
-              mid: String(owner.mid || bvid),
-              targetId: String(owner.mid || bvid),
-              avatar: owner.face || '',
-              seasonId: ugc?.id || ugc?.season_id ? String(ugc.id || ugc.season_id) : null,
-              seasonTitle: ugc?.title || null,
-              videoTitle: json.data.title || state.title || ''
-            };
-          }
-        }
-      } catch {}
+      const upName = owner.name || state.authorInfo?.name || 'B站 UP 主';
+      const mid = String(owner.mid || state.authorInfo?.mid || state.authorInfo?.targetId || bvid || '');
+      const avatar = owner.face || state.authorInfo?.avatar || '';
+
+      let seasonId = null;
+      let seasonTitle = null;
+
+      if (ugc && (ugc.id || ugc.season_id)) {
+        seasonId = String(ugc.id || ugc.season_id);
+        seasonTitle = ugc.title || '视频合集';
+      } else if (state.authorInfo?.seasonId) {
+        seasonId = state.authorInfo.seasonId;
+        seasonTitle = state.authorInfo.seasonTitle || '视频合集';
+      } else if (pages.length > 1) {
+        seasonId = bvid;
+        seasonTitle = `${videoTitle || '分P连载'} (共${pages.length}P)`;
+      }
 
       return {
         platform: 'bilibili',
         type: 'up',
-        title: state.title || `B站视频 (${bvid})`,
-        upName: state.authorInfo?.name || 'B站 UP 主',
-        mid: state.authorInfo?.mid || bvid,
-        targetId: state.authorInfo?.targetId || bvid,
-        avatar: '',
-        videoTitle: state.title || `B站视频 (${bvid})`
+        title: upName,
+        upName,
+        mid,
+        targetId: mid,
+        avatar,
+        seasonId,
+        seasonTitle,
+        videoTitle
       };
     }
 
