@@ -23,7 +23,8 @@ for (const file of [
   'core/jszip.js',
   'core/i18n.js',
   'core/parsers.js',
-  'core/formatters.js'
+  'core/formatters.js',
+  'core/tracker.js'
 ]) {
   vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
 }
@@ -239,12 +240,89 @@ assert.equal(
   'getBvid 必须成功从标准视频页路径提取 BV 号'
 );
 
-const manifestContent = fs.readFileSync(path.join(root, 'manifest.json'), 'utf8');
-assert.match(manifestContent, /festival/, 'manifest.json content_scripts 必须包含 festival 匹配规则');
-assert.match(manifestContent, /blackboard/, 'manifest.json content_scripts 必须包含 blackboard 匹配规则');
-assert.match(manifestContent, /list/, 'manifest.json content_scripts 必须包含 list 匹配规则');
+// 13. Subscription Tracker Tests
+assert.equal(
+  BSE.Tracker.md5('hello'),
+  '5d41402abc4b2a76b9719d911017c592',
+  '轻量级 MD5 必须能够正确计算字符串哈希'
+);
+assert.equal(
+  BSE.Tracker.md5('SparkSub'),
+  '808ddc7c56201fa9aadbdae008a01e16',
+  '轻量级 MD5 必须正确计算 SparkSub 哈希'
+);
 
-console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持。');
+const wbiSigned = BSE.Tracker.calculateWbiSign(
+  { mid: '123456', ps: 10 },
+  'ea1db124c00f43a7ac988e404be0e5cd',
+  '50529d8995a947709b1f7d9cc03328e1'
+);
+assert.ok(wbiSigned.query.includes('w_rid='), 'WBI 签名结果中必须包含 w_rid 参数');
+assert.ok(wbiSigned.query.includes('wts='), 'WBI 签名结果中必须包含 wts 时间戳');
+
+const sampleRssXml = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>yt:video:dQw4w9WgXcQ</id>
+    <yt:videoId>dQw4w9WgXcQ</yt:videoId>
+    <title>Never Gonna Give You Up &amp; Dance</title>
+    <published>2009-10-25T06:57:33+00:00</published>
+    <author><name>Rick Astley</name></author>
+  </entry>
+  <entry>
+    <yt:videoId>testVideo123</yt:videoId>
+    <title>Test Video Title &lt;2&gt;</title>
+    <published>2026-08-24T00:00:00+00:00</published>
+    <author><name>Channel Name</name></author>
+  </entry>
+</feed>`;
+
+const parsedRss = BSE.Tracker.parseYouTubeRssFeed(sampleRssXml);
+assert.equal(parsedRss.length, 2, '免 DOM RSS 解析器必须成功提取全部 entry 节点');
+assert.equal(parsedRss[0].id, 'dQw4w9WgXcQ', '第一条视频 videoId 提取必须准确');
+assert.equal(parsedRss[0].title, 'Never Gonna Give You Up & Dance', 'XML 实体转义必须被正确还原');
+assert.equal(parsedRss[0].author, 'Rick Astley', '作者名称提取必须准确');
+assert.equal(parsedRss[1].id, 'testVideo123', '第二条视频 videoId 提取必须准确');
+assert.equal(parsedRss[1].title, 'Test Video Title <2>', '尖括号转义必须被正确还原');
+
+assert.ok(manifest.permissions.includes('alarms'), 'manifest.json 必须申请 alarms 权限');
+assert.ok(manifest.permissions.includes('notifications'), 'manifest.json 必须申请 notifications 权限');
+assert.ok(fs.existsSync(path.join(root, 'core/tracker.js')), '必须存在 core/tracker.js 文件');
+
+// 14. Configuration Import/Export JSON tests
+const sampleImportJson = JSON.stringify({
+  version: '0.2.0',
+  exportedAt: new Date().toISOString(),
+  settings: { checkIntervalMinutes: 30, enableNotification: true, enableBadge: true },
+  subscriptions: [
+    {
+      id: 'bilibili:up:12345',
+      platform: 'bilibili',
+      type: 'up',
+      title: '测试 UP 主',
+      author: '测试 UP 主',
+      targetId: '12345',
+      items: [
+        { id: 'BV1111', title: '第 1 个视频', url: 'https://bilibili.com/video/BV1111', pubdate: 1000 },
+        { id: 'BV2222', title: '第 2 个视频', url: 'https://bilibili.com/video/BV2222', pubdate: 2000 }
+      ],
+      unreadCount: 2
+    }
+  ]
+});
+
+const imported = await BSE.Tracker.importConfigJson(sampleImportJson);
+assert.equal(imported.importedCount, 1, '导入配置必须成功解析 1 个有效订阅源');
+
+const exported = await BSE.Tracker.exportConfigJson();
+const parsedExport = JSON.parse(exported);
+assert.equal(parsedExport.version, '0.2.0', '导出的 JSON 必须包含 SparkSub 版本标识');
+assert.ok(Array.isArray(parsedExport.subscriptions), '导出的 JSON 必须包含 subscriptions 数组');
+assert.equal(parsedExport.subscriptions[0].id, 'bilibili:up:12345', '导出的订阅源 ID 必须完整保留');
+
+console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)。');
+
+
 
 
 

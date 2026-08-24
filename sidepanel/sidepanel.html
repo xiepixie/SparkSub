@@ -65,6 +65,27 @@
             <option value="16.5">大 (16.5px)</option>
           </select>
         </div>
+        <div class="drawer-card">
+          <span class="drawer-card-label">巡检周期</span>
+          <select id="tracker-interval-select" class="drawer-select" aria-label="订阅巡检周期">
+            <option value="30">每 30 分钟</option>
+            <option value="60" selected>每 1 小时 (推荐)</option>
+            <option value="180">每 3 小时</option>
+            <option value="0">仅手动刷新</option>
+          </select>
+        </div>
+        <div class="drawer-card">
+          <span class="drawer-card-label">桌面通知</span>
+          <select id="tracker-notify-select" class="drawer-select" aria-label="更新桌面通知">
+            <option value="true" selected>🔔 开启桌面通知</option>
+            <option value="false">🔕 仅角标红点</option>
+          </select>
+        </div>
+      </div>
+      <div class="drawer-footer-actions">
+        <button class="drawer-action-btn" id="tracker-export-btn" title="导出所有订阅为 JSON 备份">📤 导出订阅配置</button>
+        <button class="drawer-action-btn" id="tracker-import-btn" title="从 JSON 导入订阅">📥 导入订阅配置</button>
+        <input type="file" id="tracker-import-file" accept=".json" hidden>
       </div>
     </section>
 
@@ -99,6 +120,10 @@
       <button class="tab-btn active" data-tab="timestamp" id="tab-timestamp">带时间戳</button>
       <button class="tab-btn" data-tab="plain" id="tab-plain">纯文本</button>
       <button class="tab-btn" data-tab="ai" id="tab-ai">AI 总结</button>
+      <button class="tab-btn tab-tracker" data-tab="tracker" id="tab-tracker">
+        <span>🔔 追踪中心</span>
+        <span class="tracker-badge" id="tracker-unread-badge" hidden>0</span>
+      </button>
     </nav>
 
     <!-- Toolbar: Search & Action Bar -->
@@ -156,6 +181,41 @@
           </div>
           <p class="ai-card-desc">生成概念辨析、推导动机与易错边界思考题</p>
         </button>
+      </div>
+    </section>
+
+    <!-- Subscriptions & Tracker View -->
+    <section class="tracker-section" id="tracker-section" hidden>
+      <div class="tracker-quick-bar" id="tracker-quick-bar">
+        <div class="tracker-quick-info">
+          <span class="tracker-quick-label">当前播放源：</span>
+          <span class="tracker-quick-title" id="tracker-current-source">等待视频…</span>
+        </div>
+        <div class="tracker-quick-actions">
+          <button class="tracker-btn-pill" id="tracker-subscribe-up-btn" disabled>+ 关注 UP 主</button>
+          <button class="tracker-btn-pill" id="tracker-subscribe-season-btn" hidden>+ 订阅本合集</button>
+        </div>
+      </div>
+
+      <div class="tracker-toolbar">
+        <div class="tracker-filter-group">
+          <button class="tracker-filter-btn active" data-filter="all" id="tracker-filter-all">全部 (<span id="tracker-cnt-all">0</span>)</button>
+          <button class="tracker-filter-btn" data-filter="unread" id="tracker-filter-unread">未读更新 (<span id="tracker-cnt-unread">0</span>)</button>
+        </div>
+        <div class="tracker-tools">
+          <button class="tracker-tool-btn" id="tracker-check-all-btn" title="立即检查全量更新">🔄 刷新</button>
+          <button class="tracker-tool-btn" id="tracker-read-all-btn" title="全部标记为已读">✓ 已读</button>
+        </div>
+      </div>
+
+      <div class="tracker-list" id="tracker-list">
+        <!-- Dynamic Subscription Cards Injected Here -->
+      </div>
+
+      <div class="tracker-empty" id="tracker-empty">
+        <div class="tracker-empty-icon">📭</div>
+        <p class="tracker-empty-title">暂无关注的 UP 主或课程合集</p>
+        <p class="tracker-empty-desc">在任意视频播放页，点击上方的「关注 UP 主」或「订阅本合集」即可开启自动更新追踪与新集提醒！</p>
       </div>
     </section>
 
@@ -331,6 +391,7 @@
   <script src="../core/formatters.js"></script>
   <script src="../platform/bilibili.js"></script>
   <script src="../platform/youtube.js"></script>
+  <script src="../core/tracker.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

@@ -243,6 +243,58 @@ export interface BSEI18nNamespace {
   formatTimeSpan(seconds: number): string;
 }
 
+export interface TrackedItem {
+  id: string;
+  title: string;
+  url: string;
+  pubdate?: number;
+  duration?: number;
+  author?: string;
+  hasSubtitle?: boolean;
+}
+
+export interface TrackedSubscription {
+  id: string;
+  platform: Platform;
+  type: 'up' | 'season' | 'channel';
+  title: string;
+  author?: string;
+  avatar?: string;
+  targetId: string;
+  sourceUrl?: string;
+  subscribedAt: number;
+  lastCheckedAt: number;
+  lastUpdatedItemId?: string;
+  lastUpdatedTitle?: string;
+  unreadCount: number;
+  items: TrackedItem[];
+  autoExtractSubtitle?: boolean;
+}
+
+export interface TrackerSettings {
+  checkIntervalMinutes: number;
+  enableNotification: boolean;
+  enableBadge: boolean;
+  autoExtractSubtitles: boolean;
+}
+
+export interface BSETrackerNamespace {
+  getSubscriptions(): Promise<TrackedSubscription[]>;
+  getSubscription(id: string): Promise<TrackedSubscription | null>;
+  addSubscription(sub: Partial<TrackedSubscription>): Promise<TrackedSubscription>;
+  removeSubscription(id: string): Promise<boolean>;
+  markAsRead(subscriptionId: string, itemId?: string): Promise<void>;
+  markAllAsRead(): Promise<void>;
+  getSettings(): Promise<TrackerSettings>;
+  saveSettings(settings: Partial<TrackerSettings>): Promise<TrackerSettings>;
+  checkSubscriptionUpdates(sub: TrackedSubscription, options?: { signal?: AbortSignal }): Promise<{ updated: boolean; newItems: TrackedItem[] }>;
+  checkAllUpdates(): Promise<{ totalUnread: number; updatedSubs: string[] }>;
+  exportConfigJson(): Promise<string>;
+  importConfigJson(jsonStr: string): Promise<{ importedCount: number; totalCount: number }>;
+  parseYouTubeRssFeed(xmlText: string): TrackedItem[];
+  calculateWbiSign(params: Record<string, any>, imgKey: string, subKey: string): { params: Record<string, any>; query: string };
+}
+
 export interface BSENamespace {
   VERSION: string;
   PLATFORM: {
@@ -252,6 +304,7 @@ export interface BSENamespace {
   Utils: BSEUtilsNamespace;
   Parsers: BSEParsersNamespace;
   Formatters: BSEFormattersNamespace;
+  Tracker?: BSETrackerNamespace;
   YouTube: BSEPlatformNamespace;
   Bilibili: BSEPlatformNamespace;
   I18n?: BSEI18nNamespace;

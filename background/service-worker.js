@@ -1,5 +1,11 @@
 'use strict';
 
+try {
+  importScripts('../core/namespace.js', '../core/utils.js', '../core/tracker.js');
+} catch (e) {
+  console.warn('[BSE Worker] importScripts 异常:', e);
+}
+
 /** @type {Map<number, import('../types/bse').AppState>} */
 const tabStates = new Map();
 /** @type {Map<number, Array<import('../types/bse').CapturedCaptionRequest>>} */
@@ -9,6 +15,42 @@ const MAX_PROXY_BODY_BYTES = 5 * 1024 * 1024;
 const BILIBILI_REQUEST_TIMEOUT_MS = 15000;
 
 const BILIBILI_REFERER_RULE_ID = 1001;
+const ALARM_SUBSCRIPTION_CHECK = 'BSE_SUBSCRIPTION_CHECK';
+
+async function updateBadgeFromUnread() {
+  try {
+    const subs = await BSE.Tracker?.getSubscriptions?.() || [];
+    const totalUnread = subs.reduce((sum, s) => sum + (s.unreadCount || 0), 0);
+    const settings = await BSE.Tracker?.getSettings?.() || { enableBadge: true };
+
+    if (chrome.action) {
+      if (settings.enableBadge && totalUnread > 0) {
+        await chrome.action.setBadgeText({ text: totalUnread > 99 ? '99+' : String(totalUnread) });
+        await chrome.action.setBadgeBackgroundColor({ color: '#00AEEC' });
+      } else {
+        await chrome.action.setBadgeText({ text: '' });
+      }
+    }
+  } catch {}
+}
+
+async function setupSubscriptionAlarm() {
+  if (!chrome.alarms) return;
+  try {
+    const settings = await BSE.Tracker?.getSettings?.() || { checkIntervalMinutes: 60 };
+    const periodInMinutes = Number(settings.checkIntervalMinutes) || 60;
+    if (periodInMinutes <= 0) {
+      await chrome.alarms.clear(ALARM_SUBSCRIPTION_CHECK);
+      return;
+    }
+    await chrome.alarms.create(ALARM_SUBSCRIPTION_CHECK, {
+      periodInMinutes,
+      delayInMinutes: 1
+    });
+  } catch (err) {
+    console.warn('[BSE Tracker] 设置巡检闹钟异常:', err);
+  }
+}
 
 async function setupBilibiliNetRules() {
   if (!chrome.declarativeNetRequest) return;
@@ -270,6 +312,7 @@ async function injectContentScripts(tabId, url = '') {
         'core/i18n.js',
         'core/parsers.js',
         'core/formatters.js',
+        'core/tracker.js',
         'platform/youtube.js',
         'platform/bilibili.js',
         'content/rolling-panel.js',
@@ -284,6 +327,9 @@ async function injectContentScripts(tabId, url = '') {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  setupBilibiliNetRules().catch(() => {});
+  setupSubscriptionAlarm().catch(() => {});
+  updateBadgeFromUnread().catch(() => {});
   chrome.tabs.query({}).then((tabs) => {
     for (const tab of tabs) {
       if (tab.id && isMatchingVideoUrl(tab.url)) {
@@ -292,6 +338,30 @@ chrome.runtime.onInstalled.addListener(() => {
     }
   }).catch(() => {});
 });
+
+if (chrome.alarms?.onAlarm) {
+  chrome.alarms.onAlarm.addListener(async (alarm) => {
+    if (alarm.name === ALARM_SUBSCRIPTION_CHECK) {
+      try {
+        const { totalUnread, updatedSubs } = await BSE.Tracker?.checkAllUpdates?.() || { totalUnread: 0, updatedSubs: [] };
+        await updateBadgeFromUnread();
+
+        const settings = await BSE.Tracker?.getSettings?.() || { enableNotification: true };
+        if (settings.enableNotification && updatedSubs && updatedSubs.length > 0 && chrome.notifications) {
+          chrome.notifications.create({
+            type: 'basic',
+            iconUrl: 'assets/icon128.png',
+            title: 'SparkSub: 您关注的UP主/合集有更新',
+            message: updatedSubs.slice(0, 3).join('\n'),
+            priority: 1
+          });
+        }
+      } catch (err) {
+        console.warn('[BSE Tracker] 增量巡检任务异常:', err);
+      }
+    }
+  });
+}
 
 function parseCaptionRequest(details) {
   try {
@@ -537,6 +607,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         throw error;
       }
     })().then(sendResponse).catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_TRACKER_UPDATE_BADGE') {
+    updateBadgeFromUnread().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+
+  if (message.type === 'BSE_TRACKER_RESET_ALARM') {
+    setupSubscriptionAlarm().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+
+  if (message.type === 'BSE_TRACKER_CHECK_NOW') {
+    (async () => {
+      const result = await BSE.Tracker?.checkAllUpdates?.() || { totalUnread: 0, updatedSubs: [] };
+      await updateBadgeFromUnread();
+      return result;
+    })().then(sendResponse).catch((err) => sendResponse({ error: err.message }));
     return true;
   }
 

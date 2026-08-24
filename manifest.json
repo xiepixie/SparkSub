@@ -6,6 +6,8 @@
   "minimum_chrome_version": "114",
   "permissions": [
     "storage",
+    "alarms",
+    "notifications",
     "webRequest",
     "declarativeNetRequest",
     "sidePanel",
@@ -63,6 +65,7 @@
         "core/i18n.js",
         "core/parsers.js",
         "core/formatters.js",
+        "core/tracker.js",
         "platform/youtube.js",
         "platform/bilibili.js",
         "content/rolling-panel.js",
