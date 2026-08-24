@@ -252,6 +252,17 @@ export interface BSEI18nNamespace {
   formatTimeSpan(seconds: number): string;
 }
 
+export interface TrackedItemSubtitle {
+  status: 'ready' | 'pending' | 'not_found' | 'error';
+  language?: string;
+  langDoc?: string;
+  cueCount?: number;
+  fetchedAt?: number;
+  plainText?: string;
+  markdown?: string;
+  errorHint?: string;
+}
+
 export interface TrackedItem {
   id: string;
   title: string;
@@ -260,6 +271,8 @@ export interface TrackedItem {
   duration?: number;
   author?: string;
   hasSubtitle?: boolean;
+  cid?: string | number;
+  subtitle?: TrackedItemSubtitle | null;
 }
 
 export interface TrackedSubscription {
@@ -298,6 +311,9 @@ export interface BSETrackerNamespace {
   saveSettings(settings: Partial<TrackerSettings>): Promise<TrackerSettings>;
   checkSubscriptionUpdates(sub: TrackedSubscription, options?: { signal?: AbortSignal }): Promise<{ updated: boolean; newItems: TrackedItem[] }>;
   checkAllUpdates(): Promise<{ totalUnread: number; updatedSubs: string[] }>;
+  fetchItemSubtitle(item: TrackedItem, options?: { signal?: AbortSignal }): Promise<TrackedItemSubtitle>;
+  fetchSubtitleForItem(subscriptionId: string, itemId: string): Promise<TrackedItemSubtitle>;
+  exportMergedMarkdown(items: TrackedItem[]): string;
   exportConfigJson(): Promise<string>;
   importConfigJson(jsonStr: string): Promise<{ importedCount: number; totalCount: number }>;
   parseYouTubeRssFeed(xmlText: string): TrackedItem[];

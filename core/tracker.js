@@ -503,9 +503,22 @@
     }
 
     const existingIds = new Set((sub.items || []).map((item) => item.id));
-    const newItems = fetchedItems.filter((item) => !existingIds.has(item.id));
-
     if (newItems.length > 0) {
+      // 自动在后台拉取新视频的字幕并缓存
+      try {
+        const settings = await getSettings();
+        if (settings.autoExtractSubtitles !== false) {
+          for (const item of newItems) {
+            try {
+              item.subtitle = { status: 'pending' };
+              const subRes = await fetchItemSubtitle(item, options);
+              item.subtitle = subRes;
+              item.hasSubtitle = subRes.status === 'ready';
+            } catch {}
+          }
+        }
+      } catch {}
+
       // 合并并截断为最近 MAX_HISTORY_PER_SUB 条
       const merged = [...newItems, ...(sub.items || [])].slice(0, MAX_HISTORY_PER_SUB);
       sub.items = merged;
@@ -518,6 +531,185 @@
 
     sub.lastCheckedAt = Date.now();
     return { updated: false, newItems: [] };
+  }
+
+  function formatCuesToMarkdown(title, author, url, cues) {
+    const lines = [];
+    lines.push(`# ${title || '视频字幕'}`);
+    lines.push('');
+    lines.push(`- **来源作者**: ${author || 'UP主'}`);
+    if (url) lines.push(`- **视频链接**: [${url}](${url})`);
+    lines.push(`- **提取时间**: ${new Date().toLocaleString()}`);
+    lines.push(`- **字幕行数**: ${cues.length} 行`);
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+
+    let currentParagraph = [];
+    let startTimestamp = null;
+    let endTimestamp = null;
+
+    cues.forEach((c, idx) => {
+      const from = Number(c.from || 0);
+      const to = Number(c.to || 0);
+      const text = String(c.content || '').trim();
+      if (!text) return;
+
+      if (startTimestamp === null) startTimestamp = from;
+      endTimestamp = to;
+      currentParagraph.push(text);
+
+      const isLast = idx === cues.length - 1;
+      const next = cues[idx + 1];
+      const gap = next ? Number(next.from || 0) - to : 0;
+
+      if (isLast || currentParagraph.length >= 4 || gap > 3.0 || /[。？！?!]$/.test(text)) {
+        const timeHeader = `### [${BSE.Utils.formatClock(startTimestamp)} - ${BSE.Utils.formatClock(endTimestamp)}]`;
+        lines.push(timeHeader);
+        lines.push('');
+        lines.push(currentParagraph.join(' '));
+        lines.push('');
+        currentParagraph = [];
+        startTimestamp = null;
+      }
+    });
+
+    return lines.join('\n');
+  }
+
+  async function fetchItemSubtitle(item, options = {}) {
+    const signal = options.signal;
+    if (!item) return { status: 'error', errorHint: '无效条目' };
+
+    const bvidMatch = (item.id || item.url || '').match(/BV[a-zA-Z0-9]+/i);
+    const bvid = bvidMatch ? bvidMatch[0] : null;
+
+    if (bvid) {
+      try {
+        let cid = item.cid;
+        let viewTitle = item.title;
+
+        // 1. 若无 cid，请求 view 接口定位 cid
+        if (!cid) {
+          const viewResp = await BSE.Utils.fetchWithTimeout(
+            `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
+            { signal },
+            6000
+          );
+          const viewJson = await viewResp.json();
+          if (viewJson?.code === 0 && viewJson?.data) {
+            viewTitle = viewJson.data.title || item.title;
+            const pageMatch = String(item.id || item.url || '').match(/[?&]p=(\d+)|:p(\d+)/i);
+            const pageNum = pageMatch ? parseInt(pageMatch[1] || pageMatch[2], 10) : 1;
+            const targetPage = (viewJson.data.pages || []).find((p) => p.page === pageNum) || viewJson.data.pages?.[0];
+            cid = targetPage?.cid || viewJson.data.cid;
+          }
+        }
+
+        if (!cid) {
+          return { status: 'not_found', errorHint: '无法定位视频分P CID', fetchedAt: Date.now() };
+        }
+
+        // 2. 调用 WBI 播放器接口提取字幕列表
+        const { imgKey, subKey } = await fetchBilibiliNavWbiKeys(signal);
+        const signed = calculateWbiSign({ bvid, cid }, imgKey, subKey);
+        const playerResp = await BSE.Utils.fetchWithTimeout(
+          `https://api.bilibili.com/x/player/wbi/v2?${signed.query}`,
+          { signal, credentials: 'include' },
+          6000
+        );
+        const playerJson = await playerResp.json();
+        const subtitles = playerJson?.data?.subtitle?.subtitles || [];
+
+        if (!subtitles.length) {
+          return { status: 'not_found', errorHint: '该视频暂无官方字幕轨道', fetchedAt: Date.now() };
+        }
+
+        // 优先中文字幕
+        const chosenSub = subtitles.find((s) => /zh|cn|中/i.test(s.lan || s.lan_doc || '')) || subtitles[0];
+        let subUrl = chosenSub.subtitle_url || chosenSub.url || '';
+        if (subUrl.startsWith('//')) subUrl = `https:${subUrl}`;
+        else if (subUrl.startsWith('http://')) subUrl = subUrl.replace(/^http:\/\//i, 'https://');
+
+        // 3. 下载字幕 JSON
+        const subContentResp = await BSE.Utils.fetchWithTimeout(subUrl, { signal }, 6000);
+        const subContentJson = await subContentResp.json();
+        const rawBody = subContentJson?.body || [];
+
+        if (!rawBody.length) {
+          return { status: 'not_found', errorHint: '字幕内容为空', fetchedAt: Date.now() };
+        }
+
+        const cues = rawBody.map((b) => ({
+          from: Number(b.from || 0),
+          to: Number(b.to || 0),
+          content: String(b.content || '').trim()
+        }));
+
+        const plainText = cues.map((c) => c.content).join(' ');
+        const markdown = formatCuesToMarkdown(viewTitle || item.title, item.author, item.url, cues);
+
+        return {
+          status: 'ready',
+          language: chosenSub.lan,
+          langDoc: chosenSub.lan_doc || '中文',
+          cueCount: cues.length,
+          fetchedAt: Date.now(),
+          plainText,
+          markdown
+        };
+      } catch (err) {
+        if (err?.name === 'AbortError') throw err;
+        return { status: 'error', errorHint: err?.message || '抓取字幕超时或失败', fetchedAt: Date.now() };
+      }
+    }
+
+    return { status: 'not_found', errorHint: '当前平台暂不支持后台直取字幕', fetchedAt: Date.now() };
+  }
+
+  async function fetchSubtitleForItem(subscriptionId, itemId) {
+    const list = await getSubscriptions();
+    const sub = list.find((s) => s.id === subscriptionId);
+    if (!sub) throw new Error('未找到对应订阅');
+    const item = (sub.items || []).find((i) => i.id === itemId);
+    if (!item) throw new Error('未找到对应视频条目');
+
+    item.subtitle = { status: 'pending' };
+    await saveSubscriptions(list);
+
+    const subRes = await fetchItemSubtitle(item);
+    item.subtitle = subRes;
+    item.hasSubtitle = subRes.status === 'ready';
+    await saveSubscriptions(list);
+    return subRes;
+  }
+
+  function exportMergedMarkdown(items) {
+    if (!items || !items.length) return '';
+    const sections = [];
+    sections.push(`# 批量视频更新字幕汇总 (${items.length} 篇)`);
+    sections.push(`> 导出时间：${new Date().toLocaleString()}`);
+    sections.push('');
+
+    items.forEach((item, idx) => {
+      sections.push(`## [${idx + 1}/${items.length}] ${item.title}`);
+      sections.push(`- **UP 主 / 作者**: ${item.author || '未知'}`);
+      if (item.url) sections.push(`- **视频直达**: [${item.url}](${item.url})`);
+      if (item.pubdate) sections.push(`- **发布时间**: ${new Date(item.pubdate).toLocaleString()}`);
+      sections.push('');
+
+      if (item.subtitle && item.subtitle.status === 'ready' && item.subtitle.markdown) {
+        const contentWithoutH1 = item.subtitle.markdown.replace(/^#\s+[^\n]+\n+/, '');
+        sections.push(contentWithoutH1);
+      } else if (item.subtitle && item.subtitle.plainText) {
+        sections.push(item.subtitle.plainText);
+      } else {
+        sections.push(`*(暂无已缓存字幕，点击视频直达可在播放器中即时解析)*`);
+      }
+      sections.push('\n---\n');
+    });
+
+    return sections.join('\n');
   }
 
   async function checkAllUpdates() {
@@ -650,6 +842,9 @@
     saveSettings,
     checkSubscriptionUpdates,
     checkAllUpdates,
+    fetchItemSubtitle,
+    fetchSubtitleForItem,
+    exportMergedMarkdown,
     exportConfigJson,
     importConfigJson
   });

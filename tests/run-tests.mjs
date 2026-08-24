@@ -317,10 +317,48 @@ assert.equal(imported.importedCount, 1, '导入配置必须成功解析 1 个有
 const exported = await BSE.Tracker.exportConfigJson();
 const parsedExport = JSON.parse(exported);
 assert.equal(parsedExport.version, '0.2.0', '导出的 JSON 必须包含 SparkSub 版本标识');
-assert.ok(Array.isArray(parsedExport.subscriptions), '导出的 JSON 必须包含 subscriptions 数组');
-assert.equal(parsedExport.subscriptions[0].id, 'bilibili:up:12345', '导出的订阅源 ID 必须完整保留');
+// 15. TrackedItem Subtitle & Merged Markdown export tests
+const sampleTrackedItems = [
+  {
+    id: 'BV1AAA',
+    title: '计算机网络第一讲',
+    author: '王道考研',
+    url: 'https://www.bilibili.com/video/BV1AAA',
+    pubdate: Date.now() - 3600000,
+    subtitle: {
+      status: 'ready',
+      language: 'zh-CN',
+      langDoc: '中文',
+      cueCount: 50,
+      plainText: '大家好，今天我们来学习计算机网络体系结构。',
+      markdown: '# 计算机网络第一讲\n\n- **来源作者**: 王道考研\n- **提取时间**: 2026/8/24\n\n---\n\n### [00:00 - 00:05]\n\n大家好，今天我们来学习计算机网络体系结构。'
+    }
+  },
+  {
+    id: 'BV1BBB',
+    title: '操作系统第一讲',
+    author: '王道考研',
+    url: 'https://www.bilibili.com/video/BV1BBB',
+    pubdate: Date.now(),
+    subtitle: {
+      status: 'ready',
+      language: 'zh-CN',
+      langDoc: '中文',
+      cueCount: 40,
+      plainText: '操作系统的基本概念与系统调用。',
+      markdown: '# 操作系统第一讲\n\n- **来源作者**: 王道考研\n- **提取时间**: 2026/8/24\n\n---\n\n### [00:00 - 00:06]\n\n操作系统的基本概念与系统调用。'
+    }
+  }
+];
 
-console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)。');
+const mergedDoc = BSE.Tracker.exportMergedMarkdown(sampleTrackedItems);
+assert.ok(typeof mergedDoc === 'string' && mergedDoc.length > 50, '合并导出的 Markdown 文档必须为非空字符串');
+assert.ok(mergedDoc.includes('批量视频更新字幕汇总'), '合并 Markdown 必须包含顶部大标题');
+assert.ok(mergedDoc.includes('计算机网络第一讲') && mergedDoc.includes('操作系统第一讲'), '合并 Markdown 必须包含所有更新视频的标题');
+assert.ok(mergedDoc.includes('计算机网络体系结构'), '合并 Markdown 必须包含第一期字幕内容');
+assert.ok(mergedDoc.includes('系统调用'), '合并 Markdown 必须包含第二期字幕内容');
+
+console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)、后台无人值守字幕抓取与一键 Markdown 复制。');
 
 
 

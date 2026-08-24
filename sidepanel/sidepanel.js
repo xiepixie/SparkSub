@@ -113,6 +113,7 @@
     trackerCntAll: document.querySelector('#tracker-cnt-all'),
     trackerCntUnread: document.querySelector('#tracker-cnt-unread'),
     trackerCheckAllBtn: document.querySelector('#tracker-check-all-btn'),
+    trackerCopyAllBtn: document.querySelector('#tracker-copy-all-btn'),
     trackerReadAllBtn: document.querySelector('#tracker-read-all-btn'),
     trackerList: document.querySelector('#tracker-list'),
     trackerEmpty: document.querySelector('#tracker-empty'),
@@ -444,6 +445,36 @@
       const timeStr = sub.lastCheckedAt ? new Date(sub.lastCheckedAt).toLocaleDateString() : '刚刚加入';
       const latestItem = (sub.items || [])[0];
 
+      let subBadgeHtml = '';
+      let subActionsHtml = '';
+      let previewDrawerHtml = '';
+
+      if (latestItem) {
+        const subInfo = latestItem.subtitle;
+        if (subInfo && subInfo.status === 'ready') {
+          subBadgeHtml = `<span class="tracker-sub-badge ready" title="字幕已在后台抓取完成并缓存">✓ 字幕已缓存 (${subInfo.cueCount || 0}行)</span>`;
+          subActionsHtml = `
+            <button class="tracker-btn-copy" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(latestItem.id)}" title="一键复制本视频字幕为 Markdown 格式">📋 复制 MD</button>
+            <button class="tracker-btn-preview-toggle" data-target="preview-${BSE.Utils.escapeHtml(sub.id)}" title="原位展开预览字幕内容">👁️ 预览</button>
+          `;
+          previewDrawerHtml = `
+            <div class="tracker-preview-drawer" id="preview-${BSE.Utils.escapeHtml(sub.id)}">${BSE.Utils.escapeHtml(subInfo.markdown || subInfo.plainText || '')}</div>
+          `;
+        } else if (subInfo && subInfo.status === 'pending') {
+          subBadgeHtml = `<span class="tracker-sub-badge pending">⏳ 正在抓取字幕…</span>`;
+        } else if (subInfo && subInfo.status === 'not_found') {
+          subBadgeHtml = `<span class="tracker-sub-badge not-found">⚪ 无官方字幕</span>`;
+          subActionsHtml = `
+            <button class="tracker-btn-copy tracker-btn-retry-sub" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(latestItem.id)}" title="重新尝试后台提取字幕">🔄 重新提取</button>
+          `;
+        } else {
+          subBadgeHtml = `<span class="tracker-sub-badge not-found">⚪ 待提取字幕</span>`;
+          subActionsHtml = `
+            <button class="tracker-btn-copy tracker-btn-retry-sub" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(latestItem.id)}" title="立即在后台提取字幕并缓存">⚡ 提取字幕</button>
+          `;
+        }
+      }
+
       card.innerHTML = `
         <div class="tracker-card-head">
           <div class="tracker-card-brand">
@@ -464,6 +495,13 @@
               <span class="tracker-item-title" title="${BSE.Utils.escapeHtml(latestItem.title)}">🆕 ${BSE.Utils.escapeHtml(latestItem.title)}</span>
               <span class="tracker-item-time">${latestItem.pubdate ? new Date(latestItem.pubdate).toLocaleDateString() : ''}</span>
             </div>
+            <div class="tracker-item-sub-row">
+              ${subBadgeHtml}
+              <div class="tracker-sub-actions">
+                ${subActionsHtml}
+              </div>
+            </div>
+            ${previewDrawerHtml}
           </div>
         ` : ''}
 
@@ -870,7 +908,92 @@
     toast('✓ 已全部标记为已读');
   });
 
+  elements.trackerCopyAllBtn?.addEventListener('click', async () => {
+    const list = subscriptionsCache;
+    const unreadItems = [];
+    list.forEach((sub) => {
+      if ((sub.unreadCount || 0) > 0) {
+        (sub.items || []).slice(0, sub.unreadCount).forEach((item) => {
+          unreadItems.push({
+            ...item,
+            author: item.author || sub.author || sub.title
+          });
+        });
+      }
+    });
+
+    if (!unreadItems.length) {
+      // 若无未读标记，收集全部订阅源的最新一期视频
+      list.forEach((sub) => {
+        if ((sub.items || []).length > 0) {
+          unreadItems.push({
+            ...sub.items[0],
+            author: sub.items[0].author || sub.author || sub.title
+          });
+        }
+      });
+    }
+
+    if (!unreadItems.length) {
+      toast('暂无可复制的更新视频字幕', true);
+      return;
+    }
+
+    const mergedMd = BSE.Tracker.exportMergedMarkdown(unreadItems);
+    await navigator.clipboard.writeText(mergedMd);
+    toast(`✓ 已合并复制 ${unreadItems.length} 篇更新视频字幕为 Markdown 文档！`);
+  });
+
   elements.trackerList?.addEventListener('click', async (e) => {
+    const copyBtn = e.target.closest('.tracker-btn-copy:not(.tracker-btn-retry-sub)');
+    if (copyBtn) {
+      const subId = copyBtn.dataset.subId;
+      const itemId = copyBtn.dataset.itemId;
+      const sub = subscriptionsCache.find((s) => s.id === subId);
+      const item = (sub?.items || []).find((i) => i.id === itemId);
+      if (item?.subtitle?.markdown) {
+        await navigator.clipboard.writeText(item.subtitle.markdown);
+        toast(`✓ 已复制《${item.title}》Markdown 字幕`);
+      } else if (item?.subtitle?.plainText) {
+        await navigator.clipboard.writeText(item.subtitle.plainText);
+        toast(`✓ 已复制《${item.title}》纯文本字幕`);
+      } else {
+        toast('该视频字幕尚未提取完成，请点击「提取」重试', true);
+      }
+      return;
+    }
+
+    const previewBtn = e.target.closest('.tracker-btn-preview-toggle');
+    if (previewBtn) {
+      const targetId = previewBtn.dataset.target;
+      const drawer = document.getElementById(targetId);
+      if (drawer) {
+        drawer.classList.toggle('open');
+        previewBtn.textContent = drawer.classList.contains('open') ? '▲ 收起' : '👁️ 预览';
+      }
+      return;
+    }
+
+    const retrySubBtn = e.target.closest('.tracker-btn-retry-sub');
+    if (retrySubBtn) {
+      const subId = retrySubBtn.dataset.subId;
+      const itemId = retrySubBtn.dataset.itemId;
+      retrySubBtn.textContent = '⏳ 提取中…';
+      retrySubBtn.disabled = true;
+      try {
+        const subRes = await BSE.Tracker.fetchSubtitleForItem(subId, itemId);
+        await loadAndRenderTracker();
+        if (subRes.status === 'ready') {
+          toast(`✓ 成功提取《${itemId}》字幕 (${subRes.cueCount}行)`);
+        } else {
+          toast(`提取结果: ${subRes.errorHint || '无官方字幕'}`, true);
+        }
+      } catch (err) {
+        toast(`提取失败: ${err.message}`, true);
+      }
+      return;
+    }
+
     const watchBtn = e.target.closest('.tracker-btn-watch');
     if (watchBtn) {
       const url = watchBtn.dataset.url;
