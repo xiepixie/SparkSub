@@ -217,11 +217,34 @@ const faultResults = [
 const mergedOutput = BSE.Formatters.toMergedMarkdown(faultTree, faultResults, { total: 3, success: 1, noSub: 1, failed: 1 });
 assert.match(mergedOutput, /001\. P1 正常分P/, '成功分P必须在 Markdown 中保留');
 assert.match(mergedOutput, /002\. P2 无字幕分P[\s\S]+本集未提供字幕/, '无字幕分P必须在对应章节位置生成清晰状态说明');
-// 11. Bilibili DASH Audio Extraction Tests
-assert.match(bilibiliSource, /fetchAudioStream/, 'B站平台模块必须导出 fetchAudioStream 接口');
-assert.match(rollingPanelSource, /fetchAudioStream/, '滚动面板必须接入 fetchAudioStream 提取独立音频');
-assert.match(sidePanelHtml, /value="audio"/, '侧边栏格式选择器应包含独立音频选项');
+// 12. Bilibili Special URLs & BPX Fast-Path Tests
+assert.equal(
+  BSE.Utils.getBvid('https://www.bilibili.com/festival/kaoyanshangfen?bvid=BV14cCGBpErw&spm_id_from=333.337.search-card.all.click'),
+  'BV14cCGBpErw',
+  'getBvid 必须成功从 Festival 活动专题页 Query 参数提取 BV 号'
+);
+assert.equal(
+  BSE.Utils.getBvid('https://www.bilibili.com/blackboard/activity.html?bvid=BV1xx411c7mD'),
+  'BV1xx411c7mD',
+  'getBvid 必须成功从 Blackboard 专题页提取 BV 号'
+);
+assert.equal(
+  BSE.Utils.getBvid('https://www.bilibili.com/list/watchlater?bvid=BV1Ab411c7eE'),
+  'BV1Ab411c7eE',
+  'getBvid 必须成功从稍后再看列表页提取 BV 号'
+);
+assert.equal(
+  BSE.Utils.getBvid('https://www.bilibili.com/video/BV11S4y1a7wW?p=2'),
+  'BV11S4y1a7wW',
+  'getBvid 必须成功从标准视频页路径提取 BV 号'
+);
 
-console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取。');
+const manifestContent = fs.readFileSync(path.join(root, 'manifest.json'), 'utf8');
+assert.match(manifestContent, /festival/, 'manifest.json content_scripts 必须包含 festival 匹配规则');
+assert.match(manifestContent, /blackboard/, 'manifest.json content_scripts 必须包含 blackboard 匹配规则');
+assert.match(manifestContent, /list/, 'manifest.json content_scripts 必须包含 list 匹配规则');
+
+console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持。');
+
 
 

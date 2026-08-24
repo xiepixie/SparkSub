@@ -241,7 +241,12 @@ async function fetchYouTubeResource(url, sender) {
 }
 
 function isMatchingVideoUrl(url = '') {
-  return /(^https?:\/\/)(www\.|m\.)?(youtube\.com\/(watch|shorts)|bilibili\.com\/video)/i.test(url);
+  if (!url) return false;
+  const isYouTube = /(^https?:\/\/)(www\.|m\.)?(youtube\.com\/(watch|shorts|embed|live)|youtu\.be\/)/i.test(url);
+  if (isYouTube) return true;
+  const isBili = /(^https?:\/\/)(www\.|m\.)?bilibili\.com\/(video|festival|blackboard|list|bangumi\/play|medialist\/play)/i.test(url)
+    || (/(^https?:\/\/)(www\.|m\.)?bilibili\.com/i.test(url) && /[?&]bvid=BV/i.test(url));
+  return isBili;
 }
 
 async function injectContentScripts(tabId, url = '') {
@@ -261,6 +266,8 @@ async function injectContentScripts(tabId, url = '') {
       files: [
         'core/namespace.js',
         'core/utils.js',
+        'core/jszip.js',
+        'core/i18n.js',
         'core/parsers.js',
         'core/formatters.js',
         'platform/youtube.js',

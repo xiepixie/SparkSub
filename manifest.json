@@ -49,7 +49,12 @@
         "*://www.youtube.com/watch*",
         "*://www.youtube.com/shorts/*",
         "*://m.youtube.com/watch*",
-        "*://www.bilibili.com/video/*"
+        "*://www.bilibili.com/video/*",
+        "*://www.bilibili.com/festival/*",
+        "*://www.bilibili.com/blackboard/*",
+        "*://www.bilibili.com/list/*",
+        "*://www.bilibili.com/bangumi/play/*",
+        "*://www.bilibili.com/medialist/play/*"
       ],
       "js": [
         "core/namespace.js",

@@ -1727,6 +1727,9 @@
             .right-container .up-panel-container + *,
             #right-bottom-banner .up-info-container + *,
             .right-container .up-info-container + *,
+            .grid-right > *:first-child,
+            .grid-box .grid-right > *:first-child,
+            .grid-right .video-danmuku,
             #danmakuBox, .danmaku-box, #danmukuBox {
               margin-top: var(--bse-injected-spacer-height, 0px) !important;
               transition: margin-top 0.15s ease-out;
@@ -1822,6 +1825,8 @@
 
       const videoWrap = document.querySelector('.bpx-player-container')
         || document.querySelector('#bilibili-player')
+        || document.querySelector('.festival-video-player')
+        || document.querySelector('.video-player-box')
         || document.querySelector('.bpx-player-video-wrap')
         || document.querySelector('#playerWrap')
         || document.querySelector('video');
@@ -1831,7 +1836,11 @@
         || document.querySelector('.right-container-inner')
         || document.querySelector('#mirror-vdcon .right-container')
         || document.querySelector('.video-container-v1 .right-container')
-        || document.querySelector('.v-wrap .r-con');
+        || document.querySelector('.v-wrap .r-con')
+        || document.querySelector('.grid-box .grid-right')
+        || document.querySelector('.grid-right')
+        || document.querySelector('.festival-main-panel .grid-right')
+        || document.querySelector('.page-main-content .grid-right');
 
       const upCard = document.querySelector('#right-bottom-banner .up-panel-container')
         || document.querySelector('.up-panel-container')

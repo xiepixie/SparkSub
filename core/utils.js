@@ -33,8 +33,44 @@
     }
   }
 
+  /**
+   * 提取 B 站视频 BV 号 (支持 /video/BV..., ?bvid=BV..., 或任意包含 BV 号的 URL)
+   * @param {string} [url]
+   * @returns {string | null}
+   */
   function getBvid(url = location.href) {
-    return url.match(/\/video\/(BV[\w]+)/i)?.[1] || null;
+    if (!url) return null;
+    try {
+      const parsed = new URL(url, location.origin);
+      const queryBvid = parsed.searchParams.get('bvid');
+      if (queryBvid && /^BV[a-zA-Z0-9]{10}$/i.test(queryBvid)) return queryBvid;
+      const pathMatch = parsed.pathname.match(/\/video\/(BV[a-zA-Z0-9]{10})/i);
+      if (pathMatch) return pathMatch[1];
+    } catch {}
+    const generalMatch = String(url).match(/(BV[a-zA-Z0-9]{10})/i);
+    return generalMatch ? generalMatch[1] : null;
+  }
+
+  /**
+   * 从页面 DOM (包括 BPX 播放器选集列表) 实时提取当前活跃项的 CID
+   * @returns {string | null}
+   */
+  function getActiveCidFromDom() {
+    try {
+      if (typeof document === 'undefined') return null;
+      const activeEl = document.querySelector(
+        '.bpx-player-ctrl-eplist-menu-item.bpx-state-active, ' +
+        '.cur-list li.on, ' +
+        '.bili-video-pod__item--active, ' +
+        '.video-episode-card.active, ' +
+        '#multi_page .cur-list li.on'
+      );
+      if (!activeEl) return null;
+      const cid = activeEl.getAttribute('data-cid') || activeEl.dataset.cid || activeEl.getAttribute('cid');
+      return cid ? String(cid).trim() : null;
+    } catch {
+      return null;
+    }
   }
 
   function getBilibiliPage(url = location.href) {
@@ -47,7 +83,12 @@
     try {
       if (typeof document !== 'undefined') {
         const activeEl = document.querySelector(
-          '#multi_page .cur-list li.on, .video-pod__list .active, .video-episode-card.active, .cur-list li.on, .bili-video-pod__item--active'
+          '.bpx-player-ctrl-eplist-menu-item.bpx-state-active, ' +
+          '#multi_page .cur-list li.on, ' +
+          '.video-pod__list .active, ' +
+          '.video-episode-card.active, ' +
+          '.cur-list li.on, ' +
+          '.bili-video-pod__item--active'
         );
         if (activeEl) {
           const pAttr = activeEl.dataset.page || activeEl.getAttribute('data-page') || activeEl.getAttribute('page');
@@ -62,6 +103,9 @@
     return 1;
   }
 
+  let lastKnownBilibiliCid = null;
+  let lastKnownBilibiliBvid = null;
+
   function getMediaKey(platform = detectPlatform()) {
     if (platform === BSE.PLATFORM.YOUTUBE) {
       const videoId = getYouTubeVideoId();
@@ -70,6 +114,17 @@
     if (platform === BSE.PLATFORM.BILIBILI) {
       const bvid = getBvid();
       if (!bvid) return null;
+      if (bvid !== lastKnownBilibiliBvid) {
+        lastKnownBilibiliBvid = bvid;
+        lastKnownBilibiliCid = null;
+      }
+      const activeCid = getActiveCidFromDom();
+      if (activeCid) {
+        lastKnownBilibiliCid = activeCid;
+      }
+      if (lastKnownBilibiliCid) {
+        return `bili:${bvid}:cid${lastKnownBilibiliCid}`;
+      }
       const page = getBilibiliPage();
       return `bili:${bvid}:p${page}`;
     }
@@ -233,6 +288,7 @@
     getYouTubeVideoId,
     getBvid,
     getBilibiliPage,
+    getActiveCidFromDom,
     getMediaKey,
     delay,
     fetchWithTimeout,

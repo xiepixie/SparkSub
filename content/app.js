@@ -282,6 +282,7 @@
 
   function scheduleNextEpisodePrefetch(gen) {
     if (document.hidden || navigator.connection?.saveData) return;
+    if (state.mediaKey?.includes(':cid') || !new URL(location.href).searchParams.has('p')) return;
     setTimeout(async () => {
       if (gen !== generation) return;
       try {
@@ -583,9 +584,28 @@
     scheduleLoad(pending?.reason || 'init', Boolean(pending?.force));
   }
 
+  function installBpxEpisodeListener() {
+    if (platform !== BSE.PLATFORM.BILIBILI) return;
+    document.addEventListener('click', (event) => {
+      const target = event.target;
+      const item = target?.closest?.('.bpx-player-ctrl-eplist-menu-item, .cur-list li, .video-episode-card, .bili-video-pod__item');
+      if (item) {
+        const targetCid = item.getAttribute('data-cid') || item.dataset.cid || '';
+        diagnostic('实验特性/BPX点击', `用户点击了选集列表项 · 目标 CID: ${targetCid || '未知'}`);
+        setTimeout(() => {
+          const newKey = BSE.Utils.getMediaKey(platform);
+          if (newKey && newKey !== state.mediaKey) {
+            scheduleLoad('bpx_eplist_click');
+          }
+        }, 150);
+      }
+    }, { passive: true, capture: true });
+  }
+
   installRuntimeMessages();
   installRouteTracking();
   installPlaybackSync();
+  installBpxEpisodeListener();
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
       if (typeof requestIdleCallback === 'function') {

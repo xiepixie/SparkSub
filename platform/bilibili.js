@@ -166,6 +166,32 @@
     const bvid = getBvid();
     if (!bvid) throw createError('BVID_NOT_FOUND', '未识别到视频 BV 号', '请确认当前处于 B 站视频播放页面。');
 
+    // 实验特性：优先尝试从 BPX 播放器活跃选集 DOM 或当前稳定 mediaKey 提取 CID
+    const mediaKey = BSE.Utils.getMediaKey ? BSE.Utils.getMediaKey(BSE.PLATFORM.BILIBILI) : '';
+    const domCid = (BSE.Utils.getActiveCidFromDom ? BSE.Utils.getActiveCidFromDom() : null)
+      || (mediaKey && mediaKey.includes(':cid') ? mediaKey.split(':cid')[1] : null);
+    if (domCid) {
+      diagnostic?.('实验特性/BPX探测', `检测到活跃选集 · 快速锁定 CID: ${domCid}`);
+      try {
+        const player = assertApiSuccess(await requestApiJson(
+          `https://api.bilibili.com/x/player/v2?cid=${encodeURIComponent(domCid)}&bvid=${encodeURIComponent(bvid)}`,
+          { signal, diagnostic, stage: '实验特性/BPX字幕接口' }
+        ), '实验特性/BPX字幕接口');
+        const tracks = normalizeTracks(player.data?.subtitle?.subtitles, {
+          bvid,
+          cid: domCid,
+          page: getBilibiliPage(location.href)
+        });
+        if (tracks.length) {
+          diagnostic?.('查找字幕', `[实验特性/BPX] 快速通道返回 ${tracks.length} 条字幕轨道`);
+          return tracks;
+        }
+      } catch (bpxErr) {
+        if (bpxErr?.name === 'AbortError') throw bpxErr;
+        diagnostic?.('实验特性/BPX降级', `BPX 快速通道未返回可用字幕 (${bpxErr.message})，平滑回退到常规接口`);
+      }
+    }
+
     let viewData = extractDomVideoData(bvid);
     if (viewData) {
       diagnostic?.('页面数据', `直接从页面嵌入数据读取视频信息 · aid ${viewData.aid || '未知'}`);
@@ -273,6 +299,64 @@
    * @returns {Promise<import('../types/bse').BilibiliTree>}
    */
   async function fetchMediaTree(currentBvid = getBvid(), { signal, diagnostic } = {}) {
+    // 实验特性：优先检测页面是否存在 BPX 播放器选集菜单
+    const eplistDomItems = typeof document !== 'undefined'
+      ? Array.from(document.querySelectorAll('.bpx-player-ctrl-eplist-menu-item'))
+      : [];
+    if (eplistDomItems.length > 1) {
+      diagnostic?.('实验特性/BPX拓扑', `从播放器选集 DOM 捕获到 ${eplistDomItems.length} 个专题选集`);
+      const pageTitle = (typeof document !== 'undefined' ? document.title.replace(/\s*[-_|]\s*(哔哩哔|bilibili).*$/i, '').trim() : '') || 'B站专题选集';
+      const tree = {
+        kind: 'bpx_eplist',
+        isCollection: true,
+        seasonId: null,
+        title: pageTitle,
+        currentBvid,
+        currentPage: 1,
+        totalEpisodesCount: eplistDomItems.length,
+        sections: [],
+        items: []
+      };
+      const sectionTitle = '专题选集';
+      const sectionKey = '01_专题选集';
+      const epObj = {
+        index: 1,
+        bvid: currentBvid,
+        aid: '',
+        title: pageTitle,
+        pagesCount: eplistDomItems.length,
+        items: []
+      };
+      const section = { index: 1, title: sectionTitle, key: sectionKey, episodes: [epObj], items: [] };
+
+      eplistDomItems.forEach((el, idx) => {
+        const cid = el.getAttribute('data-cid') || el.dataset.cid || '';
+        const itemTitle = (el.textContent || '').trim() || `第${idx + 1}讲`;
+        const item = {
+          kind: 'episode',
+          globalIndex: idx + 1,
+          sectionIndex: 1,
+          sectionTitle,
+          sectionKey,
+          episodeIndex: 1,
+          episodeTitle: pageTitle,
+          page: idx + 1,
+          part: itemTitle,
+          duration: 0,
+          bvid: currentBvid,
+          aid: '',
+          cid,
+          title: itemTitle,
+          sourceUrl: location.href
+        };
+        epObj.items.push(item);
+        section.items.push(item);
+        tree.items.push(item);
+      });
+      tree.sections.push(section);
+      return tree;
+    }
+
     let viewData = extractDomVideoData(currentBvid);
     if (!viewData) {
       const view = assertApiSuccess(await requestApiJson(

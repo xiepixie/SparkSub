@@ -105,7 +105,7 @@ export interface BilibiliSection {
 }
 
 export interface BilibiliTree {
-  kind: 'ugc_season' | 'multi_page' | 'single';
+  kind: 'ugc_season' | 'multi_page' | 'single' | 'bpx_eplist';
   isCollection: boolean;
   seasonId: number | string | null;
   title: string;
@@ -184,6 +184,8 @@ export interface BSEUtilsNamespace {
   detectPlatform(hostname?: string): Platform | null;
   getYouTubeVideoId(url?: string): string | null;
   getBvid(url?: string): string | null;
+  getBilibiliPage(url?: string): number;
+  getActiveCidFromDom?(): string | null;
   getMediaKey(platform?: Platform | null): string | null;
   delay(ms: number, signal?: AbortSignal): Promise<void>;
   fetchWithTimeout(url: string, options?: RequestInit, timeoutMs?: number): Promise<Response>;
