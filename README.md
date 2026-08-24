@@ -28,6 +28,14 @@
   - 打包生成标准 ZIP，内含 TXT、SRT、VTT、JSON 及合集总览。
   - **DASH 纯音频提取**：直接获取官方纯音频流直链，方便导入 Whisper / 播客剪辑。
 
+- **🔔 UP 主与课程合集订阅追踪中心 (Tracker & Unattended Harvest)**
+  - **智能订阅感知**：在任意播放页一键关注 UP 主或订阅专属专题合集 / 多 P 连载。
+  - **后台无人值守自动巡检**：基于 `chrome.alarms` 定时巡检，内置纯 JS MD5 + WBI 签名加密与 YouTube 官方 RSS 解析。
+  - **新视频字幕自动秒级抓取**：巡检发现新发布视频后，后台自动拉取官方字幕并转换为排版整洁的 Markdown 文档缓存于本地。
+  - **极速生产力交互**：更新卡片支持 **「📋 复制 MD」**（一键复制完整字幕）、**「👁️ 预览」**（卡片内原位展开阅读）与 **「📋 合并复制未读」**（多篇长文一并打包复制）。
+  - **更新触达与角标**：扩展图标未读角标提示 + 系统桌面弹窗提醒。
+  - **配置导入与导出**：一键导出为标准 JSON 备份或跨浏览器快速迁移。
+
 - **🤖 AI 生产力工作流无缝对接**
   - 内置 4 套开箱即用的专业 AI 提示词模板（长文精读速览、分点核心提炼、行动清单生成、双语逐句对照）。
   - 一键复制格式化 Markdown 文本，直接粘贴至 ChatGPT、Claude、DeepSeek、Gemini 或 Notion。
@@ -59,25 +67,32 @@
 
 ```text
 SparkSub/
-├── background/           # Service Worker（网络捕获、跨域代理、标签页状态同步）
+├── background/           # Service Worker（网络捕获、跨域代理、定时巡检、状态同步）
 │   └── service-worker.js
 ├── content/              # 内容脚本（Shadow DOM 滚动面板、主世界 Bridge）
 │   ├── app.js            # 核心状态机与数据流调度器
 │   ├── rolling-panel.js  # 独立 Shadow DOM 伴随面板组件
 │   └── main-world-bridge.js
-├── core/                 # 核心模块（解析器、格式化器、多语言、JSZip 引擎）
+├── core/                 # 核心模块（解析器、格式化器、多语言、JSZip、订阅追踪引擎）
 │   ├── formatters.js     # SRT, VTT, TXT, JSON, Merged Markdown
 │   ├── parsers.js        # B站 XML, JSON, YouTube TimedText
+│   ├── tracker.js        # 纯 JS MD5, WBI 签名, YouTube RSS, 环形缓冲, 自动字幕拉取
 │   ├── jszip.js          # 无依赖轻量级 ZIP 打包引擎
 │   ├── utils.js          # 会话快照、DOM 工具、防抖
 │   └── i18n.js           # 国际化文案
 ├── platform/             # 平台适配器
 │   ├── youtube.js        # YouTube 轨道发现与解密
 │   └── bilibili.js       # B站 WBI 鉴权、多P与合集爬取、DASH 提取
-├── sidepanel/            # 独立侧边栏 UI 与逻辑
+├── sidepanel/            # 独立侧边栏 UI 与追踪中心
 │   ├── sidepanel.html
 │   ├── sidepanel.css
 │   └── sidepanel.js
+├── types/                # 渐进式 TypeScript 类型定义
+│   ├── bse.d.ts          # 完整领域模型与状态协议声明
+│   └── chrome.d.ts       # Chrome MV3 API 类型补齐
+├── docs/                 # 架构与用户场景文档
+│   ├── 架构与消息协议.md
+│   └── 用户场景与交互设计.md
 ├── tests/                # 自动化单元测试套件
 │   └── run-tests.mjs
 └── manifest.json         # Chrome MV3 清单文件
