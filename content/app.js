@@ -93,6 +93,58 @@
     return document.title.replace(/\s*[-_|]\s*(YouTube|哔哩哔|bilibili).*$/i, '').trim() || '字幕';
   }
 
+  function getAuthorInfo() {
+    try {
+      if (platform === BSE.PLATFORM.BILIBILI) {
+        const upLink = document.querySelector('.up-detail-top a.up-name, a.up-name, .up-info--right .name, .user-name a, .up-card .name, .up-info_right .name');
+        const upNameElem = document.querySelector('.up-name, .up-detail-top .up-name, .username, .up-info--right .name, .up-info_right .name');
+        const avatarImg = document.querySelector('.up-avatar img, .up-face img, .bili-avatar img, .header-avatar img');
+        
+        let upName = upNameElem?.textContent?.trim() || upLink?.textContent?.trim() || '';
+        let mid = '';
+        if (upLink?.href) {
+          const match = upLink.href.match(/space\.bilibili\.com\/(\d+)/);
+          if (match) mid = match[1];
+        }
+
+        const seasonTitleElem = document.querySelector('.video-sections-head_title, .cur-list-title, .season-title');
+        let seasonTitle = seasonTitleElem?.textContent?.trim() || null;
+        let seasonId = null;
+
+        const seasonLink = document.querySelector('.video-sections-head a, .cur-list-title a, a[href*="ugc_season"]');
+        if (seasonLink?.href) {
+          const sMatch = seasonLink.href.match(/season_id=(\d+)|ugc_season\/(\d+)|mid=\d+&sid=(\d+)/);
+          if (sMatch) seasonId = sMatch[1] || sMatch[2] || sMatch[3];
+        }
+
+        return {
+          name: upName || 'UP主',
+          targetId: mid || '',
+          mid: mid || '',
+          avatar: avatarImg?.src || '',
+          seasonId: seasonId || null,
+          seasonTitle: seasonTitle || null
+        };
+      } else if (platform === BSE.PLATFORM.YOUTUBE) {
+        const channelLink = document.querySelector('#channel-name a, #owner #channel-name a, ytd-channel-name a');
+        const channelName = channelLink?.textContent?.trim() || document.querySelector('#channel-name, ytd-channel-name')?.textContent?.trim() || '';
+        const avatarImg = document.querySelector('#owner #avatar img, yt-img-shadow#avatar img, #owner-sub-count img');
+        let channelId = '';
+        if (channelLink?.href) {
+          const chMatch = channelLink.href.match(/\/(channel\/|@|c\/|user\/)([^/?]+)/);
+          if (chMatch) channelId = chMatch[2] || chMatch[1];
+        }
+        return {
+          name: channelName || 'YouTube 频道',
+          targetId: channelId || '',
+          channelId: channelId || '',
+          avatar: avatarImg?.src || ''
+        };
+      }
+    } catch {}
+    return null;
+  }
+
   function isContextValid() {
     return typeof chrome !== 'undefined' && Boolean(chrome?.runtime?.id);
   }
@@ -340,6 +392,7 @@
     state.mediaKey = mediaKey;
     state.url = location.href;
     state.title = getTitle();
+    state.authorInfo = getAuthorInfo();
     state.diagnostics = [];
     diagnostic('启动加载', `${reason}${force ? ' (强制刷新)' : ''}`);
     diagnostic('环境信息', `扩展 v${state.version} · ${platform} · 网络: ${navigator.onLine ? '已连接' : '未连接'} · 视频: ${mediaKey}`);

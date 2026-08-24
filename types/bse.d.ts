@@ -53,6 +53,15 @@ export interface AppState {
   activeIndex: number;
   currentTime: number;
   diagnostics: string[];
+  authorInfo?: {
+    name: string;
+    targetId: string;
+    mid?: string;
+    channelId?: string;
+    avatar?: string;
+    seasonId?: string | null;
+    seasonTitle?: string | null;
+  } | null;
 }
 
 export type PublicState = Omit<AppState, 'tracks'> & {

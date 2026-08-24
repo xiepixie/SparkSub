@@ -1582,19 +1582,40 @@ mark {
 
 .tracker-quick-info {
   display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.tracker-quick-row,
+.tracker-quick-author-row {
+  display: flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
-  font-size: 11.5px;
 }
 
-.tracker-quick-label {
+.tracker-quick-label,
+.tracker-quick-author-label {
   color: var(--dim);
+  font-size: 11px;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .tracker-quick-title {
   color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tracker-quick-author-val {
+  color: var(--primary);
+  font-size: 11.5px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;

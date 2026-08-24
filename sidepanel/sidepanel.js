@@ -104,6 +104,7 @@
     trackerUnreadBadge: document.querySelector('#tracker-unread-badge'),
     trackerSection: document.querySelector('#tracker-section'),
     trackerCurrentSource: document.querySelector('#tracker-current-source'),
+    trackerCurrentAuthor: document.querySelector('#tracker-current-author'),
     trackerSubscribeUpBtn: document.querySelector('#tracker-subscribe-up-btn'),
     trackerSubscribeSeasonBtn: document.querySelector('#tracker-subscribe-season-btn'),
     trackerFilterAll: document.querySelector('#tracker-filter-all'),
@@ -259,57 +260,124 @@
     const platform = state.platform;
     const url = state.url || '';
 
-    if (platform === 'bilibili') {
-      const bvid = BSE.Utils.getBvid(url);
-      if (!bvid) return null;
-      try {
-        const resp = await BSE.Utils.fetchWithTimeout(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`, {}, 4000);
-        const json = await resp.json();
-        if (json?.code === 0 && json?.data) {
-          const owner = json.data.owner || {};
-          const ugc = json.data.ugc_season;
-          return {
-            platform: 'bilibili',
-            type: 'up',
-            title: owner.name || 'B站 UP 主',
-            upName: owner.name || 'UP主',
-            mid: String(owner.mid || ''),
-            targetId: String(owner.mid || ''),
-            avatar: owner.face || '',
-            seasonId: ugc?.id || ugc?.season_id ? String(ugc.id || ugc.season_id) : null,
-            seasonTitle: ugc?.title || null
-          };
-        }
-      } catch {}
-      return { platform: 'bilibili', type: 'up', title: 'B站视频', upName: 'B站视频', mid: '', targetId: '' };
+    // 1. 如果已通过 content script 提取到了 authorInfo，优先复用
+    if (state.authorInfo && state.authorInfo.name && state.authorInfo.targetId) {
+      return {
+        platform,
+        type: platform === 'youtube' ? 'channel' : 'up',
+        title: state.authorInfo.name,
+        upName: state.authorInfo.name,
+        mid: state.authorInfo.mid || state.authorInfo.targetId,
+        targetId: state.authorInfo.targetId,
+        avatar: state.authorInfo.avatar || '',
+        seasonId: state.authorInfo.seasonId || null,
+        seasonTitle: state.authorInfo.seasonTitle || null,
+        videoTitle: state.title || ''
+      };
     }
 
+    // 2. B 站视频：多通道提取 BV 号并调用后台代理接口获取精准 UP 主与合集
+    if (platform === 'bilibili') {
+      let bvid = BSE.Utils.getBvid(url);
+      if (!bvid && state.mediaKey) {
+        const match = state.mediaKey.match(/bili:(BV[a-zA-Z0-9]+)/i);
+        if (match) bvid = match[1];
+      }
+      if (!bvid) {
+        return {
+          platform: 'bilibili',
+          type: 'up',
+          title: state.title || 'B站视频',
+          upName: state.authorInfo?.name || 'B站 UP 主',
+          mid: state.authorInfo?.mid || '',
+          targetId: state.authorInfo?.targetId || '',
+          avatar: '',
+          videoTitle: state.title || ''
+        };
+      }
+
+      try {
+        const bgRes = await chrome.runtime.sendMessage({
+          type: 'BSE_FETCH_BILIBILI_RESOURCE',
+          url: `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`
+        });
+        if (bgRes?.success && bgRes?.text) {
+          const json = JSON.parse(bgRes.text);
+          if (json?.code === 0 && json?.data) {
+            const owner = json.data.owner || {};
+            const ugc = json.data.ugc_season;
+            return {
+              platform: 'bilibili',
+              type: 'up',
+              title: owner.name || 'B站 UP 主',
+              upName: owner.name || 'UP主',
+              mid: String(owner.mid || ''),
+              targetId: String(owner.mid || ''),
+              avatar: owner.face || '',
+              seasonId: ugc?.id || ugc?.season_id ? String(ugc.id || ugc.season_id) : null,
+              seasonTitle: ugc?.title || null,
+              videoTitle: json.data.title || state.title || ''
+            };
+          }
+        }
+      } catch {}
+
+      return {
+        platform: 'bilibili',
+        type: 'up',
+        title: state.title || 'B站视频',
+        upName: state.authorInfo?.name || 'B站 UP 主',
+        mid: state.authorInfo?.mid || '',
+        targetId: state.authorInfo?.targetId || '',
+        avatar: '',
+        videoTitle: state.title || ''
+      };
+    }
+
+    // 3. YouTube 视频
     if (platform === 'youtube') {
-      const videoId = BSE.Utils.getYouTubeVideoId(url);
+      let videoId = BSE.Utils.getYouTubeVideoId(url);
+      if (!videoId && state.mediaKey) {
+        const match = state.mediaKey.match(/yt:([a-zA-Z0-9_-]+)/i);
+        if (match) videoId = match[1];
+      }
       return {
         platform: 'youtube',
         type: 'channel',
         title: state.title || 'YouTube 视频',
-        upName: 'YouTube 频道',
-        targetId: videoId || '',
-        avatar: ''
+        upName: state.authorInfo?.name || 'YouTube 频道',
+        targetId: state.authorInfo?.targetId || videoId || '',
+        avatar: state.authorInfo?.avatar || '',
+        videoTitle: state.title || ''
       };
     }
+
     return null;
   }
 
   async function updateQuickSubscribeBar() {
     if (!elements.trackerQuickBar) return;
     currentAuthorInfo = await detectCurrentVideoAuthorInfo();
+
+    const videoTitle = state?.title || currentAuthorInfo?.videoTitle || '等待视频连接…';
+    if (elements.trackerCurrentSource) {
+      elements.trackerCurrentSource.textContent = videoTitle;
+      elements.trackerCurrentSource.title = videoTitle;
+    }
+
+    if (elements.trackerCurrentAuthor) {
+      if (currentAuthorInfo && (currentAuthorInfo.upName || currentAuthorInfo.title)) {
+        elements.trackerCurrentAuthor.textContent = currentAuthorInfo.upName || currentAuthorInfo.title;
+        elements.trackerCurrentAuthor.title = currentAuthorInfo.upName || currentAuthorInfo.title;
+      } else {
+        elements.trackerCurrentAuthor.textContent = state ? (state.platform === 'bilibili' ? 'B站视频' : 'YouTube') : '等待连接…';
+      }
+    }
+
     if (!currentAuthorInfo || !currentAuthorInfo.targetId) {
-      if (elements.trackerCurrentSource) elements.trackerCurrentSource.textContent = state?.title || '等待视频连接…';
       if (elements.trackerSubscribeUpBtn) elements.trackerSubscribeUpBtn.disabled = true;
       if (elements.trackerSubscribeSeasonBtn) elements.trackerSubscribeSeasonBtn.hidden = true;
       return;
-    }
-
-    if (elements.trackerCurrentSource) {
-      elements.trackerCurrentSource.textContent = currentAuthorInfo.upName || currentAuthorInfo.title || '当前视频源';
     }
 
     const upSubId = `${currentAuthorInfo.platform}:${currentAuthorInfo.type || 'up'}:${currentAuthorInfo.mid || currentAuthorInfo.targetId}`;
@@ -318,7 +386,9 @@
     if (elements.trackerSubscribeUpBtn) {
       elements.trackerSubscribeUpBtn.disabled = false;
       elements.trackerSubscribeUpBtn.classList.toggle('subscribed', isUpSubscribed);
-      elements.trackerSubscribeUpBtn.textContent = isUpSubscribed ? '✓ 已关注 UP' : '+ 关注 UP 主';
+      elements.trackerSubscribeUpBtn.textContent = isUpSubscribed
+        ? `✓ 已关注 ${currentAuthorInfo.upName || 'UP'}`
+        : `+ 关注 UP 主 (${currentAuthorInfo.upName || 'UP'})`;
     }
 
     if (currentAuthorInfo.seasonId) {
@@ -327,7 +397,9 @@
       if (elements.trackerSubscribeSeasonBtn) {
         elements.trackerSubscribeSeasonBtn.hidden = false;
         elements.trackerSubscribeSeasonBtn.classList.toggle('subscribed', isSeasonSubscribed);
-        elements.trackerSubscribeSeasonBtn.textContent = isSeasonSubscribed ? '✓ 已订阅合集' : '+ 订阅本合集';
+        elements.trackerSubscribeSeasonBtn.textContent = isSeasonSubscribed
+          ? `✓ 已订阅《${currentAuthorInfo.seasonTitle || '合集'}》`
+          : `+ 订阅合集《${currentAuthorInfo.seasonTitle || '合集'}》`;
       }
     } else if (elements.trackerSubscribeSeasonBtn) {
       elements.trackerSubscribeSeasonBtn.hidden = true;
@@ -534,6 +606,7 @@
     
     renderTracks();
     renderTranscript();
+    updateQuickSubscribeBar().catch(() => {});
   }
 
   function updatePlayback(index) {
