@@ -1867,9 +1867,16 @@
         return;
       }
 
-      // Check if Bilibili is in widescreen mode or narrow layout where right column is below video
-      const isRightColBelow = rightRect && (rightRect.top >= videoRect.bottom - 40);
-      const isWidescreen = document.querySelector('.player-mode-widescreen, .mode-widescreen, .wide') !== null || isRightColBelow;
+      // Check if layout is truly dual-column (side-by-side horizontally) vs single-column/widescreen
+      const isSideBySide = Boolean(
+        rightRect &&
+        rightRect.width > 200 &&
+        (rightRect.left >= videoRect.left + 150)
+      );
+      const isWidescreen = Boolean(
+        document.querySelector('.player-mode-widescreen, .mode-widescreen, .wide')
+        || !isSideBySide
+      );
 
       this.wrapper.style.display = 'block';
       this.wrapper.style.position = 'absolute';
