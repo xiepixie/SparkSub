@@ -391,12 +391,7 @@
   }
 
   async function saveItemState(updatedItem) {
-    const queue = await BSE.Queue.getQueue();
-    const index = queue.findIndex((i) => i.id === updatedItem.id);
-    if (index >= 0) {
-      queue[index] = updatedItem;
-      await BSE.Queue.saveQueue(queue);
-    }
+    await BSE.Queue.saveItem(updatedItem);
     if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
       chrome.runtime.sendMessage({ type: 'BSE_QUEUE_UPDATED', item: updatedItem }).catch(() => {});
     }
