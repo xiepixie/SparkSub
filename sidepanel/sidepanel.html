@@ -215,14 +215,28 @@
         </div>
       </div>
 
-      <div class="tracker-list" id="tracker-list">
+      <div class="tracker-discovery-bar">
+        <label class="tracker-search-box">
+          <span aria-hidden="true">⌕</span>
+          <input id="tracker-search-input" type="search" placeholder="搜索频道、UP 主或合集" autocomplete="off" aria-label="搜索订阅">
+        </label>
+        <select id="tracker-sort-select" class="tracker-sort-select" aria-label="订阅排序">
+          <option value="activity">最近更新</option>
+          <option value="unread">未读优先</option>
+          <option value="name">名称排序</option>
+        </select>
+      </div>
+
+      <div class="tracker-status-line" id="tracker-status-line" role="status" aria-live="polite">正在读取订阅…</div>
+
+      <div class="tracker-list" id="tracker-list" aria-live="polite" aria-busy="true">
         <!-- Dynamic Subscription Cards Injected Here -->
       </div>
 
       <div class="tracker-empty" id="tracker-empty">
         <div class="tracker-empty-icon">📭</div>
-        <p class="tracker-empty-title">暂无关注的 UP 主或课程合集</p>
-        <p class="tracker-empty-desc">在任意视频播放页，点击上方的「关注 UP 主」或「订阅本合集」即可开启自动更新追踪与新集提醒！</p>
+        <p class="tracker-empty-title" id="tracker-empty-title">暂无关注的 UP 主或课程合集</p>
+        <p class="tracker-empty-desc" id="tracker-empty-desc">在任意视频播放页，点击上方的「关注 UP 主」或「订阅本合集」即可开启自动更新追踪与新集提醒！</p>
       </div>
     </section>
 

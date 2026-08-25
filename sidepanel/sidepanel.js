@@ -112,11 +112,16 @@
     trackerFilterUnread: document.querySelector('#tracker-filter-unread'),
     trackerCntAll: document.querySelector('#tracker-cnt-all'),
     trackerCntUnread: document.querySelector('#tracker-cnt-unread'),
+    trackerSearchInput: document.querySelector('#tracker-search-input'),
+    trackerSortSelect: document.querySelector('#tracker-sort-select'),
+    trackerStatusLine: document.querySelector('#tracker-status-line'),
     trackerCheckAllBtn: document.querySelector('#tracker-check-all-btn'),
     trackerCopyAllBtn: document.querySelector('#tracker-copy-all-btn'),
     trackerReadAllBtn: document.querySelector('#tracker-read-all-btn'),
     trackerList: document.querySelector('#tracker-list'),
     trackerEmpty: document.querySelector('#tracker-empty'),
+    trackerEmptyTitle: document.querySelector('#tracker-empty-title'),
+    trackerEmptyDesc: document.querySelector('#tracker-empty-desc'),
     trackerIntervalSelect: document.querySelector('#tracker-interval-select'),
     trackerNotifySelect: document.querySelector('#tracker-notify-select'),
     trackerExportBtn: document.querySelector('#tracker-export-btn'),
@@ -226,18 +231,31 @@
 
   // === Tracker State & Methods ===
   let trackerFilter = 'all';
+  let trackerSearchQuery = '';
+  let trackerSort = 'activity';
+  let trackerLoading = false;
+  const expandedTrackerCards = new Set();
   let subscriptionsCache = [];
   let currentAuthorInfo = null;
 
   async function loadAndRenderTracker() {
     if (!BSE.Tracker) return;
+    trackerLoading = true;
+    if (elements.trackerList) elements.trackerList.setAttribute('aria-busy', 'true');
+    if (elements.trackerStatusLine) elements.trackerStatusLine.textContent = '正在读取订阅…';
     try {
       subscriptionsCache = await BSE.Tracker.getSubscriptions();
+      trackerLoading = false;
       renderTrackerList();
       updateTrackerCountsAndBadge();
-      updateQuickSubscribeBar();
+      await updateQuickSubscribeBar();
     } catch (err) {
       console.warn('[BSE Tracker] 读取订阅列表异常:', err);
+      if (elements.trackerStatusLine) elements.trackerStatusLine.textContent = `读取失败：${err?.message || '请稍后重试'}`;
+      toast('读取订阅列表失败，请稍后重试', true);
+    } finally {
+      trackerLoading = false;
+      if (elements.trackerList) elements.trackerList.setAttribute('aria-busy', 'false');
     }
   }
 
@@ -318,7 +336,7 @@
       }
 
       const upName = owner.name || state.authorInfo?.name || 'B站 UP 主';
-      const mid = String(owner.mid || state.authorInfo?.mid || state.authorInfo?.targetId || bvid || '');
+      const mid = String(owner.mid || state.authorInfo?.mid || state.authorInfo?.targetId || '');
       const avatar = owner.face || state.authorInfo?.avatar || '';
 
       let seasonId = null;
@@ -351,17 +369,12 @@
 
     // 3. YouTube 视频
     if (platform === 'youtube') {
-      let videoId = BSE.Utils.getYouTubeVideoId(url);
-      if (!videoId && state.mediaKey) {
-        const match = state.mediaKey.match(/yt:([a-zA-Z0-9_-]+)/i);
-        if (match) videoId = match[1];
-      }
       return {
         platform: 'youtube',
         type: 'channel',
         title: state.title || 'YouTube 视频',
         upName: state.authorInfo?.name || 'YouTube 频道',
-        targetId: state.authorInfo?.targetId || videoId || 'youtube_channel',
+        targetId: state.authorInfo?.targetId || '',
         avatar: state.authorInfo?.avatar || '',
         videoTitle: state.title || ''
       };
@@ -389,21 +402,26 @@
       }
     }
 
-    if (!currentAuthorInfo || !currentAuthorInfo.targetId) {
+    if (!currentAuthorInfo) {
       if (elements.trackerSubscribeUpBtn) elements.trackerSubscribeUpBtn.disabled = true;
       if (elements.trackerSubscribeSeasonBtn) elements.trackerSubscribeSeasonBtn.hidden = true;
       return;
     }
 
-    const upSubId = `${currentAuthorInfo.platform}:${currentAuthorInfo.type || 'up'}:${currentAuthorInfo.mid || currentAuthorInfo.targetId}`;
-    const isUpSubscribed = subscriptionsCache.some((s) => s.id === upSubId);
+    const authorTargetId = currentAuthorInfo.mid || currentAuthorInfo.targetId;
+    const upSubId = authorTargetId
+      ? `${currentAuthorInfo.platform}:${currentAuthorInfo.type || 'up'}:${authorTargetId}`
+      : '';
+    const isUpSubscribed = Boolean(upSubId && subscriptionsCache.some((s) => s.id === upSubId));
 
     if (elements.trackerSubscribeUpBtn) {
-      elements.trackerSubscribeUpBtn.disabled = false;
+      elements.trackerSubscribeUpBtn.disabled = !authorTargetId;
       elements.trackerSubscribeUpBtn.classList.toggle('subscribed', isUpSubscribed);
-      elements.trackerSubscribeUpBtn.textContent = isUpSubscribed
-        ? `✓ 已关注 ${currentAuthorInfo.upName || 'UP'}`
-        : `+ 关注 UP 主 (${currentAuthorInfo.upName || 'UP'})`;
+      elements.trackerSubscribeUpBtn.textContent = !authorTargetId
+        ? '暂未识别频道 / UP 主'
+        : (isUpSubscribed
+          ? `✓ 已关注 ${currentAuthorInfo.upName || 'UP'}`
+          : `+ 关注 UP 主 (${currentAuthorInfo.upName || 'UP'})`);
     }
 
     if (currentAuthorInfo.seasonId) {
@@ -421,112 +439,123 @@
     }
   }
 
+  function formatTrackerTime(value) {
+    const time = Number(value || 0);
+    if (!time) return '尚未巡检';
+    const deltaMinutes = Math.max(0, Math.floor((Date.now() - time) / 60000));
+    if (deltaMinutes < 1) return '刚刚';
+    if (deltaMinutes < 60) return `${deltaMinutes} 分钟前`;
+    if (deltaMinutes < 1440) return `${Math.floor(deltaMinutes / 60)} 小时前`;
+    if (deltaMinutes < 10080) return `${Math.floor(deltaMinutes / 1440)} 天前`;
+    return new Date(time).toLocaleDateString();
+  }
+
+  function renderTrackerItem(sub, item, previewId, isUnread) {
+    const subtitle = item.subtitle;
+    let badge = '<span class="tracker-sub-badge not-found">⚪ 待提取字幕</span>';
+    let actions = `<button class="tracker-btn-copy tracker-btn-retry-sub" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}">⚡ 提取</button>`;
+    let preview = '';
+
+    if (subtitle?.status === 'ready') {
+      badge = `<span class="tracker-sub-badge ready">✓ 已缓存 ${subtitle.cueCount || 0} 行</span>`;
+      actions = `
+        <button class="tracker-btn-copy" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}">📋 复制</button>
+        <button class="tracker-btn-preview-toggle" data-target="${previewId}" aria-expanded="false">👁 预览</button>`;
+      preview = `<div class="tracker-preview-drawer" id="${previewId}">${BSE.Utils.escapeHtml(subtitle.markdown || subtitle.plainText || '')}</div>`;
+    } else if (subtitle?.status === 'pending') {
+      badge = '<span class="tracker-sub-badge pending">⏳ 正在提取</span>';
+      actions = '';
+    } else if (subtitle?.status === 'not_found' || subtitle?.status === 'error') {
+      const label = subtitle.status === 'error' ? '提取失败' : '无官方字幕';
+      badge = `<span class="tracker-sub-badge not-found" title="${BSE.Utils.escapeHtml(subtitle.errorHint || '')}">⚪ ${label}</span>`;
+      actions = `<button class="tracker-btn-copy tracker-btn-retry-sub" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}">↻ 重试</button>`;
+    }
+
+    return `
+      <article class="tracker-item-block${isUnread ? ' is-unread' : ''}">
+        <div class="tracker-item-header">
+          <span class="tracker-item-title" title="${BSE.Utils.escapeHtml(item.title)}">${isUnread ? '<span class="tracker-item-unread-dot" aria-label="未读"></span>' : ''}${BSE.Utils.escapeHtml(item.title)}</span>
+          <span class="tracker-item-time">${formatTrackerTime(item.pubdate)}</span>
+        </div>
+        <div class="tracker-item-sub-row">
+          ${badge}
+          <div class="tracker-sub-actions">
+            ${actions}
+            ${item.url ? `<button class="tracker-btn-preview-toggle tracker-btn-watch" data-url="${BSE.Utils.escapeHtml(item.url)}">▶ 打开</button>` : ''}
+          </div>
+        </div>
+        ${preview}
+      </article>`;
+  }
+
   function renderTrackerList() {
     if (!elements.trackerList) return;
     elements.trackerList.innerHTML = '';
 
-    let list = subscriptionsCache;
-    if (trackerFilter === 'unread') {
-      list = list.filter((s) => (s.unreadCount || 0) > 0);
+    let list = [...subscriptionsCache];
+    if (trackerFilter === 'unread') list = list.filter((sub) => (sub.unreadCount || 0) > 0);
+    if (trackerSearchQuery) {
+      list = list.filter((sub) => `${sub.title || ''} ${sub.author || ''}`.toLocaleLowerCase().includes(trackerSearchQuery));
+    }
+    list.sort((a, b) => {
+      if (trackerSort === 'name') return String(a.title || '').localeCompare(String(b.title || ''), 'zh-CN');
+      if (trackerSort === 'unread') return (b.unreadCount || 0) - (a.unreadCount || 0) || (b.lastCheckedAt || 0) - (a.lastCheckedAt || 0);
+      const aActivity = a.items?.[0]?.pubdate || a.lastCheckedAt || a.subscribedAt || 0;
+      const bActivity = b.items?.[0]?.pubdate || b.lastCheckedAt || b.subscribedAt || 0;
+      return bActivity - aActivity;
+    });
+
+    if (elements.trackerEmpty) elements.trackerEmpty.hidden = list.length > 0;
+    if (!list.length && elements.trackerEmptyTitle && elements.trackerEmptyDesc) {
+      const constrained = trackerFilter === 'unread' || trackerSearchQuery;
+      elements.trackerEmptyTitle.textContent = constrained ? '没有符合条件的订阅' : '暂无关注的 UP 主或课程合集';
+      elements.trackerEmptyDesc.textContent = constrained
+        ? '试试清空搜索词，或切换到“全部”查看所有订阅。'
+        : '在视频播放页使用上方按钮关注作者或合集，之后的新投稿会自动出现在这里。';
     }
 
-    if (elements.trackerEmpty) {
-      elements.trackerEmpty.hidden = list.length > 0;
+    const unreadTotal = subscriptionsCache.reduce((sum, sub) => sum + (sub.unreadCount || 0), 0);
+    const copyableUnread = subscriptionsCache.reduce((sum, sub) => {
+      const unreadItems = (sub.items || []).slice(0, sub.unreadCount || 0);
+      return sum + unreadItems.filter((item) => item.subtitle?.status === 'ready' && (item.subtitle.markdown || item.subtitle.plainText)).length;
+    }, 0);
+    if (elements.trackerStatusLine) {
+      elements.trackerStatusLine.textContent = `显示 ${list.length}/${subscriptionsCache.length} 个订阅 · ${unreadTotal} 条未读 · ${copyableUnread} 篇字幕可复制`;
     }
+    if (elements.trackerCopyAllBtn) elements.trackerCopyAllBtn.disabled = copyableUnread === 0 || trackerLoading;
+    if (elements.trackerReadAllBtn) elements.trackerReadAllBtn.disabled = unreadTotal === 0 || trackerLoading;
 
     const fragment = document.createDocumentFragment();
-
-    list.forEach((sub) => {
-      const card = document.createElement('div');
+    list.forEach((sub, subIndex) => {
+      const card = document.createElement('section');
       card.className = `tracker-card${(sub.unreadCount || 0) > 0 ? ' has-unread' : ''}`;
       card.dataset.id = sub.id;
-
-      const typeLabel = sub.type === 'season' ? '合集专区' : (sub.platform === 'youtube' ? '油管频道' : 'UP主');
-      const timeStr = sub.lastCheckedAt ? new Date(sub.lastCheckedAt).toLocaleDateString() : '刚刚加入';
-      const latestItem = (sub.items || [])[0];
-
-      let subBadgeHtml = '';
-      let subActionsHtml = '';
-      let previewDrawerHtml = '';
-
-      if (latestItem) {
-        const subInfo = latestItem.subtitle;
-        if (subInfo && subInfo.status === 'ready') {
-          subBadgeHtml = `<span class="tracker-sub-badge ready" title="字幕已在后台抓取完成并缓存">✓ 字幕已缓存 (${subInfo.cueCount || 0}行)</span>`;
-          subActionsHtml = `
-            <button class="tracker-btn-copy" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(latestItem.id)}" title="一键复制本视频字幕为 Markdown 格式">📋 复制 MD</button>
-            <button class="tracker-btn-preview-toggle" data-target="preview-${BSE.Utils.escapeHtml(sub.id)}" title="原位展开预览字幕内容">👁️ 预览</button>
-          `;
-          previewDrawerHtml = `
-            <div class="tracker-preview-drawer" id="preview-${BSE.Utils.escapeHtml(sub.id)}">${BSE.Utils.escapeHtml(subInfo.markdown || subInfo.plainText || '')}</div>
-          `;
-        } else if (subInfo && subInfo.status === 'pending') {
-          subBadgeHtml = `<span class="tracker-sub-badge pending">⏳ 正在抓取字幕…</span>`;
-        } else if (subInfo && subInfo.status === 'not_found') {
-          subBadgeHtml = `<span class="tracker-sub-badge not-found">⚪ 无官方字幕</span>`;
-          subActionsHtml = `
-            <button class="tracker-btn-copy tracker-btn-retry-sub" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(latestItem.id)}" title="重新尝试后台提取字幕">🔄 重新提取</button>
-          `;
-        } else {
-          subBadgeHtml = `<span class="tracker-sub-badge not-found">⚪ 待提取字幕</span>`;
-          subActionsHtml = `
-            <button class="tracker-btn-copy tracker-btn-retry-sub" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(latestItem.id)}" title="立即在后台提取字幕并缓存">⚡ 提取字幕</button>
-          `;
-        }
-      }
+      const items = sub.items || [];
+      const unreadCount = Math.min(sub.unreadCount || 0, items.length);
+      const expanded = expandedTrackerCards.has(sub.id);
+      const visibleCount = expanded ? items.length : Math.max(1, Math.min(unreadCount || 1, 3));
+      const visibleItems = items.slice(0, visibleCount);
+      const typeLabel = sub.type === 'season' ? '合集' : (sub.platform === 'youtube' ? 'YouTube 频道' : 'Bilibili UP 主');
 
       card.innerHTML = `
         <div class="tracker-card-head">
           <div class="tracker-card-brand">
-            <div class="tracker-avatar-wrap">
-              ${sub.avatar ? `<img src="${BSE.Utils.escapeHtml(sub.avatar)}" alt="${BSE.Utils.escapeHtml(sub.title)}">` : (sub.platform === 'youtube' ? '▶️' : '📺')}
-            </div>
+            <div class="tracker-avatar-wrap">${sub.avatar ? `<img src="${BSE.Utils.escapeHtml(sub.avatar)}" alt="">` : (sub.platform === 'youtube' ? '▶' : '📺')}</div>
             <div class="tracker-card-meta">
-              <span class="tracker-card-title" title="${BSE.Utils.escapeHtml(sub.title)}">${BSE.Utils.escapeHtml(sub.title)}</span>
-              <span class="tracker-card-subtext">${typeLabel} · 巡检: ${timeStr}</span>
+              <strong class="tracker-card-title" title="${BSE.Utils.escapeHtml(sub.title)}">${BSE.Utils.escapeHtml(sub.title)}</strong>
+              <span class="tracker-card-subtext">${typeLabel} · ${items.length} 条记录 · 巡检于 ${formatTrackerTime(sub.lastCheckedAt)}</span>
             </div>
           </div>
-          ${(sub.unreadCount || 0) > 0 ? `<span class="tracker-card-tag unread">${sub.unreadCount} 条更新</span>` : `<span class="tracker-card-tag">已读</span>`}
+          ${unreadCount ? `<span class="tracker-card-tag unread">${unreadCount} 条未读</span>` : '<span class="tracker-card-tag">已读</span>'}
         </div>
-
-        ${latestItem ? `
-          <div class="tracker-item-block">
-            <div class="tracker-item-header">
-              <span class="tracker-item-title" title="${BSE.Utils.escapeHtml(latestItem.title)}">🆕 ${BSE.Utils.escapeHtml(latestItem.title)}</span>
-              <span class="tracker-item-time">${latestItem.pubdate ? new Date(latestItem.pubdate).toLocaleDateString() : ''}</span>
-            </div>
-            <div class="tracker-item-sub-row">
-              ${subBadgeHtml}
-              <div class="tracker-sub-actions">
-                ${subActionsHtml}
-              </div>
-            </div>
-            ${previewDrawerHtml}
-          </div>
-        ` : ''}
-
+        <div class="tracker-items">${visibleItems.map((item, itemIndex) => renderTrackerItem(sub, item, `tracker-preview-${subIndex}-${itemIndex}`, itemIndex < unreadCount)).join('')}</div>
+        ${items.length > visibleCount ? `<button class="tracker-expand-btn" data-id="${BSE.Utils.escapeHtml(sub.id)}">查看其余 ${items.length - visibleCount} 条记录⌄</button>` : (expanded && items.length > 1 ? `<button class="tracker-expand-btn" data-id="${BSE.Utils.escapeHtml(sub.id)}">收起记录⌃</button>` : '')}
         <div class="tracker-card-foot">
-          <div class="tracker-foot-actions">
-            ${latestItem?.url ? `
-              <button class="tracker-btn-sm btn-primary-sm tracker-btn-watch" data-url="${BSE.Utils.escapeHtml(latestItem.url)}" title="打开观看该视频">
-                <span>▶ 去观看</span>
-              </button>
-            ` : ''}
-            ${(sub.unreadCount || 0) > 0 ? `
-              <button class="tracker-btn-sm tracker-btn-read" data-id="${BSE.Utils.escapeHtml(sub.id)}" title="标记为已读">
-                <span>✓ 已读</span>
-              </button>
-            ` : ''}
-          </div>
-          <button class="tracker-btn-del" data-id="${BSE.Utils.escapeHtml(sub.id)}" title="取消追踪此订阅">
-            <span>🗑 取消关注</span>
-          </button>
-        </div>
-      `;
-
+          <div class="tracker-foot-actions">${unreadCount ? `<button class="tracker-btn-sm tracker-btn-read" data-id="${BSE.Utils.escapeHtml(sub.id)}">✓ 全部已读</button>` : ''}</div>
+          <button class="tracker-btn-del" data-id="${BSE.Utils.escapeHtml(sub.id)}" data-title="${BSE.Utils.escapeHtml(sub.title)}">取消追踪</button>
+        </div>`;
       fragment.appendChild(card);
     });
-
     elements.trackerList.appendChild(fragment);
   }
 
@@ -857,7 +886,8 @@
         platform: currentAuthorInfo.platform,
         type: 'season',
         title: currentAuthorInfo.seasonTitle || currentAuthorInfo.title || '课程合集',
-        author: currentAuthorInfo.mid || '',
+        author: currentAuthorInfo.upName || currentAuthorInfo.title || '',
+        ownerId: currentAuthorInfo.mid || '',
         avatar: currentAuthorInfo.avatar,
         targetId: currentAuthorInfo.seasonId,
         sourceUrl: state?.url || ''
@@ -882,11 +912,25 @@
     renderTrackerList();
   });
 
+  elements.trackerSearchInput?.addEventListener('input', () => {
+    trackerSearchQuery = elements.trackerSearchInput.value.trim().toLocaleLowerCase();
+    renderTrackerList();
+  });
+
+  elements.trackerSortSelect?.addEventListener('change', () => {
+    trackerSort = elements.trackerSortSelect.value;
+    renderTrackerList();
+  });
+
   elements.trackerCheckAllBtn?.addEventListener('click', async () => {
-    if (elements.trackerCheckAllBtn) elements.trackerCheckAllBtn.textContent = '🔄 检查中…';
+    if (elements.trackerCheckAllBtn) {
+      elements.trackerCheckAllBtn.textContent = '⏳ 检查中…';
+      elements.trackerCheckAllBtn.disabled = true;
+    }
     toast('正在后台检测所有订阅源更新…');
     try {
       const res = await chrome.runtime.sendMessage({ type: 'BSE_TRACKER_CHECK_NOW' });
+      if (res?.error) throw new Error(res.error);
       await loadAndRenderTracker();
       const updatedCount = (res?.updatedSubs || []).length;
       if (updatedCount > 0) {
@@ -897,7 +941,10 @@
     } catch (err) {
       toast(`检查更新失败: ${err.message}`, true);
     } finally {
-      if (elements.trackerCheckAllBtn) elements.trackerCheckAllBtn.textContent = '🔄 刷新';
+      if (elements.trackerCheckAllBtn) {
+        elements.trackerCheckAllBtn.textContent = '🔄 刷新';
+        elements.trackerCheckAllBtn.disabled = false;
+      }
     }
   });
 
@@ -911,37 +958,27 @@
   elements.trackerCopyAllBtn?.addEventListener('click', async () => {
     const list = subscriptionsCache;
     const unreadItems = [];
+    let skippedWithoutSubtitle = 0;
     list.forEach((sub) => {
       if ((sub.unreadCount || 0) > 0) {
         (sub.items || []).slice(0, sub.unreadCount).forEach((item) => {
-          unreadItems.push({
-            ...item,
-            author: item.author || sub.author || sub.title
-          });
+          if (item.subtitle?.status === 'ready' && (item.subtitle.markdown || item.subtitle.plainText)) {
+            unreadItems.push({ ...item, author: item.author || sub.author || sub.title });
+          } else {
+            skippedWithoutSubtitle++;
+          }
         });
       }
     });
 
     if (!unreadItems.length) {
-      // 若无未读标记，收集全部订阅源的最新一期视频
-      list.forEach((sub) => {
-        if ((sub.items || []).length > 0) {
-          unreadItems.push({
-            ...sub.items[0],
-            author: sub.items[0].author || sub.author || sub.title
-          });
-        }
-      });
-    }
-
-    if (!unreadItems.length) {
-      toast('暂无可复制的更新视频字幕', true);
+      toast(skippedWithoutSubtitle ? '未读更新的字幕尚未提取完成' : '暂无未读更新，无需合并复制', true);
       return;
     }
 
     const mergedMd = BSE.Tracker.exportMergedMarkdown(unreadItems);
     await navigator.clipboard.writeText(mergedMd);
-    toast(`✓ 已合并复制 ${unreadItems.length} 篇更新视频字幕为 Markdown 文档！`);
+    toast(`✓ 已复制 ${unreadItems.length} 篇字幕${skippedWithoutSubtitle ? `，跳过 ${skippedWithoutSubtitle} 篇未就绪` : ''}`);
   });
 
   elements.trackerList?.addEventListener('click', async (e) => {
@@ -963,14 +1000,25 @@
       return;
     }
 
-    const previewBtn = e.target.closest('.tracker-btn-preview-toggle');
+    const previewBtn = e.target.closest('.tracker-btn-preview-toggle:not(.tracker-btn-watch)');
     if (previewBtn) {
       const targetId = previewBtn.dataset.target;
       const drawer = document.getElementById(targetId);
       if (drawer) {
         drawer.classList.toggle('open');
-        previewBtn.textContent = drawer.classList.contains('open') ? '▲ 收起' : '👁️ 预览';
+        const open = drawer.classList.contains('open');
+        previewBtn.setAttribute('aria-expanded', String(open));
+        previewBtn.textContent = open ? '▲ 收起' : '👁 预览';
       }
+      return;
+    }
+
+    const expandBtn = e.target.closest('.tracker-expand-btn');
+    if (expandBtn) {
+      const id = expandBtn.dataset.id;
+      if (expandedTrackerCards.has(id)) expandedTrackerCards.delete(id);
+      else expandedTrackerCards.add(id);
+      renderTrackerList();
       return;
     }
 
@@ -1014,7 +1062,8 @@
     const delBtn = e.target.closest('.tracker-btn-del');
     if (delBtn) {
       const id = delBtn.dataset.id;
-      if (id) {
+      const title = delBtn.dataset.title || '该订阅';
+      if (id && window.confirm(`确定取消追踪“${title}”吗？已缓存的更新记录也会被删除。`)) {
         await BSE.Tracker?.removeSubscription?.(id);
         await loadAndRenderTracker();
         chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});

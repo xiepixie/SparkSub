@@ -89,12 +89,34 @@ setupBilibiliNetRules();
 
 function isBilibiliVideoPage(url = '') {
   try {
-    if (!url) return true;
+    if (!url) return false;
     const parsed = new URL(url);
     return (parsed.protocol === 'https:' || parsed.protocol === 'http:')
-      && (parsed.hostname.endsWith('bilibili.com') || parsed.hostname.endsWith('biliapi.net'));
+      && (parsed.hostname === 'bilibili.com'
+        || parsed.hostname.endsWith('.bilibili.com')
+        || parsed.hostname === 'biliapi.net'
+        || parsed.hostname.endsWith('.biliapi.net'));
   } catch {
-    return true;
+    return false;
+  }
+}
+
+function isTrustedSender(sender, platform) {
+  if (!sender || sender.id !== chrome.runtime.id) return false;
+
+  // Extension-owned pages (for example the side panel) do not have a tab.
+  if (!sender.tab) {
+    const extensionRoot = chrome.runtime.getURL('');
+    return Boolean(sender.url && sender.url.startsWith(extensionRoot));
+  }
+
+  const pageUrl = sender.tab.url || sender.url || '';
+  if (platform === 'bilibili') return isBilibiliVideoPage(pageUrl);
+  try {
+    const host = new URL(pageUrl).hostname.toLowerCase();
+    return host === 'youtube.com' || host.endsWith('.youtube.com');
+  } catch {
+    return false;
   }
 }
 
@@ -123,7 +145,7 @@ function classifyNetworkError(error) {
 }
 
 async function fetchBilibiliResource(url, sender) {
-  if (sender?.tab?.url && !isBilibiliVideoPage(sender.tab.url)) {
+  if (!isTrustedSender(sender, 'bilibili')) {
     return { success: false, error: { code: 'INVALID_SENDER', message: '请求来源不是哔哩哔视频页' } };
   }
   if (!isAllowedBilibiliResource(url)) {
@@ -225,6 +247,9 @@ function isAllowedYouTubeResource(url) {
 }
 
 async function fetchYouTubeResource(url, sender) {
+  if (!isTrustedSender(sender, 'youtube')) {
+    return { success: false, error: { code: 'INVALID_SENDER', message: '请求来源不是 YouTube 视频页' } };
+  }
   if (!isAllowedYouTubeResource(url)) {
     return { success: false, error: { code: 'HOST_NOT_ALLOWED', message: 'YouTube 字幕资源地址不在扩展白名单中' } };
   }
@@ -259,7 +284,18 @@ async function fetchYouTubeResource(url, sender) {
       });
     }
 
+    const finalUrl = new URL(response.url || url);
+    if (!isAllowedYouTubeResource(finalUrl.toString())) {
+      return { success: false, error: { code: 'UNSAFE_REDIRECT', message: '字幕请求被重定向到未授权域名' } };
+    }
+    const declaredLength = Number(response.headers.get('content-length') || 0);
+    if (declaredLength > MAX_PROXY_BODY_BYTES) {
+      return { success: false, error: { code: 'BODY_TOO_LARGE', message: '字幕响应超过 5 MiB 安全上限' } };
+    }
     const text = await response.text();
+    if (new Blob([text]).size > MAX_PROXY_BODY_BYTES) {
+      return { success: false, error: { code: 'BODY_TOO_LARGE', message: '字幕响应超过 5 MiB 安全上限' } };
+    }
     return {
       success: true,
       ok: response.ok,
@@ -509,6 +545,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'BSE_DOWNLOAD_MEDIA_FILE') {
     (async () => {
       const { url, filename } = message;
+      if (!isTrustedSender(sender, 'bilibili')) {
+        return { success: false, error: { code: 'INVALID_SENDER', message: '请求来源不是哔哩哔页面或扩展页面' } };
+      }
       if (!isAllowedBilibiliResource(url)) {
         return { success: false, error: { message: '音频域名不在白名单中' } };
       }
