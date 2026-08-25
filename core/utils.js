@@ -19,9 +19,11 @@
    * @param {string} [url]
    * @returns {string | null}
    */
-  function getYouTubeVideoId(url = location.href) {
+  function getYouTubeVideoId(url = (typeof location !== 'undefined' ? location.href : '')) {
+    if (!url) return null;
     try {
-      const parsed = new URL(url, location.origin);
+      const baseOrigin = typeof location !== 'undefined' && location.origin ? location.origin : 'https://www.youtube.com';
+      const parsed = new URL(url, baseOrigin);
       if (parsed.searchParams.get('v')) return parsed.searchParams.get('v');
       if (parsed.pathname.startsWith('/shorts/')) return parsed.pathname.split('/')[2] || null;
       if (parsed.pathname.startsWith('/embed/')) return parsed.pathname.split('/')[2] || null;
@@ -301,8 +303,23 @@
     }
   };
 
+  /**
+   * 判断指定或当前 URL 是否为真正的视频播放页（而非首页、推荐流或分区索引）
+   * @param {string} [url]
+   * @returns {boolean}
+   */
+  function isMatchingVideoUrl(url = (typeof location !== 'undefined' ? location.href : '')) {
+    if (!url) return false;
+    const isYouTube = /(^https?:\/\/)(www\.|m\.)?(youtube\.com\/(watch|shorts|embed|live)|youtu\.be\/)/i.test(url);
+    if (isYouTube) return true;
+    const isBili = /(^https?:\/\/)(www\.|m\.)?bilibili\.com\/(video|festival|blackboard|list|bangumi\/play|medialist\/play)/i.test(url)
+      || (/(^https?:\/\/)(www\.|m\.)?bilibili\.com/i.test(url) && /[?&]bvid=BV/i.test(url));
+    return isBili;
+  }
+
   BSE.Utils = Object.freeze({
     detectPlatform,
+    isMatchingVideoUrl,
     getYouTubeVideoId,
     getBvid,
     getBilibiliPage,

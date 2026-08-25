@@ -133,7 +133,24 @@
     trackerNotifySelect: document.querySelector('#tracker-notify-select'),
     trackerExportBtn: document.querySelector('#tracker-export-btn'),
     trackerImportBtn: document.querySelector('#tracker-import-btn'),
-    trackerImportFile: document.querySelector('#tracker-import-file')
+    trackerImportFile: document.querySelector('#tracker-import-file'),
+    // Queue Elements
+    tabQueue: document.querySelector('#tab-queue'),
+    tabQueueText: document.querySelector('#tab-queue-text'),
+    queueRunningBadge: document.querySelector('#queue-running-badge'),
+    queueView: document.querySelector('#queue-view'),
+    queueBtnShowAdd: document.querySelector('#queue-btn-show-add'),
+    queueBtnCopyMerged: document.querySelector('#queue-btn-copy-merged'),
+    queueBtnClearDone: document.querySelector('#queue-btn-clear-done'),
+    queueInputPanel: document.querySelector('#queue-input-panel'),
+    queueBatchInput: document.querySelector('#queue-batch-input'),
+    queueBatchSubmit: document.querySelector('#queue-batch-submit'),
+    queueBatchCancel: document.querySelector('#queue-batch-cancel'),
+    queueStatusBar: document.querySelector('#queue-status-bar'),
+    queueStatusText: document.querySelector('#queue-status-text'),
+    queueCountPill: document.querySelector('#queue-count-pill'),
+    queueList: document.querySelector('#queue-list'),
+    queueEmpty: document.querySelector('#queue-empty')
   };
 
   let sidepanelToastTimer = null;
@@ -178,7 +195,10 @@
       elements.track.replaceChildren(...tracks.map((track) => {
         const option = document.createElement('option');
         option.value = String(track.id);
-        option.textContent = `${track.lanDoc || track.lan || 'Default'}（${track.isAuto ? autoDoc : ccDoc}）`;
+        const tag = track.isTranslated ? '翻译' : (track.isAuto ? autoDoc : ccDoc);
+        option.textContent = track.isTranslated
+          ? (track.lanDoc || track.lan)
+          : `${track.lanDoc || track.lan || 'Default'}（${tag}）`;
         option.selected = String(track.id) === String(state.selectedTrackId);
         return option;
       }));
@@ -211,11 +231,21 @@
     elements.tabPlain?.classList.toggle('active', tabId === 'plain');
     elements.tabAi?.classList.toggle('active', tabId === 'ai');
     elements.tabTracker?.classList.toggle('active', tabId === 'tracker');
+    elements.tabQueue?.classList.toggle('active', tabId === 'queue');
 
-    if (tabId === 'tracker') {
+    if (tabId === 'queue') {
+      elements.transcript.hidden = true;
+      elements.aiSection.hidden = true;
+      if (elements.trackerSection) elements.trackerSection.hidden = true;
+      if (elements.queueView) elements.queueView.hidden = false;
+      document.querySelector('.toolbar')?.setAttribute('hidden', 'true');
+      document.querySelector('.video-bar')?.setAttribute('hidden', 'true');
+      loadAndRenderQueue();
+    } else if (tabId === 'tracker') {
       elements.transcript.hidden = true;
       elements.aiSection.hidden = true;
       if (elements.trackerSection) elements.trackerSection.hidden = false;
+      if (elements.queueView) elements.queueView.hidden = true;
       document.querySelector('.toolbar')?.setAttribute('hidden', 'true');
       document.querySelector('.video-bar')?.setAttribute('hidden', 'true');
       loadAndRenderTracker();
@@ -223,12 +253,14 @@
       elements.transcript.hidden = true;
       elements.aiSection.hidden = false;
       if (elements.trackerSection) elements.trackerSection.hidden = true;
+      if (elements.queueView) elements.queueView.hidden = true;
       document.querySelector('.toolbar')?.setAttribute('hidden', 'true');
       document.querySelector('.video-bar')?.setAttribute('hidden', 'true');
     } else {
       elements.transcript.hidden = false;
       elements.aiSection.hidden = true;
       if (elements.trackerSection) elements.trackerSection.hidden = true;
+      if (elements.queueView) elements.queueView.hidden = true;
       document.querySelector('.toolbar')?.removeAttribute('hidden');
       document.querySelector('.video-bar')?.removeAttribute('hidden');
       renderedMediaKey = null; // Force re-render for plain vs timestamp
@@ -661,6 +693,222 @@
     elements.trackerList.appendChild(fragment);
   }
 
+  // === Queue (Background Transcription) State & Methods ===
+  let queueCache = [];
+
+  async function loadAndRenderQueue() {
+    if (!BSE.Queue) return;
+    try {
+      queueCache = await BSE.Queue.getQueue();
+      renderQueueList();
+      updateQueueBadge();
+      const hasPending = queueCache.some((i) => !['done', 'failed'].includes(i.stage));
+      if (hasPending) {
+        BSE.Queue?.processPendingJobs?.().catch(() => {});
+        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+          chrome.runtime.sendMessage({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
+        }
+      }
+    } catch (err) {
+      console.warn('[SparkSub Queue] 读取队列异常:', err);
+    }
+  }
+
+  function updateQueueBadge() {
+    const runningCount = queueCache.filter((i) => !['done', 'failed'].includes(i.stage)).length;
+    if (elements.queueRunningBadge) {
+      if (runningCount > 0) {
+        elements.queueRunningBadge.hidden = false;
+        elements.queueRunningBadge.textContent = String(runningCount);
+      } else {
+        elements.queueRunningBadge.hidden = true;
+      }
+    }
+    if (elements.queueCountPill) {
+      elements.queueCountPill.textContent = `${queueCache.length} 项`;
+    }
+    if (elements.queueStatusText) {
+      elements.queueStatusText.textContent = runningCount > 0
+        ? `正在处理中 (${runningCount} 项进行中)…`
+        : (queueCache.length > 0 ? '所有转录已完成' : '队列就绪');
+    }
+  }
+
+  const expandedQueueCards = new Set();
+
+  function renderQueueList() {
+    if (!elements.queueList) return;
+    if (!queueCache.length) {
+      elements.queueList.innerHTML = '';
+      if (elements.queueEmpty) elements.queueEmpty.hidden = false;
+      return;
+    }
+    if (elements.queueEmpty) elements.queueEmpty.hidden = true;
+
+    const frag = document.createDocumentFragment();
+    for (const item of queueCache) {
+      const card = document.createElement('div');
+      card.className = `queue-card is-${item.stage}`;
+
+      const stageLabels = {
+        queued: '⏳ 排队中',
+        resolving: '🔍 解析中',
+        fetching_caption: '📥 提取字幕',
+        fetching_audio: '🎵 探测音频',
+        transcribing: '⚡ 转录中',
+        postprocessing: '📝 格式化',
+        done: item.subtitle?.cueCount ? `✓ ${item.subtitle.cueCount} 句字幕` : '✓ 已就绪',
+        failed: '✕ 失败'
+      };
+
+      const stageText = stageLabels[item.stage] || item.stage;
+      const progressPercent = item.stage === 'done' ? 100 : (item.progress || 0);
+      const displayHint = item.stageHint || stageText;
+      const isExpanded = expandedQueueCards.has(item.id);
+      const isBili = item.platform === 'bilibili';
+
+      let actionButtonsHtml = '';
+      if (item.stage === 'done') {
+        actionButtonsHtml = `
+          <button type="button" class="queue-act-btn btn-preview ${isExpanded ? 'active' : ''}" data-id="${item.id}" title="展开/收起内联字幕预览">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            <span>预览</span>
+          </button>
+          <button type="button" class="queue-act-btn primary btn-copy" data-id="${item.id}" title="复制 Markdown 字幕全文">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <span>复制</span>
+          </button>
+          <button type="button" class="queue-act-btn btn-download-txt" data-id="${item.id}" title="下载纯文本 TXT">
+            <span>TXT</span>
+          </button>
+          <button type="button" class="queue-act-btn btn-download-srt" data-id="${item.id}" title="下载 SRT 字幕">
+            <span>SRT</span>
+          </button>
+        `;
+      } else if (item.stage === 'failed') {
+        actionButtonsHtml = `
+          <button type="button" class="queue-act-btn primary btn-retry" data-id="${item.id}" title="重新执行转录">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            <span>重试</span>
+          </button>
+        `;
+      }
+
+      card.innerHTML = `
+        <button type="button" class="queue-card-del-btn btn-remove" data-id="${item.id}" title="从队列中移除">✕</button>
+        <div class="queue-card-main">
+          <div class="queue-thumb-wrap" title="点击在新标签页打开视频">
+            <img class="queue-thumb-img" src="${item.cover || 'data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 100 60\' fill=\'%23334155\'><text x=\'50\' y=\'35\' fill=\'%2394a3b8\' font-size=\'14\' text-anchor=\'middle\'>SparkSub</text></svg>'}" alt="cover" loading="lazy">
+            <span class="queue-thumb-tag ${isBili ? 'bilibili' : 'youtube'}">${isBili ? 'B站' : 'YT'}</span>
+            <div class="queue-thumb-hover-overlay">▶</div>
+          </div>
+          <div class="queue-card-body">
+            <a class="queue-card-title" href="${BSE.Utils.escapeHtml(item.url || '#')}" target="_blank" title="${BSE.Utils.escapeHtml(item.title)} (点击打开视频)">
+              ${BSE.Utils.escapeHtml(item.title)}
+            </a>
+            <div class="queue-card-meta-line">
+              <span class="queue-meta-author" title="作者">👤 ${BSE.Utils.escapeHtml(item.author || (isBili ? 'UP主' : '频道'))}</span>
+            </div>
+            <div class="queue-card-bottom-row">
+              <span class="queue-status-badge stage-${item.stage}" title="${BSE.Utils.escapeHtml(displayHint)}">
+                ${displayHint}
+              </span>
+              <div class="queue-actions-cluster">
+                ${actionButtonsHtml}
+              </div>
+            </div>
+          </div>
+        </div>
+        ${item.stage !== 'done' && item.stage !== 'failed' ? `
+          <div class="queue-card-progress">
+            <div class="queue-card-progress-fill" style="width: ${progressPercent}%"></div>
+          </div>
+        ` : ''}
+        ${item.subtitle?.plainText ? `
+          <div class="queue-preview-drawer ${isExpanded ? 'open' : ''}">
+            <div class="queue-preview-toolbar">
+              <span class="queue-preview-stats">共 ${item.subtitle.cueCount || 0} 行字幕 · ${item.subtitle.langDoc || item.subtitle.language || '中文'}</span>
+              <button type="button" class="queue-preview-copy-btn btn-quick-copy" title="复制预览内容">📋 复制全文</button>
+            </div>
+            <div class="queue-preview-body">${BSE.Utils.escapeHtml(item.subtitle.plainText)}</div>
+          </div>
+        ` : ''}
+      `;
+
+      // Event Listeners for Card
+      const openVideo = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (item.url) window.open(item.url, '_blank');
+      };
+
+      card.querySelector('.queue-thumb-wrap')?.addEventListener('click', openVideo);
+      card.querySelector('.queue-card-title')?.addEventListener('click', openVideo);
+
+      card.querySelector('.btn-preview')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (expandedQueueCards.has(item.id)) {
+          expandedQueueCards.delete(item.id);
+        } else {
+          expandedQueueCards.add(item.id);
+        }
+        const drawer = card.querySelector('.queue-preview-drawer');
+        const btn = card.querySelector('.btn-preview');
+        const nowOpen = expandedQueueCards.has(item.id);
+        drawer?.classList.toggle('open', nowOpen);
+        btn?.classList.toggle('active', nowOpen);
+      });
+
+      card.querySelector('.btn-quick-copy')?.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (item.subtitle?.markdown || item.subtitle?.plainText) {
+          await navigator.clipboard.writeText(item.subtitle.markdown || item.subtitle.plainText);
+          toast(`✓ 已复制《${item.title}》字幕`);
+        }
+      });
+
+      card.querySelector('.btn-copy')?.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (item.subtitle?.markdown || item.subtitle?.plainText) {
+          await navigator.clipboard.writeText(item.subtitle.markdown || item.subtitle.plainText);
+          toast(`✓ 已复制《${item.title}》Markdown 字幕`);
+        }
+      });
+
+      card.querySelector('.btn-download-txt')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (item.subtitle?.plainText) {
+          BSE.Utils.downloadTextFile(`${item.title || item.id}.txt`, item.subtitle.plainText);
+        }
+      });
+
+      card.querySelector('.btn-download-srt')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (item.subtitle?.srt) {
+          BSE.Utils.downloadTextFile(`${item.title || item.id}.srt`, item.subtitle.srt);
+        }
+      });
+
+      card.querySelector('.btn-retry')?.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await BSE.Queue.retryItem(item.id);
+        toast('已重新排队，正在执行…');
+        await loadAndRenderQueue();
+        BSE.Queue?.processPendingJobs?.().catch(() => {});
+      });
+
+      card.querySelector('.btn-remove')?.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await BSE.Queue.removeFromQueue(item.id);
+        loadAndRenderQueue();
+      });
+
+      frag.appendChild(card);
+    }
+    elements.queueList.innerHTML = '';
+    elements.queueList.appendChild(frag);
+  }
+
   function renderTranscript() {
     if (currentTab === 'ai') return;
     const isInactive = state?.status === 'empty' || state?.status === 'error';
@@ -901,6 +1149,8 @@
       }
     } else if (message?.type === 'BSE_PLAYBACK_BROADCAST' && message.tabId === activeTabId) {
       updatePlayback(message.activeIndex);
+    } else if (message?.type === 'BSE_QUEUE_UPDATED') {
+      loadAndRenderQueue();
     }
   });
 
@@ -964,6 +1214,14 @@
     if (elements.tabPlain) elements.tabPlain.textContent = t('tab_plain');
     if (elements.tabAi) elements.tabAi.textContent = t('tab_ai');
     if (elements.tabTrackerText) elements.tabTrackerText.textContent = t('tab_tracker');
+    if (elements.tabQueueText) elements.tabQueueText.textContent = t('tab_queue');
+    if (elements.queueBtnShowAdd?.querySelector('span')) elements.queueBtnShowAdd.querySelector('span').textContent = `➕ ${t('queue_btn_add_batch')}`;
+    if (elements.queueBtnCopyMerged?.querySelector('span')) elements.queueBtnCopyMerged.querySelector('span').textContent = `📋 ${t('queue_btn_copy_merged')}`;
+    if (elements.queueBtnClearDone?.querySelector('span')) elements.queueBtnClearDone.querySelector('span').textContent = `🗑️ ${t('queue_btn_clear_done')}`;
+    if (elements.queueBatchSubmit) elements.queueBatchSubmit.textContent = t('queue_btn_submit_batch');
+    if (elements.queueBatchCancel) elements.queueBatchCancel.textContent = t('batch_btn_cancel');
+    if (elements.queueEmptyTitle) elements.queueEmptyTitle.textContent = t('queue_empty_title');
+    if (elements.queueEmptyDesc) elements.queueEmptyDesc.textContent = t('queue_empty_desc');
     if (elements.batchBtnText) elements.batchBtnText.textContent = t('btn_batch_export');
     if (elements.aiTitle) elements.aiTitle.textContent = `🤖 ${t('ai_summary_title')}`;
     if (elements.aiCardSummary) elements.aiCardSummary.textContent = t('ai_prompt_summary');
@@ -1029,6 +1287,80 @@
   elements.tabPlain?.addEventListener('click', () => switchTab('plain'));
   elements.tabAi?.addEventListener('click', () => switchTab('ai'));
   elements.tabTracker?.addEventListener('click', () => switchTab('tracker'));
+  elements.tabQueue?.addEventListener('click', () => switchTab('queue'));
+
+  // Queue Toolbar & Batch Actions
+  elements.queueBtnShowAdd?.addEventListener('click', () => {
+    if (elements.queueInputPanel) {
+      elements.queueInputPanel.hidden = !elements.queueInputPanel.hidden;
+      if (!elements.queueInputPanel.hidden && elements.queueBatchInput) {
+        elements.queueBatchInput.focus();
+      }
+    }
+  });
+
+  elements.queueBatchCancel?.addEventListener('click', () => {
+    if (elements.queueInputPanel) elements.queueInputPanel.hidden = true;
+  });
+
+  elements.queueBatchSubmit?.addEventListener('click', async () => {
+    const rawText = elements.queueBatchInput?.value || '';
+    const urls = rawText.split('\n').map((s) => s.trim()).filter(Boolean);
+    if (!urls.length) {
+      toast('请输入有效的视频链接或BV号', true);
+      return;
+    }
+    try {
+      let items = [];
+      try {
+        const res = await chrome.runtime.sendMessage({
+          type: 'BSE_QUEUE_ENQUEUE',
+          urls
+        });
+        if (res?.ok) items = res.items || [];
+      } catch {}
+
+      if (!items.length && BSE.Queue?.addToQueue) {
+        items = await BSE.Queue.addToQueue(urls);
+      }
+
+      if (items.length) {
+        toast(`已成功添加 ${items.length} 个任务到队列`);
+        if (elements.queueBatchInput) elements.queueBatchInput.value = '';
+        if (elements.queueInputPanel) elements.queueInputPanel.hidden = true;
+        await loadAndRenderQueue();
+        BSE.Queue?.processPendingJobs?.().catch(() => {});
+      } else {
+        toast('添加失败，请检查链接格式', true);
+      }
+    } catch (err) {
+      toast('请求失败', true);
+    }
+  });
+
+  elements.queueBtnCopyMerged?.addEventListener('click', async () => {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'BSE_QUEUE_EXPORT_MERGED' });
+      if (res?.ok && res.markdown) {
+        await navigator.clipboard.writeText(res.markdown);
+        toast('✓ 已复制全部已完成视频的合并 Markdown');
+      } else {
+        toast('暂无已完成的转录内容可导出', true);
+      }
+    } catch (err) {
+      toast('复制失败', true);
+    }
+  });
+
+  elements.queueBtnClearDone?.addEventListener('click', async () => {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'BSE_QUEUE_CLEAR_COMPLETED' });
+      toast(`已清理 ${res?.count || 0} 项已完成任务`);
+      await loadAndRenderQueue();
+    } catch {
+      toast('清理失败', true);
+    }
+  });
 
   // Tracker Subscriptions Event Listeners
   elements.trackerSubscribeUpBtn?.addEventListener('click', async () => {
@@ -2014,4 +2346,5 @@
 
   loadInitialState().catch((error) => toast(error.message, true));
   loadAndRenderTracker().catch(() => {});
+  loadAndRenderQueue().catch(() => {});
 })();

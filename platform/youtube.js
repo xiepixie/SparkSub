@@ -14,8 +14,8 @@
         reject(new Error(`播放器通信超时：${type}`));
       }, timeoutMs);
       const onMessage = (event) => {
-        const data = event.data;
-        if (event.source !== window || data?.channel !== CHANNEL || data?.direction !== 'response' || data.requestId !== requestId) return;
+        const data = event?.data;
+        if (data?.channel !== CHANNEL || data?.direction !== 'response' || data.requestId !== requestId) return;
         clearTimeout(timer);
         window.removeEventListener('message', onMessage);
         if (data.ok) resolve(data.result);
@@ -44,9 +44,21 @@
   function matchingRequests(track) {
     const videoId = getYouTubeVideoId();
     const expectedKind = track?.isAuto ? 'asr' : 'manual';
+    const targetLang = track?.lan || '';
+    const isTrackTranslated = Boolean(track?.isTranslated || track?.tlang);
+
     return Array.from(requests.values())
       .filter((item) => item.videoId === videoId)
-      .filter((item) => !track?.lan || item.lang === track.lan)
+      .filter((item) => {
+        if (!targetLang) return true;
+        // 如果目标轨道是翻译轨（如 zh-Hans），只匹配携带 tlang=zh-Hans 的翻译请求
+        if (isTrackTranslated) {
+          return (item.tlang === targetLang || item.lang === targetLang) && Boolean(item.tlang);
+        }
+        // 如果目标轨道是原生轨（未翻译，如 en），绝不能匹配携带了 tlang 的翻译请求！
+        if (item.tlang) return false;
+        return item.lang === targetLang || item.sourceLang === targetLang;
+      })
       .sort((a, b) => {
         const aScore = Number(a.kind === expectedKind) + Number(a.hasPoToken) * 2 + Number(a.fmt === 'json3');
         const bScore = Number(b.kind === expectedKind) + Number(b.hasPoToken) * 2 + Number(b.fmt === 'json3');
@@ -103,7 +115,29 @@
       return true;
     });
 
-    diagnostic?.('查找字幕', `播放器返回 ${tracks.length} 条字幕轨道`);
+    // 自动为非中文视频扩展生成 YouTube 原生「中文（自动翻译）」轨道
+    const hasChineseTrack = tracks.some((t) => /zh|cn|chinese|中/i.test(t.lan || t.lanDoc || ''));
+    if (!hasChineseTrack && tracks.length > 0) {
+      const baseTrack = tracks.find((t) => t.isCC) || tracks[0];
+      if (baseTrack && baseTrack.subtitleUrl) {
+        try {
+          const transUrl = new URL(baseTrack.subtitleUrl, location.origin);
+          transUrl.searchParams.set('tlang', 'zh-Hans');
+          tracks.push({
+            id: `${baseTrack.id}:tlang:zh-Hans`,
+            lan: 'zh-Hans',
+            lanDoc: `${baseTrack.lanDoc || baseTrack.lan} → 中文（自动翻译）`,
+            subtitleUrl: transUrl.toString(),
+            isAuto: true,
+            isTranslated: true,
+            tlang: 'zh-Hans',
+            platform: BSE.PLATFORM.YOUTUBE
+          });
+        } catch {}
+      }
+    }
+
+    diagnostic?.('查找字幕', `播放器返回 ${tracks.length} 条字幕轨道 (含自动翻译轨)`);
     return tracks;
   }
 
@@ -227,9 +261,12 @@
   async function loadTrack(track, { signal, diagnostic } = {}) {
     await hydrateCapturedRequests();
     const existingCaptures = matchingRequests(track);
-    diagnostic?.('提取策略', `已捕获原生请求 ${existingCaptures.length} 条 · 目标轨道: ${track.lanDoc || track.lan}`);
+    const isTrans = Boolean(track.isTranslated || track.tlang);
+    diagnostic?.('提取策略', isTrans
+      ? `【自动翻译轨】目标语言: ${track.lanDoc || track.lan} (tlang: ${track.tlang || track.lan}) · 匹配到 ${existingCaptures.length} 条捕获翻译请求`
+      : `【原生字幕轨】目标语言: ${track.lanDoc || track.lan} · 匹配到 ${existingCaptures.length} 条原生请求 (已隔离翻译轨)`);
 
-    // 1. 优先重放已捕获的原生请求（最完整，带 session 与 pot）
+    // 1. 优先重放已捕获的原生/翻译请求（最完整，带 session 与 pot）
     for (const captured of existingCaptures) {
       const cues = await fetchAndParse(captured.url, captured.fmt, signal, diagnostic, '原生请求重放');
       if (cues.length) return cues;
@@ -254,35 +291,37 @@
       if (directCues && directCues.length) return directCues;
     } catch {}
 
-    // 3. 请求播放器切换轨道触发原生字幕拉取
-    try {
-      await bridgeRequest('SELECT_TRACK', track, 2000);
-      diagnostic?.('播放器', `已请求切换到 ${track.lanDoc || track.lan} 轨道`);
-    } catch (error) {
-      diagnostic?.('播放器', `切换轨道提示：${error.message}`);
-    }
-
-    // 4. 短轮询等待新拦截请求 (最高 1.8s)
-    const deadline = Date.now() + 1800;
-    const triedUrls = new Set();
-    while (Date.now() < deadline) {
-      await hydrateCapturedRequests();
-      const candidates = matchingRequests(track).filter((item) => !triedUrls.has(item.url));
-      if (candidates.length) {
-        for (const captured of candidates) {
-          triedUrls.add(captured.url);
-          const cues = await fetchAndParse(captured.url, captured.fmt, signal, diagnostic, '新拦截请求');
-          if (cues.length) return cues;
-        }
+    // 3. 原生轨道：请求播放器切换轨道触发原生字幕拉取
+    if (!isTrans) {
+      try {
+        await bridgeRequest('SELECT_TRACK', track, 2000);
+        diagnostic?.('播放器', `已请求切换到 ${track.lanDoc || track.lan} 轨道`);
+      } catch (error) {
+        diagnostic?.('播放器', `切换轨道提示：${error.message}`);
       }
-      await delay(100, signal);
+
+      // 4. 短轮询等待新拦截请求 (最高 1.8s)
+      const deadline = Date.now() + 1800;
+      const triedUrls = new Set();
+      while (Date.now() < deadline) {
+        await hydrateCapturedRequests();
+        const candidates = matchingRequests(track).filter((item) => !triedUrls.has(item.url));
+        if (candidates.length) {
+          for (const captured of candidates) {
+            triedUrls.add(captured.url);
+            const cues = await fetchAndParse(captured.url, captured.fmt, signal, diagnostic, '新拦截请求');
+            if (cues.length) return cues;
+          }
+        }
+        await delay(100, signal);
+      }
     }
 
     // 5. 转录面板回退
     const transcript = await transcriptFallback(signal, diagnostic);
     if (transcript.length) return transcript;
 
-    const error = new Error('YouTube 字幕轨道存在，但所有正文通道均未返回有效字幕');
+    const error = new Error(`YouTube 字幕轨道 [${track.lanDoc || track.lan}] 存在，但所有正文通道均未返回有效字幕`);
     error.code = 'YOUTUBE_BODY_UNAVAILABLE';
     error.hint = '先在播放器中开启一次该语言字幕；若仍失败，请复制诊断中各通道的 HTTP 状态。';
     throw error;

@@ -304,11 +304,89 @@ export interface TrackerSettings {
   autoExtractSubtitles: boolean;
 }
 
+export type QueueStage =
+  | 'queued'
+  | 'resolving'
+  | 'fetching_caption'
+  | 'fetching_audio'
+  | 'transcribing'
+  | 'postprocessing'
+  | 'done'
+  | 'failed';
+
+export interface QueueItemSubtitle {
+  language: string;
+  langDoc: string;
+  cueCount: number;
+  plainText: string;
+  markdown: string;
+  srt?: string;
+  cues?: Cue[];
+}
+
+export interface QueueItem {
+  id: string;
+  url: string;
+  platform: Platform;
+  targetId: string;
+  title: string;
+  author: string;
+  cover?: string;
+  duration?: number | string;
+  stage: QueueStage;
+  progress: number;
+  stageHint?: string;
+  error?: string;
+  addedAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  metaCache?: {
+    title?: string;
+    author?: string;
+    cid?: number | string;
+    cover?: string;
+    pages?: Array<{ page: number; cid: number | string; part: string }>;
+  };
+  captionTrackCache?: {
+    tracks?: SubtitleTrack[];
+    selectedTrack?: SubtitleTrack;
+    rawText?: string;
+  };
+  audioCache?: {
+    audioUrl?: string;
+    bandwidth?: number;
+  };
+  subtitle?: QueueItemSubtitle;
+}
+
+export interface QueueSettings {
+  maxConcurrency: number;
+  autoDownload: boolean;
+  preferredFormat: 'md' | 'txt' | 'srt';
+  enableNotification: boolean;
+}
+
+export interface BSEQueueNamespace {
+  getQueue(): Promise<QueueItem[]>;
+  getItem(id: string): Promise<QueueItem | null>;
+  addToQueue(urlsOrIds: string | string[], options?: { title?: string; author?: string; cover?: string }): Promise<QueueItem[]>;
+  removeFromQueue(id: string): Promise<boolean>;
+  clearCompleted(): Promise<number>;
+  clearAll(): Promise<void>;
+  retryItem(id: string): Promise<QueueItem | null>;
+  getSettings(): Promise<QueueSettings>;
+  saveSettings(settings: Partial<QueueSettings>): Promise<QueueSettings>;
+  recoverStaleJobs(): Promise<QueueItem[]>;
+  exportQueueMergedMarkdown(itemIds?: string[]): Promise<string>;
+  normalizeVideoUrl(rawUrl: string): { platform: Platform; targetId: string; page?: number; cleanUrl: string } | null;
+}
+
 export interface BSETrackerNamespace {
   getSubscriptions(): Promise<TrackedSubscription[]>;
   getSubscription(id: string): Promise<TrackedSubscription | null>;
   addSubscription(sub: Partial<TrackedSubscription>): Promise<TrackedSubscription>;
   removeSubscription(id: string): Promise<boolean>;
+  renameSubscription(id: string, newTitle: string): Promise<boolean>;
   markAsRead(subscriptionId: string, itemId?: string): Promise<void>;
   markAllAsRead(): Promise<void>;
   getSettings(): Promise<TrackerSettings>;
@@ -335,6 +413,7 @@ export interface BSENamespace {
   Parsers: BSEParsersNamespace;
   Formatters: BSEFormattersNamespace;
   Tracker?: BSETrackerNamespace;
+  Queue?: BSEQueueNamespace;
   YouTube: BSEPlatformNamespace;
   Bilibili: BSEPlatformNamespace;
   I18n?: BSEI18nNamespace;

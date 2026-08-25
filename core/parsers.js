@@ -135,14 +135,39 @@
   }
 
   function parseLegacyXml(text) {
-    return parseXml(text, 'text', (node) => {
-      const from = Number.parseFloat(node.getAttribute('start') || '0');
-      return {
-        from,
-        to: from + Number.parseFloat(node.getAttribute('dur') || '2'),
-        content: node.textContent
-      };
-    });
+    if (typeof DOMParser !== 'undefined') {
+      try {
+        const parsed = parseXml(text, 'text', (node) => {
+          const from = Number.parseFloat(node.getAttribute('start') || '0');
+          return {
+            from,
+            to: from + Number.parseFloat(node.getAttribute('dur') || '2'),
+            content: node.textContent
+          };
+        });
+        if (parsed.length) return parsed;
+      } catch {}
+    }
+    const cues = [];
+    const regex = /<text\s+[^>]*start="([\d\.]+)"[^>]*dur="([\d\.]+)"[^>]*>([\s\S]*?)<\/text>|<text\s+[^>]*>([\s\S]*?)<\/text>/gi;
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+      const from = Number.parseFloat(match[1] || '0') || 0;
+      const dur = Number.parseFloat(match[2] || '2') || 2;
+      const rawContent = match[3] || match[4] || '';
+      const content = rawContent
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/<[^>]+>/g, '')
+        .trim();
+      if (content) {
+        cues.push({ from, to: from + dur, content });
+      }
+    }
+    return normalize(cues);
   }
 
   /**

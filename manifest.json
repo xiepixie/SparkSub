@@ -12,7 +12,9 @@
     "declarativeNetRequest",
     "sidePanel",
     "scripting",
-    "downloads"
+    "downloads",
+    "offscreen",
+    "contextMenus"
   ],
   "host_permissions": [
     "https://www.youtube.com/*",
@@ -55,7 +57,8 @@
         "*://www.bilibili.com/list/*",
         "*://www.bilibili.com/bangumi/play/*",
         "*://www.bilibili.com/medialist/play/*",
-        "*://space.bilibili.com/*"
+        "*://space.bilibili.com/*",
+        "*://www.bilibili.com/*"
       ],
       "js": [
         "core/namespace.js",
@@ -65,9 +68,11 @@
         "core/parsers.js",
         "core/formatters.js",
         "core/tracker.js",
+        "core/queue.js",
         "platform/youtube.js",
         "platform/bilibili.js",
         "content/rolling-panel.js",
+        "content/feed-injector.js",
         "content/app.js"
       ],
       "run_at": "document_idle",

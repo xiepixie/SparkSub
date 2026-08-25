@@ -1699,6 +1699,16 @@
       if (platform) this.platform = platform;
       this.applyI18nAndTheme();
 
+      if (!BSE.Utils.isMatchingVideoUrl(location.href)) {
+        if (this.wrapper) this.wrapper.style.display = 'none';
+        const extRoot = document.getElementById('bse-extension-root');
+        if (extRoot) extRoot.style.display = 'none';
+        return;
+      }
+      if (this.wrapper) this.wrapper.style.display = 'block';
+      const extRoot = document.getElementById('bse-extension-root');
+      if (extRoot) extRoot.style.display = 'block';
+
       if (this.platform === BSE.PLATFORM.YOUTUBE) {
         const secondary = document.querySelector('#secondary-inner, #secondary, ytd-watch-next-secondary-results-renderer');
         if (secondary) {
@@ -1763,6 +1773,12 @@
 
     syncLayout() {
       if (!this.panel?.style) return;
+      if (!BSE.Utils.isMatchingVideoUrl(location.href)) {
+        if (this.wrapper) this.wrapper.style.display = 'none';
+        const extRoot = document.getElementById('bse-extension-root');
+        if (extRoot) extRoot.style.display = 'none';
+        return;
+      }
       this.ensureRootMounted(this.platform);
 
       if (this.platform === BSE.PLATFORM.YOUTUBE) {
@@ -2041,7 +2057,10 @@
         this.trackSelect.replaceChildren(...tracks.map((track) => {
           const option = document.createElement('option');
           option.value = String(track.id);
-          option.textContent = `${track.lanDoc || track.lan || 'Default'}（${track.isAuto ? autoDoc : ccDoc}）`;
+          const tag = track.isTranslated ? '翻译' : (track.isAuto ? autoDoc : ccDoc);
+          option.textContent = track.isTranslated
+            ? (track.lanDoc || track.lan)
+            : `${track.lanDoc || track.lan || 'Default'}（${tag}）`;
           option.selected = option.value === selected;
           return option;
         }));

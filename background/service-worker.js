@@ -1,7 +1,15 @@
 'use strict';
 
 try {
-  importScripts('../core/namespace.js', '../core/utils.js', '../core/tracker.js');
+  importScripts(
+    '/core/namespace.js',
+    '/core/utils.js',
+    '/core/i18n.js',
+    '/core/parsers.js',
+    '/core/formatters.js',
+    '/core/tracker.js',
+    '/core/queue.js'
+  );
 } catch (e) {
   console.warn('[BSE Worker] importScripts 异常:', e);
 }
@@ -16,6 +24,115 @@ const BILIBILI_REQUEST_TIMEOUT_MS = 15000;
 
 const BILIBILI_REFERER_RULE_ID = 1001;
 const ALARM_SUBSCRIPTION_CHECK = 'BSE_SUBSCRIPTION_CHECK';
+const OFFSCREEN_DOCUMENT_PATH = 'offscreen/offscreen.html';
+
+async function hasOffscreenDocument() {
+  if (chrome.runtime?.getContexts) {
+    try {
+      const contexts = await chrome.runtime.getContexts({
+        contextTypes: ['OFFSCREEN_DOCUMENT']
+      });
+      if (contexts && contexts.length > 0) return true;
+    } catch {}
+  }
+  if (chrome.offscreen?.hasDocument) {
+    try {
+      return await chrome.offscreen.hasDocument();
+    } catch {}
+  }
+  return false;
+}
+
+let isCreatingOffscreen = false;
+
+async function ensureOffscreenDocument() {
+  if (!chrome.offscreen?.createDocument) return false;
+  try {
+    const exists = await hasOffscreenDocument();
+    if (exists) {
+      chrome.runtime.sendMessage({ type: 'BSE_OFFSCREEN_START' }).catch(() => {});
+      return true;
+    }
+  } catch {}
+
+  if (isCreatingOffscreen) return true;
+  isCreatingOffscreen = true;
+
+  try {
+    const reasons = [];
+    if (chrome.offscreen?.Reason?.DOM_PARSER) {
+      reasons.push(chrome.offscreen.Reason.DOM_PARSER);
+    } else {
+      reasons.push('DOM_PARSER');
+    }
+    if (chrome.offscreen?.Reason?.BLOBS) {
+      reasons.push(chrome.offscreen.Reason.BLOBS);
+    }
+    if (chrome.offscreen?.Reason?.WORKERS) {
+      reasons.push(chrome.offscreen.Reason.WORKERS);
+    }
+
+    await chrome.offscreen.createDocument({
+      url: chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH),
+      reasons,
+      justification: 'SparkSub background video subtitle parsing, worker transcription and queue scheduling'
+    });
+    return true;
+  } catch (err) {
+    console.warn('[SparkSub Offscreen] 创建 Offscreen Document 异常:', err);
+    // 若因已存在或者并发竞争报错，触发唤醒已有文档
+    chrome.runtime.sendMessage({ type: 'BSE_OFFSCREEN_START' }).catch(() => {});
+    return true;
+  } finally {
+    isCreatingOffscreen = false;
+  }
+}
+
+async function closeOffscreenDocument() {
+  if (!chrome.offscreen?.closeDocument) return;
+  try {
+    const exists = await hasOffscreenDocument();
+    if (exists) {
+      await chrome.offscreen.closeDocument();
+    }
+  } catch {}
+}
+
+function setupContextMenus() {
+  if (!chrome.contextMenus) return;
+  try {
+    chrome.contextMenus.removeAll(() => {
+      chrome.contextMenus.create({
+        id: 'sparksub_add_to_queue',
+        title: '📥 加入 SparkSub 离线转录队列',
+        contexts: ['link', 'page', 'video']
+      });
+    });
+  } catch {}
+}
+
+if (chrome.contextMenus?.onClicked) {
+  chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+    if (info.menuItemId === 'sparksub_add_to_queue') {
+      const targetUrl = info.linkUrl || info.pageUrl || tab?.url;
+      if (targetUrl) {
+        const added = await BSE.Queue?.addToQueue(targetUrl);
+        if (added?.length) {
+          await ensureOffscreenDocument();
+          if (chrome.notifications) {
+            chrome.notifications.create({
+              type: 'basic',
+              iconUrl: chrome.runtime.getURL('icons/icon-128.png'),
+              title: 'SparkSub 已加入转录队列',
+              message: `已将《${added[0].title}》加入后台队列，正在转录…`,
+              priority: 1
+            });
+          }
+        }
+      }
+    }
+  });
+}
 
 async function updateBadgeFromUnread() {
   try {
@@ -354,9 +471,11 @@ async function injectContentScripts(tabId, url = '') {
         'core/parsers.js',
         'core/formatters.js',
         'core/tracker.js',
+        'core/queue.js',
         'platform/youtube.js',
         'platform/bilibili.js',
         'content/rolling-panel.js',
+        'content/feed-injector.js',
         'content/app.js'
       ]
     });
@@ -371,6 +490,8 @@ chrome.runtime.onInstalled.addListener(() => {
   setupBilibiliNetRules().catch(() => {});
   setupSubscriptionAlarm().catch(() => {});
   updateBadgeFromUnread().catch(() => {});
+  setupContextMenus();
+  BSE.Queue?.recoverStaleJobs?.().catch(() => {});
   chrome.tabs.query({}).then((tabs) => {
     for (const tab of tabs) {
       if (tab.id && isMatchingSiteUrl(tab.url)) {
@@ -411,10 +532,15 @@ function parseCaptionRequest(details) {
     if (url.pathname !== '/api/timedtext') return null;
     const videoId = url.searchParams.get('v');
     if (!videoId) return null;
+    const lang = url.searchParams.get('lang') || '';
+    const tlang = url.searchParams.get('tlang') || '';
     return {
       url: url.toString(),
       videoId,
-      lang: url.searchParams.get('lang') || '',
+      lang: tlang || lang,
+      sourceLang: lang,
+      tlang,
+      isTranslated: Boolean(tlang),
       kind: url.searchParams.get('kind') || 'manual',
       fmt: url.searchParams.get('fmt') || '',
       hasPoToken: url.searchParams.has('pot'),
@@ -708,6 +834,80 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       await updateBadgeFromUnread();
       return result;
     })().then(sendResponse).catch((err) => sendResponse({ error: err.message }));
+    return true;
+  }
+
+  // === Queue & Offscreen Orchestrator Messages ===
+  if (message.type === 'BSE_ORCHESTRATOR_NOTIFY') {
+    (async () => {
+      BSE.Queue?.processPendingJobs?.().catch(() => {});
+      ensureOffscreenDocument().catch(() => {});
+      return { ok: true };
+    })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_OFFSCREEN_QUEUE_IDLE') {
+    closeOffscreenDocument().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+
+  if (message.type === 'BSE_QUEUE_ENQUEUE') {
+    (async () => {
+      const items = await BSE.Queue?.addToQueue(message.urls, message.options) || [];
+      BSE.Queue?.processPendingJobs?.().catch(() => {});
+      ensureOffscreenDocument().catch(() => {});
+      return { ok: true, items };
+    })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_QUEUE_GET') {
+    (async () => {
+      const queue = await BSE.Queue?.getQueue() || [];
+      return { ok: true, queue };
+    })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_QUEUE_CLEAR_COMPLETED') {
+    (async () => {
+      const count = await BSE.Queue?.clearCompleted() || 0;
+      return { ok: true, count };
+    })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_QUEUE_CLEAR_ALL') {
+    (async () => {
+      await BSE.Queue?.clearAll();
+      return { ok: true };
+    })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_QUEUE_RETRY') {
+    (async () => {
+      const item = await BSE.Queue?.retryItem(message.id);
+      await ensureOffscreenDocument();
+      return { ok: true, item };
+    })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_QUEUE_REMOVE') {
+    (async () => {
+      const success = await BSE.Queue?.removeFromQueue(message.id);
+      return { ok: success };
+    })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_QUEUE_EXPORT_MERGED') {
+    (async () => {
+      const markdown = await BSE.Queue?.exportQueueMergedMarkdown(message.itemIds);
+      return { ok: true, markdown };
+    })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
 

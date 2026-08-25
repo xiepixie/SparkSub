@@ -205,7 +205,20 @@
       tracker_md_pubdate: '发布时间',
       tracker_md_no_sub_cached: '*(暂无已缓存字幕，点击视频直达可在播放器中即时解析)*',
       tracker_md_extracted_time: '提取时间',
-      tracker_md_lines_count: '字幕行数'
+      tracker_md_lines_count: '字幕行数',
+      tab_queue: '📥 离线转录',
+      queue_btn_add_batch: '批量添加 URL',
+      queue_btn_copy_merged: '合并复制',
+      queue_btn_clear_done: '清除已完成',
+      queue_btn_submit_batch: '一键加入转录队列',
+      queue_empty_title: '转录队列为空',
+      queue_empty_desc: '在 B站 / YouTube 推荐页悬浮点击「📥 转文字」，或点击上方「批量添加 URL」，即可在后台静默提取字幕与转文字，无需打开视频播放！',
+      queue_feed_btn_text: '📥 转文字',
+      queue_feed_btn_queued: '⏳ 排队中',
+      queue_feed_btn_processing: '⚡ 转录中',
+      queue_feed_btn_done: '✓ 已就绪',
+      queue_feed_toast_enqueued: '📥 已加入后台转录队列',
+      queue_feed_toast_copied: '✓ 已复制转录 Markdown'
     },
     'en': {
       app_name: 'Video Subtitles',
@@ -408,7 +421,20 @@
       tracker_md_pubdate: 'Published',
       tracker_md_no_sub_cached: '*(No cached transcript yet, click video link to fetch in player)*',
       tracker_md_extracted_time: 'Extracted Time',
-      tracker_md_lines_count: 'Transcript Lines'
+      tracker_md_lines_count: 'Transcript Lines',
+      tab_queue: '📥 Offline Queue',
+      queue_btn_add_batch: 'Batch Add URLs',
+      queue_btn_copy_merged: 'Copy Merged',
+      queue_btn_clear_done: 'Clear Done',
+      queue_btn_submit_batch: 'Add to Queue',
+      queue_empty_title: 'Queue is Empty',
+      queue_empty_desc: 'Hover over video cards on Bilibili/YouTube and click "📥 Transcript" or use "Batch Add URLs" to transcribe in background without playing!',
+      queue_feed_btn_text: '📥 Transcript',
+      queue_feed_btn_queued: '⏳ Queued',
+      queue_feed_btn_processing: '⚡ Processing',
+      queue_feed_btn_done: '✓ Ready',
+      queue_feed_toast_enqueued: '📥 Added to transcription queue',
+      queue_feed_toast_copied: '✓ Copied transcript Markdown'
     },
     'zh-TW': {
       app_name: '影片字幕助手',
@@ -611,7 +637,20 @@
       tracker_md_pubdate: '發布時間',
       tracker_md_no_sub_cached: '*(暫無已快取字幕，點擊影片直達可在播放器中即時解析)*',
       tracker_md_extracted_time: '提取時間',
-      tracker_md_lines_count: '字幕行數'
+      tracker_md_lines_count: '字幕行數',
+      tab_queue: '📥 離線轉錄',
+      queue_btn_add_batch: '批次新增 URL',
+      queue_btn_copy_merged: '合併複製',
+      queue_btn_clear_done: '清除已完成',
+      queue_btn_submit_batch: '一鍵加入轉錄佇列',
+      queue_empty_title: '轉錄佇列為空',
+      queue_empty_desc: '在 B站 / YouTube 推薦頁懸浮點擊「📥 轉文字」，或點擊上方「批次新增 URL」，即可在後台靜默提取字幕與轉文字，無需開啟影片播放！',
+      queue_feed_btn_text: '📥 轉文字',
+      queue_feed_btn_queued: '⏳ 排隊中',
+      queue_feed_btn_processing: '⚡ 轉錄中',
+      queue_feed_btn_done: '✓ 已就緒',
+      queue_feed_toast_enqueued: '📥 已加入後台轉錄佇列',
+      queue_feed_toast_copied: '✓ 已複製轉錄 Markdown'
     }
   };
 

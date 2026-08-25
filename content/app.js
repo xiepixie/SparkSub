@@ -571,6 +571,10 @@
     }
     const run = () => {
       if (gen !== mountGeneration || !isContextValid()) return;
+      if (!BSE.Utils.isMatchingVideoUrl(location.href)) {
+        panel?.ensureRootMounted(platform);
+        return;
+      }
       diagnostic('挂载调度', `触发挂载与布局同步 (${reason}) · gen ${gen}`);
       panel?.ensureRootMounted(platform);
       panel?.syncLayout();
@@ -583,17 +587,26 @@
   }
 
   function installRouteTracking() {
+    const handleNavigation = (reason) => {
+      if (BSE.Utils.isMatchingVideoUrl(location.href)) {
+        scheduleLoad(reason);
+        schedulePanelMount(reason);
+      } else {
+        panel?.ensureRootMounted(platform);
+      }
+    };
+
     window.addEventListener('message', (event) => {
       if (event.source !== window || event.data?.channel !== 'bse-extension-bridge-v1' || event.data?.direction !== 'event') return;
       if (event.data.type === 'ROUTE_CHANGED') {
-        scheduleLoad('yt_navigate');
-        schedulePanelMount('yt_navigate');
+        handleNavigation('yt_navigate');
       }
     });
-    window.addEventListener('popstate', () => {
-      scheduleLoad('popstate');
-      schedulePanelMount('popstate');
-    });
+    window.addEventListener('popstate', () => handleNavigation('popstate'));
+    document.addEventListener('yt-navigate-start', () => handleNavigation('yt_navigate_start'), { passive: true });
+    document.addEventListener('yt-navigate-finish', () => handleNavigation('yt_navigate_finish'), { passive: true });
+    document.addEventListener('yt-page-data-updated', () => handleNavigation('yt_page_data_updated'), { passive: true });
+
     let observedKey = null;
     const routeInterval = setInterval(() => {
       if (!isContextValid()) {
@@ -601,6 +614,13 @@
         return;
       }
       if (document.hidden) return;
+      if (!BSE.Utils.isMatchingVideoUrl(location.href)) {
+        if (observedKey) {
+          observedKey = null;
+          panel?.ensureRootMounted(platform);
+        }
+        return;
+      }
       const key = BSE.Utils.getMediaKey(platform);
       if (key && key !== observedKey) {
         observedKey = key;
@@ -612,32 +632,50 @@
     }, 280);
   }
 
+  let activeSyncVideo = null;
+  let onTimeUpdateHandler = null;
+
   function installPlaybackSync() {
     const syncInterval = setInterval(() => {
       if (!isContextValid()) {
         clearInterval(syncInterval);
         return;
       }
-      if (document.hidden || !state.cues.length) return;
-      // YouTube reuses the player video element for pre/mid-roll ads. Its ad
-      // timeline is unrelated to the video's cues, so keep the last real cue
-      // highlighted until playback returns instead of broadcasting index -1.
+      if (document.hidden || !BSE.Utils.isMatchingVideoUrl(location.href) || !state.cues.length) return;
       if (platform === BSE.PLATFORM.YOUTUBE && document.querySelector('.html5-video-player.ad-showing, ytd-player.ad-interrupting')) return;
+      
       const video = document.querySelector('video');
       if (!video) return;
-      const index = BSE.Utils.findActiveCueIndex(state.cues, video.currentTime, state.activeIndex);
-      state.currentTime = video.currentTime;
-      state.activeIndex = index;
-      panel?.updatePlayback(index);
-      if (index !== lastPlaybackIndex) {
-        lastPlaybackIndex = index;
-        safeSendMessage({
-          type: 'BSE_PLAYBACK_UPDATE',
-          activeIndex: index,
-          currentTime: video.currentTime
-        });
+
+      // Attach high-performance native timeupdate listener once per video element
+      if (video !== activeSyncVideo) {
+        if (activeSyncVideo && onTimeUpdateHandler) {
+          activeSyncVideo.removeEventListener('timeupdate', onTimeUpdateHandler);
+        }
+        activeSyncVideo = video;
+        let updateRaf = null;
+        onTimeUpdateHandler = () => {
+          if (updateRaf) return;
+          updateRaf = requestAnimationFrame(() => {
+            updateRaf = null;
+            if (document.hidden || !state.cues.length) return;
+            const index = BSE.Utils.findActiveCueIndex(state.cues, video.currentTime, state.activeIndex);
+            state.currentTime = video.currentTime;
+            state.activeIndex = index;
+            panel?.updatePlayback(index);
+            if (index !== lastPlaybackIndex) {
+              lastPlaybackIndex = index;
+              safeSendMessage({
+                type: 'BSE_PLAYBACK_UPDATE',
+                activeIndex: index,
+                currentTime: video.currentTime
+              });
+            }
+          });
+        };
+        video.addEventListener('timeupdate', onTimeUpdateHandler, { passive: true });
       }
-    }, 180);
+    }, 500);
   }
 
   function init() {
@@ -647,27 +685,40 @@
       refresh: () => scheduleLoad('rolling_panel_refresh', true),
       openSidePanel
     });
-    schedulePanelMount('init');
+
+    if (BSE.Utils.isMatchingVideoUrl(location.href)) {
+      schedulePanelMount('init');
+    }
+
     let rafHandle = null;
+    let lastScrollTime = 0;
     const onGeometryChange = () => {
+      if (!BSE.Utils.isMatchingVideoUrl(location.href) || document.hidden) return;
+      const now = performance.now();
+      if (now - lastScrollTime < 60) return; // 60ms throttle for ultra-smooth scrolling
+      lastScrollTime = now;
       if (rafHandle) cancelAnimationFrame(rafHandle);
       rafHandle = requestAnimationFrame(() => {
-        if (!document.hidden) panel?.syncLayout();
+        panel?.syncLayout();
       });
     };
     window.addEventListener('scroll', onGeometryChange, { passive: true });
     window.addEventListener('resize', onGeometryChange, { passive: true });
     document.addEventListener('fullscreenchange', () => {
-      schedulePanelMount('fullscreen');
+      if (BSE.Utils.isMatchingVideoUrl(location.href)) schedulePanelMount('fullscreen');
     });
     document.addEventListener('webkitfullscreenchange', () => {
-      schedulePanelMount('fullscreen');
+      if (BSE.Utils.isMatchingVideoUrl(location.href)) schedulePanelMount('fullscreen');
     });
+
     initialized = true;
     publish(true);
-    const pending = pendingLoad;
-    pendingLoad = null;
-    scheduleLoad(pending?.reason || 'init', Boolean(pending?.force));
+
+    if (BSE.Utils.isMatchingVideoUrl(location.href)) {
+      const pending = pendingLoad;
+      pendingLoad = null;
+      scheduleLoad(pending?.reason || 'init', Boolean(pending?.force));
+    }
   }
 
   function installBpxEpisodeListener() {

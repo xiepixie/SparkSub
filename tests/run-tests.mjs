@@ -9,16 +9,70 @@ let mockFetch = async () => { throw new Error('Unexpected network request in tes
 const sessionStore = new Map();
 const storageAreas = { local: new Map(), sync: new Map() };
 const createStorageArea = (area) => ({
-  get: async (key) => ({ [key]: storageAreas[area].get(key) }),
+  get: async (key) => {
+    if (typeof key === 'string') {
+      return { [key]: storageAreas[area].get(key) };
+    }
+    if (Array.isArray(key)) {
+      const out = {};
+      key.forEach((k) => { out[k] = storageAreas[area].get(k); });
+      return out;
+    }
+    if (key && typeof key === 'object') {
+      const out = {};
+      Object.entries(key).forEach(([k, defVal]) => {
+        out[k] = storageAreas[area].has(k) ? storageAreas[area].get(k) : defVal;
+      });
+      return out;
+    }
+    const out = {};
+    storageAreas[area].forEach((v, k) => { out[k] = v; });
+    return out;
+  },
   set: async (values) => { Object.entries(values).forEach(([key, value]) => storageAreas[area].set(key, value)); }
 });
+const messageListeners = new Set();
+const windowMock = {
+  addEventListener: (type, fn) => { if (type === 'message') messageListeners.add(fn); },
+  removeEventListener: (type, fn) => { if (type === 'message') messageListeners.delete(fn); },
+  postMessage: (data) => {
+    if (data?.channel === 'bse-extension-bridge-v1' && data.direction === 'request') {
+      queueMicrotask(() => {
+        const responseData = {
+          channel: 'bse-extension-bridge-v1',
+          direction: 'response',
+          requestId: data.requestId,
+          ok: true,
+          result: {
+            ready: true,
+            video: { id: 'Ewd6CGwaEXY', title: '4 Language Habits That Get You Fluent FAST' },
+            tracks: [
+              { id: 'asr:en', lan: 'en', lanDoc: 'English (auto-generated)', subtitleUrl: 'https://www.youtube.com/api/timedtext?v=Ewd6CGwaEXY&lang=en', isAuto: true }
+            ]
+          }
+        };
+        messageListeners.forEach((fn) => {
+          try { fn({ data: responseData }); } catch {}
+        });
+      });
+    }
+  }
+};
+URL.createObjectURL = () => 'blob:mock-url';
+URL.revokeObjectURL = () => {};
+
 const context = vm.createContext({
   console,
-  URL: {
-    ...URL,
-    createObjectURL: () => 'blob:mock-url',
-    revokeObjectURL: () => {}
+  crypto: {
+    randomUUID: () => 'mock-uuid-' + Math.random().toString(36).slice(2)
   },
+  URL,
+  location: {
+    href: 'https://www.youtube.com/watch?v=Ewd6CGwaEXY',
+    origin: 'https://www.youtube.com',
+    hostname: 'www.youtube.com'
+  },
+  window: windowMock,
   setTimeout,
   clearTimeout,
   Blob,
@@ -84,6 +138,7 @@ for (const file of [
   'core/parsers.js',
   'core/formatters.js',
   'core/tracker.js',
+  'core/queue.js',
   'platform/bilibili.js',
   'platform/youtube.js'
 ]) {
@@ -613,4 +668,195 @@ assert.equal(batchExportResult.stats.total, 2, '批量导出必须正确统计 2
 assert.equal(batchExportResult.stats.completed, 2, '批量导出必须在模拟环境下完成所有任务执行');
 assert.ok(progressCount > 0, '批量导出必须持续触发进度回调');
 
-console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)、后台无人值守字幕抓取与一键 Markdown 复制、B站批量导出并发调度与 delay 延迟重试。');
+// 17. Queue URL Normalization
+const bvidNorm = BSE.Queue.normalizeVideoUrl('https://www.bilibili.com/video/BV1xx411c7mD?p=3');
+assert.equal(bvidNorm?.platform, 'bilibili');
+assert.equal(bvidNorm?.targetId, 'BV1xx411c7mD');
+assert.equal(bvidNorm?.page, 3);
+assert.equal(bvidNorm?.cleanUrl, 'https://www.bilibili.com/video/BV1xx411c7mD?p=3');
+
+const ytNorm1 = BSE.Queue.normalizeVideoUrl('https://www.youtube.com/watch?v=-94Fizn6XcA&t=10s');
+assert.equal(ytNorm1?.platform, 'youtube');
+assert.equal(ytNorm1?.targetId, '-94Fizn6XcA');
+
+const ytNorm2 = BSE.Queue.normalizeVideoUrl('https://youtu.be/dQw4w9WgXcQ');
+assert.equal(ytNorm2?.platform, 'youtube');
+assert.equal(ytNorm2?.targetId, 'dQw4w9WgXcQ');
+
+const ytShortsNorm = BSE.Queue.normalizeVideoUrl('https://www.youtube.com/shorts/abcdefghijk');
+assert.equal(ytShortsNorm?.platform, 'youtube');
+assert.equal(ytShortsNorm?.targetId, 'abcdefghijk');
+
+// 18. Queue Lifecycle, Stage-based Recovery & Merged Markdown
+await BSE.Queue.clearAll();
+const added = await BSE.Queue.addToQueue([
+  'https://www.bilibili.com/video/BV1TEST111',
+  'https://www.youtube.com/watch?v=TEST_YT_111'
+], { title: '测试视频 1', author: '测试UP主' });
+
+assert.equal(added.length, 2, '批量加入队列必须返回 2 个任务条目');
+const queueList = await BSE.Queue.getQueue();
+assert.equal(queueList.length, 2, '队列中必须持久化存储 2 个任务条目');
+assert.equal(queueList[0].stage, 'queued');
+
+// Simulate Crash in Running Stage and verify Stage-based Recovery
+queueList[0].stage = 'transcribing';
+queueList[0].progress = 63;
+await BSE.Queue.saveQueue(queueList);
+
+const recovered = await BSE.Queue.recoverStaleJobs();
+assert.equal(recovered[0].stage, 'queued', '崩溃后重启必须将 running 中间态任务重置为 queued 阶段自愈执行');
+assert.ok(recovered[0].stageHint?.includes('自动恢复'), '恢复任务必须打上阶段恢复标记');
+
+// Complete an item and verify export
+recovered[0].stage = 'done';
+recovered[0].subtitle = {
+  language: 'zh-CN',
+  langDoc: '中文',
+  cueCount: 100,
+  plainText: '测试转录文本第一句。测试转录文本第二句。',
+  markdown: '### [00:00 - 00:05]\n\n测试转录文本第一句。测试转录文本第二句。'
+};
+await BSE.Queue.saveQueue(recovered);
+
+const queueMd = await BSE.Queue.exportQueueMergedMarkdown();
+assert.ok(queueMd.includes('# SparkSub 离线视频转录合集'), '导出队列 Markdown 必须包含主标题');
+assert.ok(queueMd.includes('测试转录文本第一句'), '导出队列 Markdown 必须包含字幕内容');
+
+// 20. Queue processPendingJobs end-to-end execution
+await BSE.Queue.clearAll();
+const testQueueItems = await BSE.Queue.addToQueue('https://www.bilibili.com/video/BV1OFFLINETEST');
+assert.equal(testQueueItems.length, 1);
+assert.equal(testQueueItems[0].stage, 'queued');
+
+// Mock Bilibili View & Subtitle APIs
+mockFetch = async (url) => {
+  if (url.includes('x/web-interface/view')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        code: 0,
+        data: {
+          bvid: 'BV1OFFLINETEST',
+          cid: 888999,
+          title: '离线转录全自动化测试视频',
+          pic: 'https://i0.hdslb.com/bfs/archive/test.jpg',
+          owner: { name: '自动化测试UP主' },
+          pages: [{ page: 1, cid: 888999, part: '正片' }]
+        }
+      })
+    };
+  }
+  if (url.includes('x/web-interface/nav')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 0, data: { wbi_img: { img_url: 'https://i0.hdslb.com/bfs/wbi/7cd084941338484a827105e933682852.png', sub_url: 'https://i0.hdslb.com/bfs/wbi/492b161900b24a499386610d69174dd4.png' } } })
+    };
+  }
+  if (url.includes('x/player/wbi/v2')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        code: 0,
+        data: {
+          subtitle: {
+            subtitles: [
+              { lan: 'zh-CN', lan_doc: '中文（简体）', subtitle_url: 'https://api.bilibili.com/x/player/wbi/sub.json' }
+            ]
+          }
+        }
+      })
+    };
+  }
+  if (url.includes('sub.json')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        body: [
+          { from: 0.5, to: 3.2, content: '欢迎使用 SparkSub 离线后台转录功能。' },
+          { from: 3.5, to: 6.8, content: '无需打开视频页面，即可极速获取完整 Markdown 字幕。' }
+        ]
+      })
+    };
+  }
+  return { ok: true, status: 200, json: async () => ({}) };
+};
+
+await BSE.Queue.processPendingJobs();
+const processedItems = await BSE.Queue.getQueue();
+assert.equal(processedItems.length, 1);
+assert.equal(processedItems[0].stage, 'done', '任务必须通过 processPendingJobs 顺利转为 done 状态');
+assert.equal(processedItems[0].subtitle?.cueCount, 2, '必须成功提取 2 句字幕');
+assert.ok(processedItems[0].subtitle?.markdown?.includes('SparkSub 离线后台转录功能'), '必须包含转录出的 Markdown 内容');
+
+// 21. YouTube Offline Transcription with Multi-client & Multi-format Subtitles
+await BSE.Queue.clearCompleted();
+
+mockFetch = async (url, options = {}) => {
+  if (url.includes('youtubei/v1/player')) {
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        videoDetails: {
+          title: '4 Language Habits That Get You Fluent FAST',
+          author: 'Olly Richards',
+          thumbnail: { thumbnails: [{ url: 'https://i.ytimg.com/vi/Ewd6CGwaEXY/hqdefault.jpg' }] }
+        },
+        captions: {
+          playerCaptionsTracklistRenderer: {
+            captionTracks: [
+              {
+                baseUrl: 'https://www.youtube.com/api/timedtext?v=Ewd6CGwaEXY&lang=en',
+                name: { simpleText: 'English' },
+                languageCode: 'en'
+              }
+            ]
+          }
+        }
+      })
+    };
+  }
+  if (url.includes('timedtext')) {
+    // Return XML format to verify that XML subtitles don't throw Unexpected Token
+    return {
+      ok: true,
+      status: 200,
+      text: async () => `<?xml version="1.0" encoding="utf-8" ?>
+<transcript>
+  <text start="0.0" dur="3.5">Reading every single day is the number one habit.</text>
+  <text start="3.5" dur="4.0">It allows you to acquire vocabulary naturally in context.</text>
+</transcript>`
+    };
+  }
+  return { ok: true, status: 200, text: async () => '' };
+};
+
+await BSE.Queue.addToQueue({
+  platform: 'youtube',
+  targetId: 'Ewd6CGwaEXY',
+  url: 'https://www.youtube.com/watch?v=Ewd6CGwaEXY',
+  title: 'YouTube 离线转录测试',
+  author: 'YouTube 频道'
+});
+
+await BSE.Queue.processPendingJobs();
+const ytItems = await BSE.Queue.getQueue();
+assert.equal(ytItems.length, 1);
+assert.equal(ytItems[0].stage, 'done', 'YouTube 任务必须成功完成');
+assert.equal(ytItems[0].title, '4 Language Habits That Get You Fluent FAST');
+assert.equal(ytItems[0].subtitle?.cueCount, 2, '必须成功从 XML timedtext 解析出 2 句字幕');
+assert.ok(ytItems[0].subtitle?.markdown?.includes('Reading every single day'), 'Markdown 必须包含解析出的英文字幕');
+
+// 22. YouTube Multi-track and Translation Isolation Test
+const mockTracks = await BSE.YouTube.discoverTracks();
+assert.ok(mockTracks.length >= 1, '必须发现 YouTube 基础字幕轨道');
+const transTrack = mockTracks.find((t) => t.isTranslated && t.lan === 'zh-Hans');
+assert.ok(transTrack, '非中文 YouTube 视频必须自动生成中文自动翻译轨道选项');
+assert.ok(transTrack.subtitleUrl.includes('tlang=zh-Hans'), '翻译轨道 URL 必须包含 tlang 参数');
+
+console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)、后台无人值守字幕抓取与一键 Markdown 复制、B站批量导出并发调度与 delay 延迟重试、Offscreen Document 后台队列架构、推荐流卡片一键提取、多环境通用队列调度引擎 (BSE.Queue.processPendingJobs) 与阶段级自愈恢复 (Stage-based Recovery)、YouTube 离线转录多策略容灾解析 (Android Innertube / Web / Watch HTML / XML-JSON3)、YouTube 原生轨与自动翻译轨精准隔离与双端同步 (Track Isolation & Auto-Translate Sync)。');
