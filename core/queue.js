@@ -4,6 +4,7 @@
   const BSE = globalThis.BSE = globalThis.BSE || {};
 
   const STORAGE_KEY_QUEUE = 'bse_transcription_queue_v1';
+  const STORAGE_KEY_ITEM_PREFIX = `${STORAGE_KEY_QUEUE}:item:`;
   const STORAGE_KEY_SETTINGS = 'bse_queue_settings_v1';
   const EXECUTION_LEASE_MS = 60 * 1000;
   const STALE_STAGE_MS = 5 * 60 * 1000;
@@ -289,43 +290,85 @@
     return null;
   }
 
-  async function getQueue() {
+  function itemStorageKey(id) {
+    return `${STORAGE_KEY_ITEM_PREFIX}${encodeURIComponent(id)}`;
+  }
+
+  function sortQueue(items) {
+    return items.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+  }
+
+  async function readQueueFromStorage() {
     const storage = getStorageArea();
     if (!storage) {
-      const memory = globalThis.__BSE_MEMORY_QUEUE__ || [];
-      return memory;
+      return Object.values(globalThis.__BSE_MEMORY_QUEUE_ITEMS__ || {});
     }
     try {
-      const res = await storage.get(STORAGE_KEY_QUEUE);
-      const items = res?.[STORAGE_KEY_QUEUE];
-      return Array.isArray(items) ? items : [];
+      const res = await storage.get(null);
+      const items = Object.entries(res || {})
+        .filter(([key, value]) => key.startsWith(STORAGE_KEY_ITEM_PREFIX) && value?.id)
+        .map(([, value]) => value);
+      // Read old installations without making the legacy array the source of truth.
+      if (!items.length && Array.isArray(res?.[STORAGE_KEY_QUEUE])) {
+        return res[STORAGE_KEY_QUEUE];
+      }
+      return items;
     } catch {
       return [];
     }
   }
 
-  async function saveQueue(items) {
+  async function writeItems(items, replace = false) {
     const storage = getStorageArea();
     if (!storage) {
-      globalThis.__BSE_MEMORY_QUEUE__ = items;
-      return items;
+      const next = replace ? {} : { ...(globalThis.__BSE_MEMORY_QUEUE_ITEMS__ || {}) };
+      items.forEach((item) => { next[item.id] = item; });
+      globalThis.__BSE_MEMORY_QUEUE_ITEMS__ = next;
+      return;
     }
-    try {
-      await storage.set({ [STORAGE_KEY_QUEUE]: items });
-      return items;
-    } catch (err) {
-      console.warn('[SparkSub Queue] 保存队列失败:', err);
-      return items;
+    const current = await storage.get(null);
+    const oldKeys = Object.keys(current || {}).filter((key) => key.startsWith(STORAGE_KEY_ITEM_PREFIX));
+    const values = {};
+    items.forEach((item) => { values[itemStorageKey(item.id)] = item; });
+    const removed = replace ? oldKeys.filter((key) => !(key in values)) : [];
+    if (removed.length && storage.remove) await storage.remove(removed);
+    if (Object.keys(values).length) await storage.set(values);
+    // Remove the old whole-array representation after migration.
+    if (storage.remove && Object.prototype.hasOwnProperty.call(current || {}, STORAGE_KEY_QUEUE)) {
+      await storage.remove(STORAGE_KEY_QUEUE);
     }
   }
 
+  // Every queue mutation in this context enters here. Items are stored independently,
+  // so executors in other extension contexts cannot overwrite unrelated jobs.
+  let mutationTail = Promise.resolve();
+  function serializeQueueMutation(mutator) {
+    const operation = mutationTail.then(async () => {
+      const queue = sortQueue(await readQueueFromStorage());
+      return mutator(queue);
+    });
+    mutationTail = operation.catch(() => {});
+    return operation;
+  }
+
+  async function getQueue() {
+    await mutationTail;
+    return sortQueue(await readQueueFromStorage());
+  }
+
+  async function saveQueue(items) {
+    return serializeQueueMutation(async () => {
+      await writeItems(items, true);
+      return items;
+    });
+  }
+
   async function saveItem(updatedItem) {
-    const queue = await getQueue();
-    const index = queue.findIndex((i) => i.id === updatedItem.id);
-    if (index >= 0) {
-      queue[index] = updatedItem;
-      await saveQueue(queue);
-    }
+    await serializeQueueMutation(async (queue) => {
+      if (queue.some((item) => item.id === updatedItem.id)) {
+        await writeItems([updatedItem]);
+      }
+    });
     broadcastQueueUpdate();
   }
 
@@ -381,35 +424,22 @@
    * 检测因浏览器关闭/崩溃而停留在中间态的任务，平滑重置为可继续执行的状态
    */
   async function recoverStaleJobs() {
-    const queue = await getQueue();
-    let modified = false;
-    const runningStages = ['resolving', 'fetching_caption', 'fetching_audio', 'transcribing', 'postprocessing'];
-    const now = Date.now();
-
-    for (const item of queue) {
-      if (runningStages.includes(item.stage)) {
-        const leaseExpiresAt = Number(item.executionLease?.expiresAt || 0);
-        const stageUpdatedAt = Number(item.stageUpdatedAt || item.startedAt || item.addedAt || 0);
-        const hasValidLease = leaseExpiresAt > now;
-        const leaseExpired = leaseExpiresAt > 0 && leaseExpiresAt <= now;
-        const stageIsStale = !leaseExpiresAt && (!stageUpdatedAt || now - stageUpdatedAt >= STALE_STAGE_MS);
-        if (hasValidLease || (!leaseExpired && !stageIsStale)) continue;
-
-        const interruptedStage = item.stage;
-        item.stage = 'queued';
-        item.stageHint = `自动恢复：从 ${interruptedStage} 阶段继续`;
-        item.progress = Math.max(0, (item.progress || 0) - 10);
-        item.stageUpdatedAt = now;
-        delete item.executionLease;
-        modified = true;
+    return serializeQueueMutation(async (queue) => {
+      const changed = [];
+      const runningStages = ['resolving', 'fetching_caption', 'fetching_audio', 'transcribing', 'postprocessing'];
+      for (const item of queue) {
+        if (runningStages.includes(item.stage)) {
+          const staleStage = item.stage;
+          item.stage = 'queued';
+          item.stageHint = `自动恢复：从 ${staleStage} 阶段继续`;
+          item.progress = Math.max(0, (item.progress || 0) - 10);
+          changed.push(item);
+        }
       }
-    }
-
-    if (modified) {
-      await saveQueue(queue);
-      broadcastQueueUpdate();
-    }
-    return queue;
+      if (changed.length) await writeItems(changed);
+      if (changed.length) broadcastQueueUpdate();
+      return queue;
+    });
   }
 
   /**
@@ -420,65 +450,60 @@
    */
   async function addToQueue(urlsOrIds, options = {}) {
     const rawList = Array.isArray(urlsOrIds) ? urlsOrIds : [urlsOrIds];
-    const queue = await getQueue();
     const addedItems = [];
+    await serializeQueueMutation(async (queue) => {
+      for (const raw of rawList) {
+        const rawString = typeof raw === 'object' && raw ? (raw.url || raw.targetId || raw.cleanUrl || '') : String(raw || '');
+        const opt = typeof raw === 'object' && raw ? { ...options, ...raw } : options;
+        const parsed = normalizeVideoUrl(rawString);
+        if (!parsed) continue;
 
-    for (const raw of rawList) {
-      const rawString = typeof raw === 'object' && raw ? (raw.url || raw.targetId || raw.cleanUrl || '') : String(raw || '');
-      const opt = typeof raw === 'object' && raw ? { ...options, ...raw } : options;
-      const parsed = normalizeVideoUrl(rawString);
-      if (!parsed) continue;
+        const itemId = parsed.platform === 'bilibili' && parsed.page && parsed.page > 1
+          ? `${parsed.targetId}:p${parsed.page}`
+          : parsed.targetId;
 
-      const itemId = parsed.platform === 'bilibili' && parsed.page && parsed.page > 1
-        ? `${parsed.targetId}:p${parsed.page}`
-        : parsed.targetId;
-
-      const existingIndex = queue.findIndex((item) => item.id === itemId);
-      if (existingIndex >= 0) {
-        const existing = queue[existingIndex];
-        // 若已完成，返回已有项；若失败，重置为排队重试
-        if (existing.stage === 'failed') {
-          existing.stage = 'queued';
-          existing.error = undefined;
-          existing.progress = 0;
-          existing.stageHint = '重新排队中';
-          existing.stageUpdatedAt = Date.now();
-          delete existing.executionLease;
-          addedItems.push(existing);
-        } else {
-          addedItems.push(existing);
+        const existingIndex = queue.findIndex((item) => item.id === itemId);
+        if (existingIndex >= 0) {
+          const existing = queue[existingIndex];
+          // 若已完成，返回已有项；若失败，重置为排队重试
+          if (existing.stage === 'failed') {
+            existing.stage = 'queued';
+            existing.error = undefined;
+            existing.progress = 0;
+            existing.stageHint = '重新排队中';
+            addedItems.push(existing);
+          } else {
+            addedItems.push(existing);
+          }
+          continue;
         }
-        continue;
+
+        /** @type {import('../types/bse').QueueItem} */
+        const newItem = {
+          id: itemId,
+          url: parsed.cleanUrl,
+          platform: parsed.platform,
+          targetId: parsed.targetId,
+          title: opt.title || `${parsed.platform === 'bilibili' ? 'B站视频' : 'YouTube 视频'} (${itemId})`,
+          author: opt.author || (parsed.platform === 'bilibili' ? 'UP主' : 'YouTube 频道'),
+          cover: opt.cover || '',
+          stage: 'queued',
+          progress: 0,
+          stageHint: '排队中…',
+          addedAt: Date.now(),
+          metaCache: {
+            title: opt.title,
+            author: opt.author,
+            cover: opt.cover
+          }
+        };
+
+        queue.push(newItem);
+        addedItems.push(newItem);
       }
-
-      /** @type {import('../types/bse').QueueItem} */
-      const newItem = {
-        id: itemId,
-        url: parsed.cleanUrl,
-        platform: parsed.platform,
-        targetId: parsed.targetId,
-        title: opt.title || `${parsed.platform === 'bilibili' ? 'B站视频' : 'YouTube 视频'} (${itemId})`,
-        author: opt.author || (parsed.platform === 'bilibili' ? 'UP主' : 'YouTube 频道'),
-        cover: opt.cover || '',
-        stage: 'queued',
-        progress: 0,
-        stageHint: '排队中…',
-        addedAt: Date.now(),
-        stageUpdatedAt: Date.now(),
-        stageArtifacts: {},
-        metaCache: {
-          title: opt.title,
-          author: opt.author,
-          cover: opt.cover
-        }
-      };
-
-      queue.unshift(newItem);
-      addedItems.push(newItem);
-    }
-
+      if (addedItems.length > 0) await writeItems(addedItems);
+    });
     if (addedItems.length > 0) {
-      await saveQueue(queue);
       broadcastQueueUpdate();
       notifyOrchestrator();
     }
@@ -487,10 +512,12 @@
   }
 
   async function removeFromQueue(id) {
-    const queue = await getQueue();
-    const nextQueue = queue.filter((i) => i.id !== id);
-    if (nextQueue.length !== queue.length) {
-      await saveQueue(nextQueue);
+    const removed = await serializeQueueMutation(async (queue) => {
+      if (!queue.some((item) => item.id === id)) return false;
+      await writeItems(queue.filter((item) => item.id !== id), true);
+      return true;
+    });
+    if (removed) {
       broadcastQueueUpdate();
       return true;
     }
@@ -498,11 +525,13 @@
   }
 
   async function clearCompleted() {
-    const queue = await getQueue();
-    const nextQueue = queue.filter((i) => i.stage !== 'done');
-    const removedCount = queue.length - nextQueue.length;
+    const removedCount = await serializeQueueMutation(async (queue) => {
+      const nextQueue = queue.filter((i) => i.stage !== 'done');
+      const count = queue.length - nextQueue.length;
+      if (count) await writeItems(nextQueue, true);
+      return count;
+    });
     if (removedCount > 0) {
-      await saveQueue(nextQueue);
       broadcastQueueUpdate();
     }
     return removedCount;
@@ -514,17 +543,17 @@
   }
 
   async function retryItem(id) {
-    const queue = await getQueue();
-    const item = queue.find((i) => i.id === id);
+    const item = await serializeQueueMutation(async (queue) => {
+      const target = queue.find((i) => i.id === id);
+      if (!target) return null;
+      target.stage = 'queued';
+      target.error = undefined;
+      target.progress = 0;
+      target.stageHint = '重新排队中…';
+      await writeItems([target]);
+      return target;
+    });
     if (!item) return null;
-
-    item.stage = 'queued';
-    item.error = undefined;
-    item.progress = 0;
-    item.stageHint = '重新排队中…';
-    item.stageUpdatedAt = Date.now();
-    delete item.executionLease;
-    await saveQueue(queue);
     broadcastQueueUpdate();
     notifyOrchestrator();
     return item;

@@ -840,7 +840,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // === Queue & Offscreen Orchestrator Messages ===
   if (message.type === 'BSE_ORCHESTRATOR_NOTIFY') {
     (async () => {
-      BSE.Queue?.processPendingJobs?.().catch(() => {});
       ensureOffscreenDocument().catch(() => {});
       return { ok: true };
     })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
@@ -855,7 +854,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'BSE_QUEUE_ENQUEUE') {
     (async () => {
       const items = await BSE.Queue?.addToQueue(message.urls, message.options) || [];
-      BSE.Queue?.processPendingJobs?.().catch(() => {});
       ensureOffscreenDocument().catch(() => {});
       return { ok: true, items };
     })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
