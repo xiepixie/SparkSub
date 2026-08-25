@@ -5,6 +5,8 @@
 
   const STORAGE_KEY_QUEUE = 'bse_transcription_queue_v1';
   const STORAGE_KEY_SETTINGS = 'bse_queue_settings_v1';
+  const LEASE_DURATION_MS = 5 * 60 * 1000;
+  const EXECUTOR_ID = `queue-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   const DEFAULT_SETTINGS = {
     maxConcurrency: 2,
@@ -321,10 +323,21 @@
     const queue = await getQueue();
     const index = queue.findIndex((i) => i.id === updatedItem.id);
     if (index >= 0) {
+      // A stale executor must never overwrite the state (or lease) of the
+      // executor which currently owns this item.
+      const current = queue[index];
+      if (updatedItem.leaseOwner && current.leaseOwner !== updatedItem.leaseOwner) return false;
+      if (updatedItem.leaseOwner && updatedItem.stage !== 'done' && updatedItem.stage !== 'failed') {
+        updatedItem.leaseExpiresAt = Date.now() + LEASE_DURATION_MS;
+      } else if (updatedItem.stage === 'done' || updatedItem.stage === 'failed') {
+        delete updatedItem.leaseOwner;
+        delete updatedItem.leaseExpiresAt;
+      }
       queue[index] = updatedItem;
       await saveQueue(queue);
     }
     broadcastQueueUpdate();
+    return index >= 0;
   }
 
   async function getItem(id) {
@@ -365,10 +378,13 @@
     const runningStages = ['resolving', 'fetching_caption', 'fetching_audio', 'transcribing', 'postprocessing'];
 
     for (const item of queue) {
-      if (runningStages.includes(item.stage)) {
+      if (runningStages.includes(item.stage) && (!item.leaseExpiresAt || item.leaseExpiresAt <= Date.now())) {
+        const previousStage = item.stage;
         item.stage = 'queued';
-        item.stageHint = `自动恢复：从 ${item.stage} 阶段继续`;
+        item.stageHint = `自动恢复：从 ${previousStage} 阶段继续`;
         item.progress = Math.max(0, (item.progress || 0) - 10);
+        delete item.leaseOwner;
+        delete item.leaseExpiresAt;
         modified = true;
       }
     }
@@ -921,7 +937,28 @@
           break;
         }
 
-        const batch = pendingItems.slice(0, maxConcurrency);
+        const candidates = pendingItems.slice(0, maxConcurrency);
+        const claim = async () => {
+          const claimed = [];
+          for (const candidate of candidates) {
+            const latest = await getQueue();
+            const item = latest.find((entry) => entry.id === candidate.id);
+            if (!item || item.stage !== 'queued' || item.leaseOwner) continue;
+            item.leaseOwner = EXECUTOR_ID;
+            item.leaseExpiresAt = Date.now() + LEASE_DURATION_MS;
+            await saveQueue(latest);
+            const verified = await getItem(item.id);
+            if (verified?.leaseOwner === EXECUTOR_ID) claimed.push(verified);
+          }
+          return claimed;
+        };
+        // Web Locks is shared by extension execution contexts and makes the
+        // persistent read/claim/write sequence atomic. The verification in the
+        // fallback still prevents a loser from starting on normal storage.
+        const batch = globalThis.navigator?.locks?.request
+          ? await globalThis.navigator.locks.request('bse-queue-claim', claim)
+          : await claim();
+        if (!batch.length) break;
         await Promise.all(
           batch.map(async (item) => {
             const controller = new AbortController();

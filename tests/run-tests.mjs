@@ -852,6 +852,74 @@ assert.equal(ytItems[0].title, '4 Language Habits That Get You Fluent FAST');
 assert.equal(ytItems[0].subtitle?.cueCount, 2, '必须成功从 XML timedtext 解析出 2 句字幕');
 assert.ok(ytItems[0].subtitle?.markdown?.includes('Reading every single day'), 'Markdown 必须包含解析出的英文字幕');
 
+// 21.1 Two isolated executors must atomically claim a queue item exactly once.
+const isolatedStorage = new Map();
+let lockTail = Promise.resolve();
+const isolatedLocks = {
+  request: async (_name, callback) => {
+    const previous = lockTail;
+    let release;
+    lockTail = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try { return await callback(); } finally { release(); }
+  }
+};
+const isolatedCounts = { metadata: 0, captionList: 0, subtitle: 0 };
+const isolatedFetch = async (url) => {
+  if (url.includes('x/web-interface/view')) {
+    isolatedCounts.metadata++;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    return { json: async () => ({ code: 0, data: { title: '租约并发测试', owner: { name: '测试作者' }, pages: [{ page: 1, cid: 42, part: '正片' }] } }) };
+  }
+  if (url.includes('x/web-interface/nav')) {
+    return { json: async () => ({ code: 0, data: {} }) };
+  }
+  if (url.includes('x/player/wbi/v2')) {
+    isolatedCounts.captionList++;
+    return { json: async () => ({ code: 0, data: { subtitle: { subtitles: [{ lan: 'zh-CN', subtitle_url: 'https://example.test/subtitle.json' }] } } }) };
+  }
+  if (url.includes('subtitle.json')) {
+    isolatedCounts.subtitle++;
+    return { json: async () => ({ body: [{ from: 0, to: 1, content: '只应请求一次' }] }) };
+  }
+  throw new Error(`Unexpected isolated request: ${url}`);
+};
+const createIsolatedQueueContext = () => {
+  const storage = {
+    get: async (key) => ({ [key]: structuredClone(isolatedStorage.get(key)) }),
+    set: async (values) => { for (const [key, value] of Object.entries(values)) isolatedStorage.set(key, structuredClone(value)); }
+  };
+  const isolated = vm.createContext({
+    console, URL, setTimeout, clearTimeout, AbortController,
+    fetch: isolatedFetch,
+    navigator: { locks: isolatedLocks },
+    chrome: { storage: { local: storage }, runtime: { sendMessage: async () => ({ ok: true }) } },
+    globalThis: null
+  });
+  isolated.globalThis = isolated;
+  for (const file of ['core/namespace.js', 'core/utils.js', 'core/parsers.js', 'core/tracker.js', 'core/queue.js']) {
+    vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), isolated, { filename: `isolated/${file}` });
+  }
+  return isolated;
+};
+const executorA = createIsolatedQueueContext();
+const executorB = createIsolatedQueueContext();
+await executorA.BSE.Queue.addToQueue('https://www.bilibili.com/video/BV1LEASE001');
+const runA = executorA.BSE.Queue.processPendingJobs();
+const runB = executorB.BSE.Queue.processPendingJobs();
+await new Promise((resolve) => setTimeout(resolve, 10));
+const duringRecovery = await executorB.BSE.Queue.recoverStaleJobs();
+assert.equal(duringRecovery[0].stage, 'resolving', '有效租约的执行中任务不得被第二个执行器重新排队');
+assert.ok(duringRecovery[0].leaseOwner, '执行期间必须持久化 leaseOwner');
+assert.ok(duringRecovery[0].leaseExpiresAt > Date.now(), '执行期间必须持久化未过期的 leaseExpiresAt');
+await Promise.all([runA, runB]);
+const isolatedResult = await executorA.BSE.Queue.getQueue();
+assert.equal(isolatedResult[0].stage, 'done');
+assert.equal(isolatedCounts.metadata, 1, '两个隔离 VM 收到通知时元数据请求只能发生一次');
+assert.equal(isolatedCounts.captionList, 1, '两个隔离 VM 收到通知时字幕元数据请求只能发生一次');
+assert.equal(isolatedCounts.subtitle, 1, '两个隔离 VM 收到通知时字幕网络请求只能发生一次');
+assert.equal(isolatedResult[0].leaseOwner, undefined, '任务完成后必须释放持久化租约');
+
 // 22. YouTube Multi-track and Translation Isolation Test
 const mockTracks = await BSE.YouTube.discoverTracks();
 assert.ok(mockTracks.length >= 1, '必须发现 YouTube 基础字幕轨道');

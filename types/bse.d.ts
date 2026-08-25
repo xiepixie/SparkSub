@@ -340,6 +340,10 @@ export interface QueueItem {
   addedAt: number;
   startedAt?: number;
   completedAt?: number;
+  /** Persistent executor claim; cleared when the job reaches a terminal stage. */
+  leaseOwner?: string;
+  /** Unix epoch milliseconds after which crash recovery may reclaim the job. */
+  leaseExpiresAt?: number;
   metaCache?: {
     title?: string;
     author?: string;
