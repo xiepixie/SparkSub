@@ -8,6 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let mockFetch = async () => { throw new Error('Unexpected network request in test'); };
 const sessionStore = new Map();
 const storageAreas = { local: new Map(), sync: new Map() };
+const storageWriteHistory = [];
 const createStorageArea = (area) => ({
   get: async (key) => {
     if (typeof key === 'string') {
@@ -29,7 +30,12 @@ const createStorageArea = (area) => ({
     storageAreas[area].forEach((v, k) => { out[k] = v; });
     return out;
   },
-  set: async (values) => { Object.entries(values).forEach(([key, value]) => storageAreas[area].set(key, value)); }
+  set: async (values) => {
+    const snapshot = structuredClone(values);
+    storageWriteHistory.push(snapshot);
+    Object.entries(snapshot).forEach(([key, value]) => storageAreas[area].set(key, value));
+  },
+  remove: async (keys) => { (Array.isArray(keys) ? keys : [keys]).forEach((key) => storageAreas[area].delete(key)); }
 });
 const messageListeners = new Set();
 const windowMock = {
@@ -792,6 +798,70 @@ assert.equal(processedItems.length, 1);
 assert.equal(processedItems[0].stage, 'done', '任务必须通过 processPendingJobs 顺利转为 done 状态');
 assert.equal(processedItems[0].subtitle?.cueCount, 2, '必须成功提取 2 句字幕');
 assert.ok(processedItems[0].subtitle?.markdown?.includes('SparkSub 离线后台转录功能'), '必须包含转录出的 Markdown 内容');
+
+// 20.1 Concurrent jobs must not overwrite another item's newer stage/subtitles
+await BSE.Queue.clearAll();
+await BSE.Queue.saveSettings({ maxConcurrency: 2 });
+await BSE.Queue.addToQueue([
+  'https://www.bilibili.com/video/BV1CONCR001',
+  'https://www.bilibili.com/video/BV1CONCR002'
+]);
+storageWriteHistory.length = 0;
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+mockFetch = async (url) => {
+  if (url.includes('x/web-interface/view')) {
+    const second = url.includes('BV1CONCR002');
+    await delay(second ? 5 : 20);
+    return {
+      json: async () => ({
+        code: 0,
+        data: {
+          cid: second ? 202 : 101,
+          title: second ? '并发任务二' : '并发任务一',
+          owner: { name: '并发测试' },
+          pages: [{ page: 1, cid: second ? 202 : 101, part: '正片' }]
+        }
+      })
+    };
+  }
+  if (url.includes('x/web-interface/nav')) {
+    await delay(3);
+    return { json: async () => ({ code: 0, data: { wbi_img: {} } }) };
+  }
+  if (url.includes('x/player/wbi/v2')) {
+    const second = url.includes('cid=202');
+    await delay(second ? 25 : 5);
+    return { json: async () => ({ data: { subtitle: { subtitles: [{ lan: 'zh-CN', subtitle_url: `https://subtitle.test/${second ? 2 : 1}` }] } } }) };
+  }
+  if (url.includes('subtitle.test')) {
+    const second = url.endsWith('/2');
+    await delay(second ? 20 : 2);
+    return { json: async () => ({ body: [{ from: 0, to: 1, content: second ? '任务二字幕' : '任务一字幕' }] }) };
+  }
+  throw new Error(`Unexpected concurrent queue URL: ${url}`);
+};
+
+await BSE.Queue.processPendingJobs();
+const concurrentItems = await BSE.Queue.getQueue();
+assert.equal(concurrentItems.length, 2);
+assert.ok(concurrentItems.every((item) => item.stage === 'done'), 'maxConcurrency=2 的交错任务最终必须全部完成');
+assert.equal(concurrentItems.find((item) => item.id === 'BV1CONCR001')?.subtitle?.plainText, '任务一字幕');
+assert.equal(concurrentItems.find((item) => item.id === 'BV1CONCR002')?.subtitle?.plainText, '任务二字幕');
+
+const observedStages = new Map();
+const stageOrder = ['queued', 'resolving', 'fetching_caption', 'fetching_audio', 'postprocessing', 'done'];
+for (const write of storageWriteHistory) {
+  for (const [key, value] of Object.entries(write)) {
+    if (!key.includes(':item:') || !value?.id) continue;
+    const previous = observedStages.get(value.id);
+    if (previous) {
+      assert.ok(stageOrder.indexOf(value.stage) >= stageOrder.indexOf(previous), `任务 ${value.id} 不得被另一任务的中间状态回退`);
+    }
+    observedStages.set(value.id, value.stage);
+  }
+}
+assert.equal(observedStages.get('BV1CONCR001'), 'done');
+assert.equal(observedStages.get('BV1CONCR002'), 'done');
 
 // 21. YouTube Offline Transcription with Multi-client & Multi-format Subtitles
 await BSE.Queue.clearCompleted();

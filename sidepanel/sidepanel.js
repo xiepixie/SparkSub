@@ -704,7 +704,6 @@
       updateQueueBadge();
       const hasPending = queueCache.some((i) => !['done', 'failed'].includes(i.stage));
       if (hasPending) {
-        BSE.Queue?.processPendingJobs?.().catch(() => {});
         if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
           chrome.runtime.sendMessage({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
         }
@@ -894,7 +893,7 @@
         await BSE.Queue.retryItem(item.id);
         toast('已重新排队，正在执行…');
         await loadAndRenderQueue();
-        BSE.Queue?.processPendingJobs?.().catch(() => {});
+        chrome.runtime?.sendMessage?.({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
       });
 
       card.querySelector('.btn-remove')?.addEventListener('click', async (e) => {
@@ -1329,7 +1328,7 @@
         if (elements.queueBatchInput) elements.queueBatchInput.value = '';
         if (elements.queueInputPanel) elements.queueInputPanel.hidden = true;
         await loadAndRenderQueue();
-        BSE.Queue?.processPendingJobs?.().catch(() => {});
+        chrome.runtime?.sendMessage?.({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
       } else {
         toast('添加失败，请检查链接格式', true);
       }
