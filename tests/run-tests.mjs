@@ -78,6 +78,7 @@ const context = vm.createContext({
     origin: 'https://www.youtube.com',
     hostname: 'www.youtube.com'
   },
+  structuredClone,
   window: windowMock,
   setTimeout,
   clearTimeout,
@@ -849,11 +850,6 @@ assert.ok(processedItems[0].subtitle?.markdown?.includes('SparkSub 离线后台�
 // 20.1 Concurrent jobs must not overwrite another item's newer stage/subtitles
 await BSE.Queue.clearAll();
 await BSE.Queue.saveSettings({ maxConcurrency: 2 });
-await BSE.Queue.addToQueue([
-  'https://www.bilibili.com/video/BV1CONCR001',
-  'https://www.bilibili.com/video/BV1CONCR002'
-]);
-storageWriteHistory.length = 0;
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 mockFetch = async (url) => {
   if (url.includes('x/web-interface/view')) {
@@ -888,6 +884,12 @@ mockFetch = async (url) => {
   throw new Error(`Unexpected concurrent queue URL: ${url}`);
 };
 
+storageWriteHistory.length = 0;
+await BSE.Queue.addToQueue([
+  'https://www.bilibili.com/video/BV1CONCR001',
+  'https://www.bilibili.com/video/BV1CONCR002'
+]);
+
 await BSE.Queue.processPendingJobs();
 const concurrentItems = await BSE.Queue.getQueue();
 assert.equal(concurrentItems.length, 2);
@@ -902,7 +904,7 @@ for (const write of storageWriteHistory) {
     if (!key.includes(':item:') || !value?.id) continue;
     const previous = observedStages.get(value.id);
     if (previous) {
-      assert.ok(stageOrder.indexOf(value.stage) >= stageOrder.indexOf(previous), `任务 ${value.id} 不得被另一任务的中间状态回退`);
+      assert.ok(stageOrder.indexOf(value.stage) >= stageOrder.indexOf(previous), `任务 ${value.id} 不得被另一任务的中间状态回退 (previous: ${previous}, current: ${value.stage})`);
     }
     observedStages.set(value.id, value.stage);
   }
@@ -1003,8 +1005,22 @@ const isolatedFetch = async (url) => {
 };
 const createIsolatedQueueContext = () => {
   const storage = {
-    get: async (key) => ({ [key]: structuredClone(isolatedStorage.get(key)) }),
-    set: async (values) => { for (const [key, value] of Object.entries(values)) isolatedStorage.set(key, structuredClone(value)); }
+    get: async (key) => {
+      if (!key) {
+        const out = {};
+        for (const [k, v] of isolatedStorage.entries()) out[k] = structuredClone(v);
+        return out;
+      }
+      if (typeof key === 'string') return { [key]: structuredClone(isolatedStorage.get(key)) };
+      if (Array.isArray(key)) {
+        const out = {};
+        key.forEach((k) => { out[k] = structuredClone(isolatedStorage.get(k)); });
+        return out;
+      }
+      return {};
+    },
+    set: async (values) => { for (const [key, value] of Object.entries(values)) isolatedStorage.set(key, structuredClone(value)); },
+    remove: async (keys) => { (Array.isArray(keys) ? keys : [keys]).forEach((k) => isolatedStorage.delete(k)); }
   };
   const isolated = vm.createContext({
     console, URL, setTimeout, clearTimeout, AbortController,

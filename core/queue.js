@@ -7,6 +7,7 @@
   const STORAGE_KEY_ITEM_PREFIX = `${STORAGE_KEY_QUEUE}:item:`;
   const STORAGE_KEY_SETTINGS = 'bse_queue_settings_v1';
   const LEASE_DURATION_MS = 5 * 60 * 1000;
+  const EXECUTION_LEASE_MS = LEASE_DURATION_MS;
   const EXECUTOR_ID = `queue-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   const DEFAULT_SETTINGS = {
@@ -318,18 +319,33 @@
     }
   }
 
+  function safeClone(obj) {
+    if (!obj || typeof obj !== 'object') return obj;
+    if (typeof globalThis.structuredClone === 'function') {
+      try { return globalThis.structuredClone(obj); } catch {}
+    }
+    if (typeof structuredClone === 'function') {
+      try { return structuredClone(obj); } catch {}
+    }
+    try {
+      return JSON.parse(JSON.stringify(obj));
+    } catch {}
+    return Array.isArray(obj) ? [...obj] : { ...obj };
+  }
+
   async function writeItems(items, replace = false) {
+    const snapshots = (items || []).map(safeClone);
     const storage = getStorageArea();
     if (!storage) {
       const next = replace ? {} : { ...(globalThis.__BSE_MEMORY_QUEUE_ITEMS__ || {}) };
-      items.forEach((item) => { next[item.id] = item; });
+      snapshots.forEach((item) => { next[item.id] = item; });
       globalThis.__BSE_MEMORY_QUEUE_ITEMS__ = next;
       return;
     }
     const current = await storage.get(null);
     const oldKeys = Object.keys(current || {}).filter((key) => key.startsWith(STORAGE_KEY_ITEM_PREFIX));
     const values = {};
-    items.forEach((item) => { values[itemStorageKey(item.id)] = item; });
+    snapshots.forEach((item) => { values[itemStorageKey(item.id)] = item; });
     const removed = replace ? oldKeys.filter((key) => !(key in values)) : [];
     if (removed.length && storage.remove) await storage.remove(removed);
     if (Object.keys(values).length) await storage.set(values);
@@ -364,24 +380,29 @@
   }
 
   async function saveItem(updatedItem) {
-    const queue = await getQueue();
-    const index = queue.findIndex((i) => i.id === updatedItem.id);
-    if (index >= 0) {
-      // A stale executor must never overwrite the state (or lease) of the
-      // executor which currently owns this item.
-      const current = queue[index];
-      if (updatedItem.leaseOwner && current.leaseOwner !== updatedItem.leaseOwner) return false;
-      if (updatedItem.leaseOwner && updatedItem.stage !== 'done' && updatedItem.stage !== 'failed') {
-        updatedItem.leaseExpiresAt = Date.now() + LEASE_DURATION_MS;
-      } else if (updatedItem.stage === 'done' || updatedItem.stage === 'failed') {
-        delete updatedItem.leaseOwner;
-        delete updatedItem.leaseExpiresAt;
+    const itemSnapshot = safeClone(updatedItem);
+    const success = await serializeQueueMutation(async (queue) => {
+      const index = queue.findIndex((i) => i.id === itemSnapshot.id);
+      if (index >= 0) {
+        // A stale executor must never overwrite the state (or lease) of the
+        // executor which currently owns this item.
+        const current = queue[index];
+        if (itemSnapshot.leaseOwner && current.leaseOwner && current.leaseOwner !== itemSnapshot.leaseOwner) return false;
+        if (itemSnapshot.leaseOwner && itemSnapshot.stage !== 'done' && itemSnapshot.stage !== 'failed') {
+          itemSnapshot.leaseExpiresAt = Date.now() + LEASE_DURATION_MS;
+        } else if (itemSnapshot.stage === 'done' || itemSnapshot.stage === 'failed') {
+          delete itemSnapshot.leaseOwner;
+          delete itemSnapshot.leaseExpiresAt;
+        }
+        await writeItems([itemSnapshot], false);
+        return true;
       }
-      queue[index] = updatedItem;
-      await saveQueue(queue);
+      return false;
+    });
+    if (success) {
+      broadcastQueueUpdate();
     }
-    broadcastQueueUpdate();
-    return index >= 0;
+    return success;
   }
 
   async function enterStage(item, stage, progress, stageHint) {
@@ -436,20 +457,24 @@
    * 检测因浏览器关闭/崩溃而停留在中间态的任务，平滑重置为可继续执行的状态
    */
   async function recoverStaleJobs() {
-    const queue = await getQueue();
-    let modified = false;
-    const runningStages = ['resolving', 'fetching_caption', 'fetching_audio', 'transcribing', 'postprocessing'];
-    const now = Date.now();
+    return serializeQueueMutation(async (queue) => {
+      const runningStages = ['resolving', 'fetching_caption', 'fetching_audio', 'transcribing', 'postprocessing'];
+      const changed = [];
+      const now = Date.now();
 
-    for (const item of queue) {
-      if (runningStages.includes(item.stage) && (!item.leaseExpiresAt || item.leaseExpiresAt <= Date.now())) {
-        const previousStage = item.stage;
-        item.stage = 'queued';
-        item.stageHint = `自动恢复：从 ${previousStage} 阶段继续`;
-        item.progress = Math.max(0, (item.progress || 0) - 10);
-        delete item.leaseOwner;
-        delete item.leaseExpiresAt;
-        modified = true;
+      for (const item of queue) {
+        const leaseExpiresAt = item.leaseExpiresAt ?? item.executionLease?.expiresAt ?? 0;
+        const isLeaseActive = leaseExpiresAt > now;
+        if (runningStages.includes(item.stage) && !isLeaseActive) {
+          const previousStage = item.stage;
+          item.stage = 'queued';
+          item.stageHint = `自动恢复：从 ${previousStage} 阶段继续`;
+          item.progress = Math.max(0, (item.progress || 0) - 10);
+          delete item.leaseOwner;
+          delete item.leaseExpiresAt;
+          delete item.executionLease;
+          changed.push(item);
+        }
       }
       if (changed.length) await writeItems(changed);
       if (changed.length) broadcastQueueUpdate();
@@ -1022,18 +1047,18 @@
 
         const candidates = pendingItems.slice(0, maxConcurrency);
         const claim = async () => {
-          const claimed = [];
-          for (const candidate of candidates) {
-            const latest = await getQueue();
-            const item = latest.find((entry) => entry.id === candidate.id);
-            if (!item || item.stage !== 'queued' || item.leaseOwner) continue;
-            item.leaseOwner = EXECUTOR_ID;
-            item.leaseExpiresAt = Date.now() + LEASE_DURATION_MS;
-            await saveQueue(latest);
-            const verified = await getItem(item.id);
-            if (verified?.leaseOwner === EXECUTOR_ID) claimed.push(verified);
-          }
-          return claimed;
+          return serializeQueueMutation(async (queue) => {
+            const claimed = [];
+            for (const candidate of candidates) {
+              const item = queue.find((entry) => entry.id === candidate.id);
+              if (!item || item.stage !== 'queued' || (item.leaseOwner && item.leaseOwner !== EXECUTOR_ID)) continue;
+              item.leaseOwner = EXECUTOR_ID;
+              item.leaseExpiresAt = Date.now() + LEASE_DURATION_MS;
+              await writeItems([item], false);
+              claimed.push(safeClone(item));
+            }
+            return claimed;
+          });
         };
         // Web Locks is shared by extension execution contexts and makes the
         // persistent read/claim/write sequence atomic. The verification in the
