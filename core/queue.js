@@ -851,6 +851,39 @@
     let title = '';
     let author = '';
     let cover = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+    let rawText = '';
+    let chosenTrack = null;
+
+    // Strategy 0: Ask active YouTube tab (via live MAIN world session bridge)
+    if (typeof chrome !== 'undefined' && chrome.tabs?.query) {
+      try {
+        const tabs = await chrome.tabs.query({ url: '*://*.youtube.com/*' });
+        for (const tab of tabs) {
+          if (!tab.id) continue;
+          try {
+            const res = await new Promise((resolve) => {
+              const timer = setTimeout(() => resolve(null), 5000);
+              chrome.tabs.sendMessage(tab.id, { type: 'BSE_RESOLVE_YOUTUBE_IN_TAB', videoId })
+                .then((r) => { clearTimeout(timer); resolve(r); })
+                .catch(() => { clearTimeout(timer); resolve(null); });
+            });
+            if (res?.ok && res.result) {
+              const r = res.result;
+              if (r.title) title = r.title;
+              if (r.author) author = r.author;
+              if (r.cover) cover = r.cover;
+              if (Array.isArray(r.captionTracks) && r.captionTracks.length) captionTracks = r.captionTracks;
+              if (r.rawText) {
+                rawText = r.rawText;
+                chosenTrack = r.chosenTrack;
+                return { title, author, cover, captionTracks, rawText, chosenTrack };
+              }
+              if (captionTracks.length) break;
+            }
+          } catch {}
+        }
+      } catch {}
+    }
 
     // Strategy 1: Innertube ANDROID Client (High reliability, unblocked, pure JSON)
     try {
@@ -930,7 +963,7 @@
     if (!captionTracks.length) {
       try {
         const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
-        const resp = await BSE.Utils.fetchWithTimeout(watchUrl, { signal }, 8000);
+        const resp = await BSE.Utils.fetchWithTimeout(watchUrl, { credentials: 'include', signal }, 8000);
         const html = await resp.text();
         const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s)
           || html.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
@@ -970,7 +1003,7 @@
       }
     }
 
-    return { title, author, cover, captionTracks };
+    return { title, author, cover, captionTracks, rawText, chosenTrack };
   }
 
   async function processYouTubeItem(item, signal) {
@@ -978,10 +1011,15 @@
 
     // === Stage 1: Resolving & Fetching Caption Metadata ===
     let captionTracks = item.metaCache?.captionTracks || [];
+    let directRawText = '';
+    let directChosenTrack = null;
+
     if (!captionTracks.length) {
       await enterStage(item, 'resolving', 20, '正在调用 YouTube 接口解析字幕…');
       const resolved = await resolveYouTubeMetadataAndCaptions(videoId, signal);
       captionTracks = resolved.captionTracks || [];
+      directRawText = resolved.rawText || '';
+      directChosenTrack = resolved.chosenTrack || null;
       if (resolved.title) item.title = resolved.title;
       if (resolved.author) item.author = resolved.author;
       if (resolved.cover) item.cover = resolved.cover;
@@ -993,6 +1031,9 @@
         captionTracks
       };
       item.stageArtifacts = { ...(item.stageArtifacts || {}), metadataResolved: true };
+      if (directRawText) {
+        item.stageArtifacts.captionText = directRawText;
+      }
       await saveItem(item);
     } else {
       item.title = item.metaCache.title || item.title;
@@ -1004,12 +1045,13 @@
       throw new Error('该 YouTube 视频未提供字幕轨道');
     }
 
-    const chosenTrack = captionTracks.find((t) => /zh|cn|chinese|中/i.test(t.languageCode || t.name?.simpleText || ''))
+    const chosenTrack = directChosenTrack
+      || captionTracks.find((t) => /zh|cn|chinese|中/i.test(t.languageCode || t.name?.simpleText || ''))
       || captionTracks.find((t) => /en|english/i.test(t.languageCode || t.name?.simpleText || ''))
       || captionTracks[0];
 
     // Download Caption with Multi-format Resilience (JSON3 / XML / TTML / VTT) and Fallback Tracks
-    let rawCaptionText = item.stageArtifacts?.captionText || '';
+    let rawCaptionText = item.stageArtifacts?.captionText || directRawText || '';
     let cues = item.stageArtifacts?.cues || (rawCaptionText ? BSE.Parsers.parse(rawCaptionText) : []);
     let actualTrack = chosenTrack;
 

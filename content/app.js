@@ -529,6 +529,16 @@
           sendResponse(publicState());
           return false;
         }
+        if (message?.type === 'BSE_RESOLVE_YOUTUBE_IN_TAB') {
+          if (BSE.YouTube?.bridgeRequest) {
+            BSE.YouTube.bridgeRequest('FETCH_VIDEO_SUBTITLE', { videoId: message.videoId }, 15000)
+              .then((result) => sendResponse({ ok: true, result }))
+              .catch((err) => sendResponse({ ok: false, error: err.message }));
+            return true;
+          }
+          sendResponse({ ok: false, error: 'YouTube 桥接未初始化' });
+          return false;
+        }
         if (message?.type === 'BSE_COMMAND') {
           const command = message.command;
           const payload = message.payload || {};
