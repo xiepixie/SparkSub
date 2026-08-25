@@ -253,7 +253,7 @@ export interface BSEI18nNamespace {
 }
 
 export interface TrackedItemSubtitle {
-  status: 'ready' | 'pending' | 'not_found' | 'error';
+  status: 'ready' | 'pending' | 'not_found' | 'error' | 'evicted';
   language?: string;
   langDoc?: string;
   cueCount?: number;
@@ -311,6 +311,7 @@ export interface BSETrackerNamespace {
   markAllAsRead(): Promise<void>;
   getSettings(): Promise<TrackerSettings>;
   saveSettings(settings: Partial<TrackerSettings>): Promise<TrackerSettings>;
+  getStorageStats(subscriptions?: TrackedSubscription[]): { subscriptionCount: number; itemCount: number; cachedSubtitleCount: number; evictedCount: number; approximateBytes: number };
   checkSubscriptionUpdates(sub: TrackedSubscription, options?: { signal?: AbortSignal }): Promise<{ checked: boolean; initialized?: boolean; updated: boolean; newItems: TrackedItem[]; error?: string }>;
   checkAllUpdates(): Promise<{ totalUnread: number; updatedSubs: string[] }>;
   fetchItemSubtitle(item: TrackedItem, options?: { signal?: AbortSignal }): Promise<TrackedItemSubtitle>;

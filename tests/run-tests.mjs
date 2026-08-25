@@ -6,6 +6,12 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let mockFetch = async () => { throw new Error('Unexpected network request in test'); };
+const sessionStore = new Map();
+const storageAreas = { local: new Map(), sync: new Map() };
+const createStorageArea = (area) => ({
+  get: async (key) => ({ [key]: storageAreas[area].get(key) }),
+  set: async (values) => { Object.entries(values).forEach(([key, value]) => storageAreas[area].set(key, value)); }
+});
 const context = vm.createContext({
   console,
   URL: {
@@ -21,7 +27,16 @@ const context = vm.createContext({
   DOMException,
   AbortController,
   fetch: (...args) => mockFetch(...args),
+  sessionStorage: {
+    getItem: (key) => sessionStore.has(key) ? sessionStore.get(key) : null,
+    setItem: (key, value) => sessionStore.set(key, String(value)),
+    removeItem: (key) => sessionStore.delete(key)
+  },
   chrome: {
+    storage: {
+      local: createStorageArea('local'),
+      sync: createStorageArea('sync')
+    },
     runtime: {
       sendMessage: async (msg) => {
         if (msg.type === 'BSE_FETCH_BILIBILI_RESOURCE') {
@@ -165,6 +180,20 @@ assert.equal(BSE.Utils.findActiveCueIndex(jsonCues, 2.6), 1);
 assert.equal(BSE.Utils.findActiveCueIndex(jsonCues, 10), -1);
 assert.match(BSE.Formatters.toSrt(jsonCues), /00:00:01,000 --> 00:00:02,500/);
 assert.match(BSE.Formatters.toTxt(jsonCues), /第一句/);
+
+// Session snapshots are bounded and must not retain signed subtitle URLs.
+BSE.Utils.SessionSnapshotManager.saveSnapshot('yt:cache-test', {
+  title: '缓存测试',
+  tracks: [{ id: 'zh', lan: 'zh-CN', lanDoc: '中文', subtitleUrl: 'https://signed.example/token=secret' }],
+  selectedTrackId: 'zh',
+  cues: jsonCues
+});
+const cachedSnapshot = BSE.Utils.SessionSnapshotManager.findSnapshot('yt:cache-test');
+assert.equal(cachedSnapshot.tracks[0].lan, 'zh-CN', '会话快照必须保留实际语言字段');
+assert.equal('subtitleUrl' in cachedSnapshot.tracks[0], false, '会话快照不得持久化带签名的字幕 URL');
+const oversizedCues = [{ from: 0, to: 1, content: 'x'.repeat(2 * 1024 * 1024) }];
+BSE.Utils.SessionSnapshotManager.saveSnapshot('yt:oversized', { tracks: [], cues: oversizedCues });
+assert.equal(BSE.Utils.SessionSnapshotManager.findSnapshot('yt:oversized'), null, '超大字幕不得写满 sessionStorage');
 
 // 7. Manifest & File Integrity
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
@@ -345,6 +374,22 @@ assert.equal(parsedRss[0].title, 'Never Gonna Give You Up & Dance', 'XML 实体�
 assert.equal(parsedRss[0].author, 'Rick Astley', '作者名称提取必须准确');
 assert.equal(parsedRss[1].id, 'testVideo123', '第二条视频 videoId 提取必须准确');
 assert.equal(parsedRss[1].title, 'Test Video Title <2>', '尖括号转义必须被正确还原');
+
+const cacheStats = BSE.Tracker.getStorageStats([{
+  id: 'cache-policy', platform: 'bilibili', type: 'up', title: '容量测试', targetId: '1', unreadCount: 1,
+  items: [{ id: 'large', title: '超大字幕', subtitle: { status: 'ready', fetchedAt: Date.now(), markdown: 'x'.repeat(800000), plainText: 'duplicate' } }]
+}]);
+assert.equal(cacheStats.evictedCount, 1, '超过单字幕上限的正文必须被缓存策略释放');
+assert.ok(cacheStats.approximateBytes < 10000, '释放超大正文后只应保留轻量元数据');
+const cappedStats = BSE.Tracker.getStorageStats(Array.from({ length: 105 }, (_, index) => ({
+  id: `sub-${index}`, platform: 'youtube', type: 'channel', title: `频道 ${index}`, targetId: `UC${index}`, items: []
+})));
+assert.equal(cappedStats.subscriptionCount, 100, '订阅元数据必须设置全局数量上限');
+
+const normalizedSettings = await BSE.Tracker.saveSettings({ checkIntervalMinutes: -10, enableNotification: false });
+assert.equal(normalizedSettings.checkIntervalMinutes, 5, '自动巡检周期不得低于 5 分钟');
+assert.equal(normalizedSettings.enableNotification, false, '布尔设置必须正确保存');
+assert.ok(storageAreas.sync.has('bse_tracker_settings'), '小型追踪设置应存放在可同步存储而非字幕缓存区');
 
 // Subscription polling must establish a baseline before reporting updates.
 const youtubeSub = {

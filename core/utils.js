@@ -236,13 +236,24 @@
 
   const SESSION_SNAPSHOT_KEY = 'bse_recent_snapshots';
   const MAX_SNAPSHOTS = 4;
+  const MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024;
+  const SNAPSHOT_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+  function snapshotBytes(value) {
+    return new TextEncoder().encode(JSON.stringify(value)).length;
+  }
 
   const SessionSnapshotManager = {
     getSnapshots() {
       try {
         const raw = sessionStorage.getItem(SESSION_SNAPSHOT_KEY);
-        return raw ? JSON.parse(raw) : [];
+        const parsed = raw ? JSON.parse(raw) : [];
+        if (!Array.isArray(parsed)) return [];
+        const fresh = parsed.filter((item) => item?.savedAt && Date.now() - item.savedAt <= SNAPSHOT_MAX_AGE_MS);
+        if (fresh.length !== parsed.length) sessionStorage.setItem(SESSION_SNAPSHOT_KEY, JSON.stringify(fresh));
+        return fresh;
       } catch {
+        try { sessionStorage.removeItem(SESSION_SNAPSHOT_KEY); } catch {}
         return [];
       }
     },
@@ -262,22 +273,29 @@
       if (!mediaKey || !data) return;
       try {
         let list = this.getSnapshots().filter((item) => item.mediaKey !== mediaKey);
-        list.unshift({
+        const snapshot = {
           mediaKey,
           title: data.title || '',
           tracks: (data.tracks || []).map((t) => ({
             id: t.id,
-            language: t.language,
-            label: t.label,
+            lan: t.lan,
+            lanDoc: t.lanDoc,
             isAuto: t.isAuto,
-            isCC: t.isCC,
-            subtitleUrl: t.subtitleUrl
+            isCC: t.isCC
           })),
           selectedTrackId: data.selectedTrackId,
           cues: data.cues || [],
           savedAt: Date.now()
-        });
+        };
+        // Signed subtitle URLs are deliberately excluded. Oversized transcripts
+        // stay in the in-memory LRU cache instead of exhausting sessionStorage.
+        if (snapshotBytes(snapshot) > MAX_SNAPSHOT_BYTES) {
+          sessionStorage.setItem(SESSION_SNAPSHOT_KEY, JSON.stringify(list));
+          return;
+        }
+        list.unshift(snapshot);
         if (list.length > MAX_SNAPSHOTS) list = list.slice(0, MAX_SNAPSHOTS);
+        while (list.length && snapshotBytes(list) > MAX_SNAPSHOT_BYTES) list.pop();
         sessionStorage.setItem(SESSION_SNAPSHOT_KEY, JSON.stringify(list));
       } catch {}
     }

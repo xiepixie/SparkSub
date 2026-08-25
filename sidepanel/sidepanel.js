@@ -236,6 +236,7 @@
   let trackerLoading = false;
   const expandedTrackerCards = new Set();
   let subscriptionsCache = [];
+  let trackerStorageStats = null;
   let currentAuthorInfo = null;
 
   async function loadAndRenderTracker() {
@@ -245,6 +246,7 @@
     if (elements.trackerStatusLine) elements.trackerStatusLine.textContent = '正在读取订阅…';
     try {
       subscriptionsCache = await BSE.Tracker.getSubscriptions();
+      trackerStorageStats = BSE.Tracker.getStorageStats?.(subscriptionsCache) || null;
       trackerLoading = false;
       renderTrackerList();
       updateTrackerCountsAndBadge();
@@ -465,8 +467,8 @@
     } else if (subtitle?.status === 'pending') {
       badge = '<span class="tracker-sub-badge pending">⏳ 正在提取</span>';
       actions = '';
-    } else if (subtitle?.status === 'not_found' || subtitle?.status === 'error') {
-      const label = subtitle.status === 'error' ? '提取失败' : '无官方字幕';
+    } else if (subtitle?.status === 'not_found' || subtitle?.status === 'error' || subtitle?.status === 'evicted') {
+      const label = subtitle.status === 'error' ? '提取失败' : (subtitle.status === 'evicted' ? '缓存已释放' : '无官方字幕');
       badge = `<span class="tracker-sub-badge not-found" title="${BSE.Utils.escapeHtml(subtitle.errorHint || '')}">⚪ ${label}</span>`;
       actions = `<button class="tracker-btn-copy tracker-btn-retry-sub" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}">↻ 重试</button>`;
     }
@@ -520,7 +522,8 @@
       return sum + unreadItems.filter((item) => item.subtitle?.status === 'ready' && (item.subtitle.markdown || item.subtitle.plainText)).length;
     }, 0);
     if (elements.trackerStatusLine) {
-      elements.trackerStatusLine.textContent = `显示 ${list.length}/${subscriptionsCache.length} 个订阅 · ${unreadTotal} 条未读 · ${copyableUnread} 篇字幕可复制`;
+      const cacheLabel = trackerStorageStats ? ` · 缓存 ${Math.ceil(trackerStorageStats.approximateBytes / 1024)} KB` : '';
+      elements.trackerStatusLine.textContent = `显示 ${list.length}/${subscriptionsCache.length} 个订阅 · ${unreadTotal} 条未读 · ${copyableUnread} 篇字幕可复制${cacheLabel}`;
     }
     if (elements.trackerCopyAllBtn) elements.trackerCopyAllBtn.disabled = copyableUnread === 0 || trackerLoading;
     if (elements.trackerReadAllBtn) elements.trackerReadAllBtn.disabled = unreadTotal === 0 || trackerLoading;

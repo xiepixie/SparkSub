@@ -10,6 +10,9 @@
   });
 
   const MAX_HISTORY_PER_SUB = 20;
+  const MAX_SUBSCRIPTIONS = 100;
+  const MAX_CACHED_SUBTITLE_CHARS = 3_500_000;
+  const MAX_SINGLE_SUBTITLE_CHARS = 750_000;
 
   const DEFAULT_SETTINGS = Object.freeze({
     checkIntervalMinutes: 60,
@@ -17,6 +20,19 @@
     enableBadge: true,
     autoExtractSubtitles: false
   });
+
+  function normalizeSettings(value = {}) {
+    const requestedInterval = Number(value.checkIntervalMinutes);
+    const checkIntervalMinutes = requestedInterval === 0
+      ? 0
+      : Math.min(1440, Math.max(5, Number.isFinite(requestedInterval) ? requestedInterval : DEFAULT_SETTINGS.checkIntervalMinutes));
+    return {
+      checkIntervalMinutes,
+      enableNotification: value.enableNotification !== false,
+      enableBadge: value.enableBadge !== false,
+      autoExtractSubtitles: value.autoExtractSubtitles === true
+    };
+  }
 
   // === 1. Lightweight Pure-JS MD5 Implementation ===
   function safeAdd(x, y) {
@@ -250,10 +266,11 @@
   // === 4. Storage Operations with 20-Item Buffer Cap & Memory Fallback ===
   const _memoryStorage = new Map();
 
-  async function getStorageItem(key, defaultValue) {
-    if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+  async function getStorageItem(key, defaultValue, areaName = 'local') {
+    const area = typeof chrome !== 'undefined' ? chrome?.storage?.[areaName] : null;
+    if (area) {
       try {
-        const data = await chrome.storage.local.get(key);
+        const data = await area.get(key);
         return data[key] !== undefined ? data[key] : defaultValue;
       } catch {
         return defaultValue;
@@ -262,11 +279,14 @@
     return _memoryStorage.has(key) ? _memoryStorage.get(key) : defaultValue;
   }
 
-  async function setStorageItem(key, value) {
-    if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+  async function setStorageItem(key, value, areaName = 'local') {
+    const area = typeof chrome !== 'undefined' ? chrome?.storage?.[areaName] : null;
+    if (area) {
       try {
-        await chrome.storage.local.set({ [key]: value });
-      } catch {}
+        await area.set({ [key]: value });
+      } catch (error) {
+        throw new Error(`无法写入 ${areaName} 存储：${error?.message || error}`);
+      }
     }
     _memoryStorage.set(key, value);
   }
@@ -276,11 +296,81 @@
     return Array.isArray(list) ? list : [];
   }
 
-  async function saveSubscriptions(subs) {
-    const sanitized = (subs || []).map((s) => ({
+  function compactSubscriptions(subs) {
+    const originalById = new Map((subs || []).map((sub) => [sub.id, sub]));
+    const sanitized = (subs || []).slice(0, MAX_SUBSCRIPTIONS).map((s) => ({
       ...s,
-      items: Array.isArray(s.items) ? s.items.slice(0, MAX_HISTORY_PER_SUB) : []
+      id: String(s.id || '').slice(0, 256),
+      title: String(s.title || '').slice(0, 300),
+      author: String(s.author || '').slice(0, 200),
+      avatar: String(s.avatar || '').slice(0, 2048),
+      sourceUrl: String(s.sourceUrl || '').slice(0, 2048),
+      targetId: String(s.targetId || '').slice(0, 256),
+      unreadCount: Math.min(Number(s.unreadCount) || 0, MAX_HISTORY_PER_SUB),
+      items: Array.isArray(s.items) ? s.items.slice(0, MAX_HISTORY_PER_SUB).map((item) => ({
+        ...item,
+        id: String(item.id || '').slice(0, 256),
+        title: String(item.title || '').slice(0, 500),
+        author: String(item.author || '').slice(0, 200),
+        url: String(item.url || '').slice(0, 2048),
+        subtitle: item.subtitle ? {
+          ...item.subtitle,
+          markdown: undefined,
+          plainText: undefined
+        } : item.subtitle
+      })) : []
     }));
+
+    const candidates = [];
+    sanitized.forEach((sub, subIndex) => {
+      const originalSub = originalById.get(sub.id) || {};
+      sub.items.forEach((item, itemIndex) => {
+        const original = originalSub.items?.find((entry) => entry.id === item.id);
+        const markdown = String(original?.subtitle?.markdown || '');
+        const plainText = markdown ? '' : String(original?.subtitle?.plainText || '');
+        const content = markdown || plainText;
+        if (!content) return;
+        candidates.push({
+          subIndex,
+          itemIndex,
+          content,
+          field: markdown ? 'markdown' : 'plainText',
+          unread: itemIndex < (sub.unreadCount || 0),
+          fetchedAt: Number(original?.subtitle?.fetchedAt || item.pubdate || 0)
+        });
+      });
+    });
+    candidates.sort((a, b) => Number(b.unread) - Number(a.unread) || b.fetchedAt - a.fetchedAt);
+
+    let remaining = MAX_CACHED_SUBTITLE_CHARS;
+    let evictedCount = 0;
+    for (const candidate of candidates) {
+      const subtitle = sanitized[candidate.subIndex].items[candidate.itemIndex].subtitle;
+      if (candidate.content.length <= MAX_SINGLE_SUBTITLE_CHARS && candidate.content.length <= remaining) {
+        subtitle[candidate.field] = candidate.content;
+        remaining -= candidate.content.length;
+      } else {
+        subtitle.status = 'evicted';
+        subtitle.errorHint = '字幕正文已按缓存容量策略释放，可点击重新提取';
+        evictedCount++;
+      }
+    }
+    return { subscriptions: sanitized, evictedCount, cachedChars: MAX_CACHED_SUBTITLE_CHARS - remaining };
+  }
+
+  function getStorageStats(subs = []) {
+    const compacted = compactSubscriptions(subs);
+    return {
+      subscriptionCount: compacted.subscriptions.length,
+      itemCount: compacted.subscriptions.reduce((sum, sub) => sum + sub.items.length, 0),
+      cachedSubtitleCount: compacted.subscriptions.reduce((sum, sub) => sum + sub.items.filter((item) => item.subtitle?.markdown || item.subtitle?.plainText).length, 0),
+      evictedCount: compacted.evictedCount,
+      approximateBytes: new TextEncoder().encode(JSON.stringify(compacted.subscriptions)).length
+    };
+  }
+
+  async function saveSubscriptions(subs) {
+    const { subscriptions: sanitized } = compactSubscriptions(subs);
     await setStorageItem(STORAGE_KEYS.SUBSCRIPTIONS, sanitized);
     return true;
   }
@@ -356,14 +446,18 @@
   }
 
   async function getSettings() {
-    const data = await getStorageItem(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
-    return Object.assign({}, DEFAULT_SETTINGS, data);
+    let data = await getStorageItem(STORAGE_KEYS.SETTINGS, null, 'sync');
+    if (!data) {
+      data = await getStorageItem(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
+      await setStorageItem(STORAGE_KEYS.SETTINGS, data, 'sync').catch(() => {});
+    }
+    return normalizeSettings(data);
   }
 
   async function saveSettings(settingsPatch) {
     const current = await getSettings();
-    const updated = Object.assign({}, current, settingsPatch);
-    await setStorageItem(STORAGE_KEYS.SETTINGS, updated);
+    const updated = normalizeSettings(Object.assign({}, current, settingsPatch));
+    await setStorageItem(STORAGE_KEYS.SETTINGS, updated, 'sync');
     return updated;
   }
 
@@ -375,8 +469,8 @@
   async function recordCheckFailure() {
     const state = await getBackoffState();
     const failures = (state.failures || 0) + 1;
-    // Exponential backoff: 5m, 15m, 30m, max 60m
-    const delayMinutes = Math.min(60, Math.pow(2, failures) * 3);
+    const backoffMinutes = [5, 15, 30, 60];
+    const delayMinutes = backoffMinutes[Math.min(failures - 1, backoffMinutes.length - 1)];
     const nextCheckTime = Date.now() + delayMinutes * 60 * 1000;
     await setStorageItem(STORAGE_KEYS.BACKOFF, { failures, nextCheckTime });
   }
@@ -896,6 +990,7 @@
     markAllAsRead,
     getSettings,
     saveSettings,
+    getStorageStats,
     checkSubscriptionUpdates,
     checkAllUpdates,
     fetchItemSubtitle,
