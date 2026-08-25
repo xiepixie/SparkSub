@@ -109,29 +109,80 @@
   }
 
   function parseTtml(text) {
-    return parseXml(text, 'p', (node) => {
-      const from = parseTimeExpression(node.getAttribute('begin'));
-      const end = node.getAttribute('end');
-      const duration = node.getAttribute('dur');
-      return {
-        from,
-        to: end ? parseTimeExpression(end) : from + parseTimeExpression(duration || '2s'),
-        content: node.textContent
-      };
-    });
+    if (typeof DOMParser !== 'undefined') {
+      try {
+        const cues = parseXml(text, 'p', (node) => {
+          const from = parseTimeExpression(node.getAttribute('begin'));
+          const end = node.getAttribute('end');
+          const duration = node.getAttribute('dur');
+          return {
+            from,
+            to: end ? parseTimeExpression(end) : from + parseTimeExpression(duration || '2s'),
+            content: node.textContent
+          };
+        });
+        if (cues.length) return cues;
+      } catch {}
+    }
+    const cues = [];
+    const pRegex = /<p\s+[^>]*begin="([^"]+)"(?:[^>]*dur="([^"]+)"|[^>]*end="([^"]+)")?[^>]*>([\s\S]*?)<\/p>/gi;
+    let match;
+    while ((match = pRegex.exec(text)) !== null) {
+      const from = parseTimeExpression(match[1]);
+      const dur = match[2] ? parseTimeExpression(match[2]) : 2;
+      const end = match[3] ? parseTimeExpression(match[3]) : from + dur;
+      const rawContent = match[4] || '';
+      const content = rawContent
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/<[^>]+>/g, '')
+        .trim();
+      if (content) {
+        cues.push({ from, to: end, content });
+      }
+    }
+    return normalize(cues);
   }
 
   function parseSrv3(text) {
-    return parseXml(text, 'p', (node) => {
-      const from = Number(node.getAttribute('t') || 0) / 1000;
-      return {
-        from,
-        to: from + Number(node.getAttribute('d') || 0) / 1000,
-        content: Array.from(node.querySelectorAll('s')).length
-          ? Array.from(node.querySelectorAll('s')).map((item) => item.textContent || '').join('')
-          : node.textContent
-      };
-    });
+    if (typeof DOMParser !== 'undefined') {
+      try {
+        const cues = parseXml(text, 'p', (node) => {
+          const from = Number(node.getAttribute('t') || 0) / 1000;
+          return {
+            from,
+            to: from + Number(node.getAttribute('d') || 0) / 1000,
+            content: Array.from(node.querySelectorAll('s')).length
+              ? Array.from(node.querySelectorAll('s')).map((item) => item.textContent || '').join('')
+              : node.textContent
+          };
+        });
+        if (cues.length) return cues;
+      } catch {}
+    }
+    const cues = [];
+    const pRegex = /<p\s+[^>]*t="(\d+)"[^>]*d="(\d+)"[^>]*>([\s\S]*?)<\/p>|<p\s+[^>]*>([\s\S]*?)<\/p>/gi;
+    let match;
+    while ((match = pRegex.exec(text)) !== null) {
+      const from = (Number(match[1] || 0)) / 1000;
+      const dur = (Number(match[2] || 2000)) / 1000;
+      const rawContent = match[3] || match[4] || '';
+      const content = rawContent
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/<[^>]+>/g, '')
+        .trim();
+      if (content) {
+        cues.push({ from, to: from + dur, content });
+      }
+    }
+    return normalize(cues);
   }
 
   function parseLegacyXml(text) {

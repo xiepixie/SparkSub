@@ -999,31 +999,47 @@
       || captionTracks.find((t) => /en|english/i.test(t.languageCode || t.name?.simpleText || ''))
       || captionTracks[0];
 
-    // Download Caption with Multi-format Resilience (JSON3 / XML / TTML / VTT)
+    // Download Caption with Multi-format Resilience (JSON3 / XML / TTML / VTT) and Fallback Tracks
     let rawCaptionText = item.stageArtifacts?.captionText || '';
-    if (!rawCaptionText) {
-      await enterStage(item, 'fetching_caption', 50, `正在下载《${chosenTrack.name?.simpleText || chosenTrack.languageCode || '默认'}》字幕…`);
-      try {
-        const json3Url = chosenTrack.baseUrl.includes('fmt=') ? chosenTrack.baseUrl : `${chosenTrack.baseUrl}&fmt=json3`;
-        const resp = await BSE.Utils.fetchWithTimeout(json3Url, { signal }, 8000);
-        rawCaptionText = await resp.text();
-      } catch {}
+    let cues = item.stageArtifacts?.cues || (rawCaptionText ? BSE.Parsers.parse(rawCaptionText) : []);
+    let actualTrack = chosenTrack;
 
-      if (!rawCaptionText || rawCaptionText.includes('<!DOCTYPE html>')) {
-        const resp = await BSE.Utils.fetchWithTimeout(chosenTrack.baseUrl, { signal }, 8000);
-        rawCaptionText = await resp.text();
+    if (!cues.length) {
+      await enterStage(item, 'fetching_caption', 50, `正在下载《${chosenTrack.name?.simpleText || chosenTrack.languageCode || '默认'}》字幕…`);
+
+      const candidateTracks = [chosenTrack, ...captionTracks.filter((t) => t !== chosenTrack)];
+      for (const track of candidateTracks) {
+        if (!track?.baseUrl) continue;
+        const candidateUrls = [
+          track.baseUrl.includes('fmt=') ? track.baseUrl : `${track.baseUrl}&fmt=json3`,
+          track.baseUrl.includes('fmt=') ? track.baseUrl.replace(/fmt=\w+/, 'fmt=srv3') : `${track.baseUrl}&fmt=srv3`,
+          track.baseUrl.includes('fmt=') ? track.baseUrl.replace(/fmt=\w+/, 'fmt=vtt') : `${track.baseUrl}&fmt=vtt`,
+          track.baseUrl
+        ];
+        for (const targetUrl of candidateUrls) {
+          try {
+            const resp = await BSE.Utils.fetchWithTimeout(targetUrl, { signal }, 8000);
+            const text = await resp.text();
+            if (text && !text.includes('<!DOCTYPE html>')) {
+              const parsed = BSE.Parsers.parse(text);
+              if (parsed && parsed.length > 0) {
+                cues = parsed;
+                rawCaptionText = text;
+                actualTrack = track;
+                break;
+              }
+            }
+          } catch {}
+        }
+        if (cues.length > 0) break;
       }
-      if (rawCaptionText && !rawCaptionText.includes('<!DOCTYPE html>')) {
-        item.stageArtifacts = { ...(item.stageArtifacts || {}), captionText: rawCaptionText };
+
+      if (rawCaptionText && cues.length > 0) {
+        item.stageArtifacts = { ...(item.stageArtifacts || {}), captionText: rawCaptionText, cues };
         await saveItem(item);
       }
     }
 
-    if (!rawCaptionText || rawCaptionText.includes('<!DOCTYPE html>')) {
-      throw new Error('无法拉取 YouTube 字幕内容');
-    }
-
-    const cues = BSE.Parsers.parse(rawCaptionText);
     if (!cues || !cues.length) {
       throw new Error('YouTube 字幕数据为空或无法解析');
     }
@@ -1034,8 +1050,8 @@
     const processed = formatCuesToStructured(cues, item.title, item.author, item.url);
 
     item.subtitle = {
-      language: chosenTrack.languageCode,
-      langDoc: chosenTrack.name?.simpleText || chosenTrack.languageCode,
+      language: actualTrack.languageCode,
+      langDoc: actualTrack.name?.simpleText || actualTrack.languageCode,
       cueCount: processed.cueCount,
       plainText: processed.plainText,
       markdown: processed.markdown,
