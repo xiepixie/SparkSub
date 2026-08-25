@@ -868,7 +868,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'BSE_QUEUE_ENQUEUE') {
     (async () => {
       const items = await BSE.Queue?.addToQueue(message.urls, message.options) || [];
-      await startQueueExecutor();
+      startQueueExecutor().catch(() => {});
       return { ok: true, items };
     })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;

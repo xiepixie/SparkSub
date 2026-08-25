@@ -140,47 +140,114 @@
     let title = '';
     let author = '';
     let cover = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+    let rawText = '';
+    let cues = [];
 
-    // 1. 在拥有完整 PoToken 与用户会话的 MAIN 世界中发起 player 请求
+    // 1. 同源获取 watch 页面 HTML（带真实 Cookie 与页面上下文）
     try {
-      const playerUrl = apiKey ? `/youtubei/v1/player?key=${apiKey}&prettyPrint=false` : '/youtubei/v1/player?prettyPrint=false';
-      const resp = await fetch(playerUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-YouTube-Client-Name': '1',
-          'X-YouTube-Client-Version': innertubeContext.client?.clientVersion || '2.20260101.01.00'
-        },
-        body: JSON.stringify({
-          context: innertubeContext,
-          videoId,
-          racyCheckOk: true,
-          contentCheckOk: true
-        })
-      });
-      const data = await resp.json();
-      captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
-      if (data?.videoDetails) {
-        title = data.videoDetails.title || '';
-        author = data.videoDetails.author || '';
-        cover = data.videoDetails.thumbnail?.thumbnails?.[0]?.url || cover;
+      const watchResp = await fetch(`/watch?v=${videoId}`);
+      const html = await watchResp.text();
+
+      // 尝试直接提取官方 transcriptEndpoint 并调用官方接口
+      const dataMatch = html.match(/var\s+ytInitialData\s*=\s*(\{.+?\});/s) || html.match(/ytInitialData\s*=\s*(\{.+?\});/s);
+      if (dataMatch) {
+        try {
+          const d = JSON.parse(dataMatch[1]);
+          const str = JSON.stringify(d);
+          const epMatch = str.match(/\"getTranscriptEndpoint\":\{(\"params\":\"[^\"]+\")/);
+          if (epMatch) {
+            const transcriptParams = JSON.parse('{' + epMatch[1] + '}').params;
+            const transcriptUrl = apiKey ? `/youtubei/v1/get_transcript?key=${apiKey}&prettyPrint=false` : '/youtubei/v1/get_transcript?prettyPrint=false';
+            const tResp = await fetch(transcriptUrl, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-YouTube-Client-Name': '1',
+                'X-YouTube-Client-Version': innertubeContext.client?.clientVersion || '2.20260101.01.00'
+              },
+              body: JSON.stringify({
+                context: innertubeContext,
+                params: transcriptParams
+              })
+            });
+            const tData = await tResp.json();
+            const actions = tData?.actions || [];
+            for (const act of actions) {
+              const segments = act?.updateEngagementPanelAction?.content?.transcriptRenderer?.content?.transcriptSearchPanelRenderer?.body?.transcriptSegmentListRenderer?.initialSegments
+                || act?.updateEngagementPanelAction?.content?.transcriptRenderer?.body?.transcriptBodyRenderer?.cueGroups;
+              if (Array.isArray(segments) && segments.length > 0) {
+                const parsedCues = [];
+                for (const seg of segments) {
+                  const r = seg?.transcriptSegmentRenderer;
+                  if (r) {
+                    const from = Number(r.startMs || 0) / 1000;
+                    const to = Number(r.endMs || (Number(r.startMs || 0) + 2000)) / 1000;
+                    const content = r.snippet?.runs?.map((item) => item.text).join('') || '';
+                    if (content.trim()) parsedCues.push({ from, to, content: content.trim() });
+                  }
+                }
+                if (parsedCues.length > 0) {
+                  cues = parsedCues;
+                  rawText = JSON.stringify({ events: cues.map((c) => ({ tStartMs: c.from * 1000, dDurationMs: (c.to - c.from) * 1000, segs: [{ utf8: c.content }] })) });
+                  break;
+                }
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // 提取 playerResponse 元数据与 captionTracks
+      const m = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s) || html.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+      if (m) {
+        const d = JSON.parse(m[1]);
+        captionTracks = d?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+        if (d?.videoDetails) {
+          title = d.videoDetails.title || '';
+          author = d.videoDetails.author || '';
+          cover = d.videoDetails.thumbnail?.thumbnails?.[0]?.url || cover;
+        }
       }
     } catch {}
 
-    // 2. 回退：如果 player 接口未返回，从 watch 页面 HTML 提取
+    // 如果通过 get_transcript 已经拿到字幕，直接返回
+    if (cues.length > 0) {
+      return {
+        ok: true,
+        title,
+        author,
+        cover,
+        rawText,
+        cues,
+        captionTracks,
+        chosenTrack: { languageCode: 'zh-Hans', name: { simpleText: '原生转录字幕' } }
+      };
+    }
+
+    // 2. 若 get_transcript 未成功，回退到 player / timedtext 提取
     if (!captionTracks.length) {
       try {
-        const watchResp = await fetch(`/watch?v=${videoId}`);
-        const html = await watchResp.text();
-        const m = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s) || html.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
-        if (m) {
-          const d = JSON.parse(m[1]);
-          captionTracks = d?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
-          if (d?.videoDetails) {
-            if (!title) title = d.videoDetails.title || '';
-            if (!author) author = d.videoDetails.author || '';
-            if (d.videoDetails.thumbnail?.thumbnails?.[0]?.url) cover = d.videoDetails.thumbnail.thumbnails[0].url;
-          }
+        const playerUrl = apiKey ? `/youtubei/v1/player?key=${apiKey}&prettyPrint=false` : '/youtubei/v1/player?prettyPrint=false';
+        const resp = await fetch(playerUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-YouTube-Client-Name': '1',
+            'X-YouTube-Client-Version': innertubeContext.client?.clientVersion || '2.20260101.01.00'
+          },
+          body: JSON.stringify({
+            context: innertubeContext,
+            videoId,
+            racyCheckOk: true,
+            contentCheckOk: true
+          })
+        });
+        const data = await resp.json();
+        captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+        if (data?.videoDetails) {
+          if (!title) title = data.videoDetails.title || '';
+          if (!author) author = data.videoDetails.author || '';
+          if (data.videoDetails.thumbnail?.thumbnails?.[0]?.url) cover = data.videoDetails.thumbnail.thumbnails[0].url;
         }
       } catch {}
     }
@@ -212,7 +279,6 @@
       || captionTracks[0];
 
     const candidateTracks = [chosenTrack, ...captionTracks.filter((t) => t !== chosenTrack)];
-    let rawText = '';
     let actualTrack = chosenTrack;
 
     for (const track of candidateTracks) {
