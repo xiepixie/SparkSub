@@ -238,6 +238,20 @@ const extensionSource = fs.readdirSync(root, { recursive: true })
 assert.doesNotMatch(extensionSource, /(?:window|globalThis|pageWindow)\.fetch\s*=/, '扩展不应替换页面全局 fetch');
 assert.match(extensionSource, /touchstart[\s\S]{0,120}passive:\s*true/, '触摸滚动监听应使用被动模式');
 
+const contentAppSource = fs.readFileSync(path.join(root, 'content/app.js'), 'utf8');
+const sidepanelSource = fs.readFileSync(path.join(root, 'sidepanel/sidepanel.js'), 'utf8');
+const rollingPanelSyncSource = fs.readFileSync(path.join(root, 'content/rolling-panel.js'), 'utf8');
+const trackerSyncSource = fs.readFileSync(path.join(root, 'core/tracker.js'), 'utf8');
+assert.match(contentAppSource, /if \(index !== lastPlaybackIndex\)[\s\S]{0,240}BSE_PLAYBACK_UPDATE/, '跨进程播放同步必须仅在当前句变化时发布');
+assert.match(contentAppSource, /ad-showing[\s\S]{0,160}return/, 'YouTube 广告时必须暂停正片字幕时间轴同步');
+assert.match(contentAppSource, /state\.cueRevision \+= 1/, '新字幕正文提交时必须提高正文版本');
+assert.match(sidepanelSource, /currentKey[^\n]+cueRevision/, '侧边栏 DOM 缓存键必须识别同数量字幕刷新');
+assert.match(rollingPanelSyncSource, /cueRenderKey[^\n]+cueRevision/, '滚动面板 DOM 缓存键必须识别同数量字幕刷新');
+assert.doesNotMatch(sidepanelSource, /AUTO_RESUME_DELAY|autoResumeTimer/, '侧边栏不得在用户阅读时自动抢回跟随');
+assert.doesNotMatch(rollingPanelSyncSource, /autoResumeDelay|autoResumeTimer/, '滚动面板不得在用户阅读时自动抢回跟随');
+assert.match(trackerSyncSource, /if \(checkAllUpdatesPromise\) return checkAllUpdatesPromise/, '追踪中心的手动与定时巡检必须共用进行中任务');
+assert.match(trackerSyncSource, /updatedSubs\.push\(\{[\s\S]{0,160}title: sub\.title/, '追踪更新结果必须为通知提供订阅源标题');
+
 const backgroundSource = fs.readFileSync(path.join(root, 'background/service-worker.js'), 'utf8');
 const bilibiliSource = fs.readFileSync(path.join(root, 'platform/bilibili.js'), 'utf8');
 const appSource = fs.readFileSync(path.join(root, 'content/app.js'), 'utf8');

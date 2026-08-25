@@ -9,8 +9,6 @@
   let following = true;
   let currentTab = 'timestamp';
   let query = '';
-  let autoResumeTimer = null;
-  const AUTO_RESUME_DELAY = 4000;
 
   // Batch Export state
   let currentTree = null;
@@ -687,7 +685,10 @@
       return;
     }
 
-    const currentKey = `${state?.mediaKey}:${state?.selectedTrackId}:${cues.length}:${currentTab}`;
+    // cueRevision changes only when a new subtitle body is committed. Using the
+    // general state revision here would rebuild a large transcript for status or
+    // diagnostic-only updates; using only cues.length misses same-size refreshes.
+    const currentKey = `${state?.mediaKey}:${state?.selectedTrackId}:${state?.cueRevision || 0}:${cues.length}:${currentTab}`;
     if (renderedMediaKey !== currentKey) {
       renderedMediaKey = currentKey;
       elements.transcript.querySelectorAll('.cue, .paragraph').forEach((item) => item.remove());
@@ -1455,7 +1456,6 @@
   elements.searchNext?.addEventListener('click', () => nextMatch());
 
   elements.follow.addEventListener('click', () => {
-    clearTimeout(autoResumeTimer);
     following = !following;
     elements.follow.classList.toggle('active', following);
     const t = (k) => BSE.I18n?.t(k) || k;
@@ -1473,16 +1473,6 @@
       const t = (k) => BSE.I18n?.t(k) || k;
       if (elements.followText) elements.followText.textContent = t('resume_follow');
     }
-    clearTimeout(autoResumeTimer);
-    autoResumeTimer = setTimeout(() => {
-      if (!following && state?.cues?.length && currentTab === 'timestamp') {
-        following = true;
-        elements.follow.classList.add('active');
-        const t = (k) => BSE.I18n?.t(k) || k;
-        if (elements.followText) elements.followText.textContent = t('follow');
-        scrollToActive(false);
-      }
-    }, AUTO_RESUME_DELAY);
   };
 
   elements.transcript.addEventListener('wheel', handleUserScrollInteraction, { passive: true });
@@ -1490,7 +1480,13 @@
   elements.transcript.addEventListener('pointerdown', handleUserScrollInteraction, { passive: true });
   elements.transcript.addEventListener('mousedown', handleUserScrollInteraction, { passive: true });
   elements.transcript.addEventListener('scroll', () => {
-    if (programmaticScrolling) return;
+    if (programmaticScrolling) {
+      clearTimeout(programmaticScrollTimer);
+      programmaticScrollTimer = setTimeout(() => {
+        programmaticScrolling = false;
+      }, 160);
+      return;
+    }
     handleUserScrollInteraction();
   }, { passive: true });
 
@@ -1518,7 +1514,6 @@
     if (selection && selection.trim().length > 0) return;
     const row = event.target.closest('.cue');
     if (!row) return;
-    clearTimeout(autoResumeTimer);
     command('SEEK', { time: Number(row.dataset.time) });
     following = true;
     elements.follow.classList.add('active');
