@@ -77,15 +77,32 @@ async function ensureOffscreenDocument() {
       reasons,
       justification: 'SparkSub background video subtitle parsing, worker transcription and queue scheduling'
     });
+    // Creation-time broadcasts can be lost before the document listener is
+    // registered. Wake it only after createDocument has resolved.
+    await chrome.runtime.sendMessage({ type: 'BSE_OFFSCREEN_START' }).catch(() => {});
     return true;
   } catch (err) {
     console.warn('[SparkSub Offscreen] 创建 Offscreen Document 异常:', err);
-    // 若因已存在或者并发竞争报错，触发唤醒已有文档
-    chrome.runtime.sendMessage({ type: 'BSE_OFFSCREEN_START' }).catch(() => {});
-    return true;
+    // A concurrent creator may have won. Only treat the failure as recoverable
+    // when an Offscreen Document can now be positively identified.
+    if (await hasOffscreenDocument()) {
+      await chrome.runtime.sendMessage({ type: 'BSE_OFFSCREEN_START' }).catch(() => {});
+      return true;
+    }
+    return false;
   } finally {
     isCreatingOffscreen = false;
   }
+}
+
+async function startQueueExecutor() {
+  const offscreenReady = await ensureOffscreenDocument();
+  if (!offscreenReady) {
+    // Explicit single-executor degradation: once Offscreen is unavailable or
+    // creation failed, consume locally and do not send further wake messages.
+    await BSE.Queue?.processPendingJobs?.();
+  }
+  return offscreenReady;
 }
 
 async function closeOffscreenDocument() {
@@ -118,7 +135,7 @@ if (chrome.contextMenus?.onClicked) {
       if (targetUrl) {
         const added = await BSE.Queue?.addToQueue(targetUrl);
         if (added?.length) {
-          await ensureOffscreenDocument();
+          await startQueueExecutor();
           if (chrome.notifications) {
             chrome.notifications.create({
               type: 'basic',
@@ -840,7 +857,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // === Queue & Offscreen Orchestrator Messages ===
   if (message.type === 'BSE_ORCHESTRATOR_NOTIFY') {
     (async () => {
-      ensureOffscreenDocument().catch(() => {});
+      await startQueueExecutor();
       return { ok: true };
     })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
@@ -854,7 +871,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'BSE_QUEUE_ENQUEUE') {
     (async () => {
       const items = await BSE.Queue?.addToQueue(message.urls, message.options) || [];
-      ensureOffscreenDocument().catch(() => {});
+      await startQueueExecutor();
       return { ok: true, items };
     })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
@@ -887,7 +904,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'BSE_QUEUE_RETRY') {
     (async () => {
       const item = await BSE.Queue?.retryItem(message.id);
-      await ensureOffscreenDocument();
+      await startQueueExecutor();
       return { ok: true, item };
     })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
