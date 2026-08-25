@@ -338,6 +338,7 @@ export interface QueueItem {
   stageHint?: string;
   error?: string;
   addedAt: number;
+  stageUpdatedAt?: number;
   startedAt?: number;
   completedAt?: number;
   /** Persistent executor claim; cleared when the job reaches a terminal stage. */
@@ -350,6 +351,18 @@ export interface QueueItem {
     cid?: number | string;
     cover?: string;
     pages?: Array<{ page: number; cid: number | string; part: string }>;
+    captionTracks?: Array<{
+      baseUrl: string;
+      languageCode?: string;
+      name?: { simpleText?: string };
+    }>;
+  };
+  stageArtifacts?: {
+    metadataResolved?: boolean;
+    captionTracks?: Array<Record<string, unknown>>;
+    chosenCaption?: { lan?: string; lan_doc?: string };
+    captionBody?: Cue[];
+    captionText?: string;
   };
   captionTrackCache?: {
     tracks?: SubtitleTrack[];

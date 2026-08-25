@@ -699,14 +699,34 @@ const queueList = await BSE.Queue.getQueue();
 assert.equal(queueList.length, 2, '队列中必须持久化存储 2 个任务条目');
 assert.equal(queueList[0].stage, 'queued');
 
-// Simulate Crash in Running Stage and verify Stage-based Recovery
-queueList[0].stage = 'transcribing';
-queueList[0].progress = 63;
-await BSE.Queue.saveQueue(queueList);
+// Simulate crashes in each resumable stage. A live execution lease must be left alone.
+const staleAt = Date.now() - 10 * 60 * 1000;
+const staleStages = ['resolving', 'fetching_caption', 'postprocessing'];
+const recoveryFixtures = staleStages.map((stage, index) => ({
+  ...queueList[index % queueList.length],
+  id: `stale-${stage}`,
+  stage,
+  progress: 20 + index * 30,
+  stageUpdatedAt: staleAt,
+  executionLease: { owner: 'dead-worker', acquiredAt: staleAt, expiresAt: staleAt + 1000 }
+}));
+const liveJob = {
+  ...queueList[0],
+  id: 'live-fetching-caption',
+  stage: 'fetching_caption',
+  stageHint: '仍在下载字幕',
+  stageUpdatedAt: Date.now(),
+  executionLease: { owner: 'live-worker', acquiredAt: Date.now(), expiresAt: Date.now() + 60_000 }
+};
+await BSE.Queue.saveQueue([...recoveryFixtures, liveJob]);
 
 const recovered = await BSE.Queue.recoverStaleJobs();
-assert.equal(recovered[0].stage, 'queued', '崩溃后重启必须将 running 中间态任务重置为 queued 阶段自愈执行');
-assert.ok(recovered[0].stageHint?.includes('自动恢复'), '恢复任务必须打上阶段恢复标记');
+for (const originalStage of staleStages) {
+  const item = recovered.find((candidate) => candidate.id === `stale-${originalStage}`);
+  assert.equal(item.stage, 'queued', `${originalStage} 陈旧任务必须恢复到 queued`);
+  assert.ok(item.stageHint?.includes(originalStage), '恢复提示必须保留被中断的原阶段');
+}
+assert.equal(recovered.find((item) => item.id === liveJob.id)?.stage, 'fetching_caption', '有效执行租约的任务不得被恢复器重置');
 
 // Complete an item and verify export
 recovered[0].stage = 'done';
@@ -722,6 +742,33 @@ await BSE.Queue.saveQueue(recovered);
 const queueMd = await BSE.Queue.exportQueueMergedMarkdown();
 assert.ok(queueMd.includes('# SparkSub 离线视频转录合集'), '导出队列 Markdown 必须包含主标题');
 assert.ok(queueMd.includes('测试转录文本第一句'), '导出队列 Markdown 必须包含字幕内容');
+
+// Persisted YouTube metadata and caption body are stage artifacts: resume must not request them again.
+const cachedYoutubeItem = {
+  id: 'cached-youtube',
+  targetId: 'Ewd6CGwaEXY',
+  platform: 'youtube',
+  url: 'https://www.youtube.com/watch?v=Ewd6CGwaEXY',
+  title: '缓存标题',
+  author: '缓存作者',
+  stage: 'queued',
+  progress: 75,
+  metaCache: {
+    title: '缓存标题',
+    author: '缓存作者',
+    captionTracks: [{ baseUrl: 'https://must-not-fetch.invalid/caption', languageCode: 'zh-CN', name: { simpleText: '中文' } }]
+  },
+  stageArtifacts: {
+    metadataResolved: true,
+    captionText: JSON.stringify({ events: [{ tStartMs: 0, dDurationMs: 1000, segs: [{ utf8: '持久化字幕正文' }] }] })
+  }
+};
+await BSE.Queue.saveQueue([cachedYoutubeItem]);
+let resumeFetchCount = 0;
+mockFetch = async () => { resumeFetchCount++; throw new Error('续跑不应重复请求已有阶段产物'); };
+await BSE.Queue.processYouTubeItem(cachedYoutubeItem, new AbortController().signal);
+assert.equal(resumeFetchCount, 0, '已有 metaCache 和字幕正文阶段产物时不得重复发起网络请求');
+assert.equal(cachedYoutubeItem.stage, 'done', '缓存阶段产物必须能够直接完成后处理');
 
 // 20. Queue processPendingJobs end-to-end execution
 await BSE.Queue.clearAll();
