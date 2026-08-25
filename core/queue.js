@@ -5,6 +5,8 @@
 
   const STORAGE_KEY_QUEUE = 'bse_transcription_queue_v1';
   const STORAGE_KEY_SETTINGS = 'bse_queue_settings_v1';
+  const EXECUTION_LEASE_MS = 60 * 1000;
+  const STALE_STAGE_MS = 5 * 60 * 1000;
 
   const DEFAULT_SETTINGS = {
     maxConcurrency: 2,
@@ -327,6 +329,25 @@
     broadcastQueueUpdate();
   }
 
+  async function enterStage(item, stage, progress, stageHint) {
+    const now = Date.now();
+    item.stage = stage;
+    item.progress = progress;
+    item.stageHint = stageHint;
+    item.stageUpdatedAt = now;
+    item.executionLease = {
+      owner: item.executionLease?.owner || `queue-${item.id}`,
+      acquiredAt: item.executionLease?.acquiredAt || now,
+      expiresAt: now + EXECUTION_LEASE_MS
+    };
+    await saveItem(item);
+  }
+
+  function finishExecution(item) {
+    item.stageUpdatedAt = Date.now();
+    delete item.executionLease;
+  }
+
   async function getItem(id) {
     const queue = await getQueue();
     return queue.find((i) => i.id === id) || null;
@@ -363,12 +384,23 @@
     const queue = await getQueue();
     let modified = false;
     const runningStages = ['resolving', 'fetching_caption', 'fetching_audio', 'transcribing', 'postprocessing'];
+    const now = Date.now();
 
     for (const item of queue) {
       if (runningStages.includes(item.stage)) {
+        const leaseExpiresAt = Number(item.executionLease?.expiresAt || 0);
+        const stageUpdatedAt = Number(item.stageUpdatedAt || item.startedAt || item.addedAt || 0);
+        const hasValidLease = leaseExpiresAt > now;
+        const leaseExpired = leaseExpiresAt > 0 && leaseExpiresAt <= now;
+        const stageIsStale = !leaseExpiresAt && (!stageUpdatedAt || now - stageUpdatedAt >= STALE_STAGE_MS);
+        if (hasValidLease || (!leaseExpired && !stageIsStale)) continue;
+
+        const interruptedStage = item.stage;
         item.stage = 'queued';
-        item.stageHint = `自动恢复：从 ${item.stage} 阶段继续`;
+        item.stageHint = `自动恢复：从 ${interruptedStage} 阶段继续`;
         item.progress = Math.max(0, (item.progress || 0) - 10);
+        item.stageUpdatedAt = now;
+        delete item.executionLease;
         modified = true;
       }
     }
@@ -410,6 +442,8 @@
           existing.error = undefined;
           existing.progress = 0;
           existing.stageHint = '重新排队中';
+          existing.stageUpdatedAt = Date.now();
+          delete existing.executionLease;
           addedItems.push(existing);
         } else {
           addedItems.push(existing);
@@ -430,6 +464,8 @@
         progress: 0,
         stageHint: '排队中…',
         addedAt: Date.now(),
+        stageUpdatedAt: Date.now(),
+        stageArtifacts: {},
         metaCache: {
           title: opt.title,
           author: opt.author,
@@ -486,6 +522,8 @@
     item.error = undefined;
     item.progress = 0;
     item.stageHint = '重新排队中…';
+    item.stageUpdatedAt = Date.now();
+    delete item.executionLease;
     await saveQueue(queue);
     broadcastQueueUpdate();
     notifyOrchestrator();
@@ -590,10 +628,7 @@
 
     // === Stage 1: Resolving ===
     if (!item.metaCache?.cid || !item.metaCache?.title) {
-      item.stage = 'resolving';
-      item.progress = 15;
-      item.stageHint = '正在解析视频元数据与分P CID…';
-      await saveItem(item);
+      await enterStage(item, 'resolving', 15, '正在解析视频元数据与分P CID…');
 
       const viewResp = await BSE.Utils.fetchWithTimeout(
         `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
@@ -622,33 +657,33 @@
         cid,
         pages: (vData.pages || []).map((p) => ({ page: p.page, cid: p.cid, part: p.part }))
       };
+      item.stageArtifacts = { ...(item.stageArtifacts || {}), metadataResolved: true };
       await saveItem(item);
     }
 
     const cid = item.metaCache.cid;
 
     // === Stage 2: Fetching Caption ===
-    item.stage = 'fetching_caption';
-    item.progress = 40;
-    item.stageHint = '正在提取官方/AI字幕…';
-    await saveItem(item);
-
-    const { imgKey, subKey } = await fetchBilibiliNavKeys(signal);
-    const signed = calculateWbiSign({ bvid, cid }, imgKey, subKey);
-    const playerResp = await BSE.Utils.fetchWithTimeout(
-      `https://api.bilibili.com/x/player/wbi/v2?${signed.query}`,
-      { signal, credentials: 'include' },
-      7000
-    );
-    const playerJson = await playerResp.json();
-    const subtitles = playerJson?.data?.subtitle?.subtitles || [];
-
-    if (!subtitles.length) {
-      // 尝试回退至音频探测
-      item.stage = 'fetching_audio';
-      item.progress = 60;
-      item.stageHint = '未发现字幕轨道，正在探测音频直链…';
+    let subtitles = item.stageArtifacts?.captionTracks || [];
+    let captionBody = item.stageArtifacts?.captionBody || null;
+    if (!captionBody && !subtitles.length) {
+      await enterStage(item, 'fetching_caption', 40, '正在提取官方/AI字幕…');
+      const { imgKey, subKey } = await fetchBilibiliNavKeys(signal);
+      const signed = calculateWbiSign({ bvid, cid }, imgKey, subKey);
+      const playerResp = await BSE.Utils.fetchWithTimeout(
+        `https://api.bilibili.com/x/player/wbi/v2?${signed.query}`,
+        { signal, credentials: 'include' },
+        7000
+      );
+      const playerJson = await playerResp.json();
+      subtitles = playerJson?.data?.subtitle?.subtitles || [];
+      item.stageArtifacts = { ...(item.stageArtifacts || {}), captionTracks: subtitles };
       await saveItem(item);
+    }
+
+    if (!subtitles.length && !captionBody) {
+      // 尝试回退至音频探测
+      await enterStage(item, 'fetching_audio', 60, '未发现字幕轨道，正在探测音频直链…');
 
       const playUrlResp = await BSE.Utils.fetchWithTimeout(
         `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${cid}&fnval=4048`,
@@ -670,20 +705,29 @@
         item.progress = 100;
         item.stageHint = '无字幕 · 已提取音频直链';
         item.completedAt = Date.now();
+        finishExecution(item);
         await saveItem(item);
         return;
       }
       throw new Error('该视频暂无字幕轨道，且无法获取音频流');
     }
 
-    const chosenSub = subtitles.find((s) => /zh|cn|中/i.test(s.lan || s.lan_doc || '')) || subtitles[0];
-    let subUrl = chosenSub.subtitle_url || chosenSub.url || '';
+    const chosenSub = subtitles.find((s) => /zh|cn|中/i.test(s.lan || s.lan_doc || ''))
+      || subtitles[0]
+      || item.stageArtifacts?.chosenCaption;
+    let subUrl = chosenSub?.subtitle_url || chosenSub?.url || '';
     if (subUrl.startsWith('//')) subUrl = `https:${subUrl}`;
     else if (subUrl.startsWith('http://')) subUrl = subUrl.replace(/^http:\/\//i, 'https://');
 
-    const subContentResp = await BSE.Utils.fetchWithTimeout(subUrl, { signal, credentials: 'include' }, 7000);
-    const subContentJson = await subContentResp.json();
-    const rawBody = subContentJson?.body || [];
+    if (!captionBody) {
+      await enterStage(item, 'fetching_caption', 50, `正在下载《${chosenSub?.lan_doc || chosenSub?.lan || '默认'}》字幕…`);
+      const subContentResp = await BSE.Utils.fetchWithTimeout(subUrl, { signal, credentials: 'include' }, 7000);
+      const subContentJson = await subContentResp.json();
+      captionBody = subContentJson?.body || [];
+      item.stageArtifacts = { ...(item.stageArtifacts || {}), captionBody, chosenCaption: { lan: chosenSub?.lan, lan_doc: chosenSub?.lan_doc } };
+      await saveItem(item);
+    }
+    const rawBody = captionBody;
 
     if (!rawBody.length) {
       throw new Error('字幕内容为空');
@@ -696,16 +740,13 @@
     }));
 
     // === Stage 3: Postprocessing ===
-    item.stage = 'postprocessing';
-    item.progress = 85;
-    item.stageHint = '正在进行自然段落切分与 Markdown 格式化…';
-    await saveItem(item);
+    await enterStage(item, 'postprocessing', 85, '正在进行自然段落切分与 Markdown 格式化…');
 
     const processed = formatCuesToStructured(cues, item.title, item.author, item.url);
 
     item.subtitle = {
-      language: chosenSub.lan,
-      langDoc: chosenSub.lan_doc || '中文',
+      language: chosenSub?.lan,
+      langDoc: chosenSub?.lan_doc || '中文',
       cueCount: processed.cueCount,
       plainText: processed.plainText,
       markdown: processed.markdown,
@@ -718,6 +759,7 @@
     item.progress = 100;
     item.stageHint = `完成 · 共 ${processed.cueCount} 句字幕`;
     item.completedAt = Date.now();
+    finishExecution(item);
     await saveItem(item);
   }
 
@@ -833,15 +875,28 @@
     const videoId = item.targetId;
 
     // === Stage 1: Resolving & Fetching Caption Metadata ===
-    item.stage = 'resolving';
-    item.progress = 20;
-    item.stageHint = '正在调用 YouTube 接口解析字幕…';
-    await saveItem(item);
-
-    const { title, author, cover, captionTracks } = await resolveYouTubeMetadataAndCaptions(videoId, signal);
-    if (title) item.title = title;
-    if (author) item.author = author;
-    if (cover) item.cover = cover;
+    let captionTracks = item.metaCache?.captionTracks || [];
+    if (!captionTracks.length) {
+      await enterStage(item, 'resolving', 20, '正在调用 YouTube 接口解析字幕…');
+      const resolved = await resolveYouTubeMetadataAndCaptions(videoId, signal);
+      captionTracks = resolved.captionTracks || [];
+      if (resolved.title) item.title = resolved.title;
+      if (resolved.author) item.author = resolved.author;
+      if (resolved.cover) item.cover = resolved.cover;
+      item.metaCache = {
+        ...(item.metaCache || {}),
+        title: item.title,
+        author: item.author,
+        cover: item.cover,
+        captionTracks
+      };
+      item.stageArtifacts = { ...(item.stageArtifacts || {}), metadataResolved: true };
+      await saveItem(item);
+    } else {
+      item.title = item.metaCache.title || item.title;
+      item.author = item.metaCache.author || item.author;
+      item.cover = item.metaCache.cover || item.cover;
+    }
 
     if (!captionTracks || !captionTracks.length) {
       throw new Error('该 YouTube 视频未提供字幕轨道');
@@ -851,22 +906,24 @@
       || captionTracks.find((t) => /en|english/i.test(t.languageCode || t.name?.simpleText || ''))
       || captionTracks[0];
 
-    item.stage = 'fetching_caption';
-    item.progress = 50;
-    item.stageHint = `正在下载《${chosenTrack.name?.simpleText || chosenTrack.languageCode || '默认'}》字幕…`;
-    await saveItem(item);
-
     // Download Caption with Multi-format Resilience (JSON3 / XML / TTML / VTT)
-    let rawCaptionText = '';
-    try {
-      const json3Url = chosenTrack.baseUrl.includes('fmt=') ? chosenTrack.baseUrl : `${chosenTrack.baseUrl}&fmt=json3`;
-      const resp = await BSE.Utils.fetchWithTimeout(json3Url, { signal }, 8000);
-      rawCaptionText = await resp.text();
-    } catch {}
+    let rawCaptionText = item.stageArtifacts?.captionText || '';
+    if (!rawCaptionText) {
+      await enterStage(item, 'fetching_caption', 50, `正在下载《${chosenTrack.name?.simpleText || chosenTrack.languageCode || '默认'}》字幕…`);
+      try {
+        const json3Url = chosenTrack.baseUrl.includes('fmt=') ? chosenTrack.baseUrl : `${chosenTrack.baseUrl}&fmt=json3`;
+        const resp = await BSE.Utils.fetchWithTimeout(json3Url, { signal }, 8000);
+        rawCaptionText = await resp.text();
+      } catch {}
 
-    if (!rawCaptionText || rawCaptionText.includes('<!DOCTYPE html>')) {
-      const resp = await BSE.Utils.fetchWithTimeout(chosenTrack.baseUrl, { signal }, 8000);
-      rawCaptionText = await resp.text();
+      if (!rawCaptionText || rawCaptionText.includes('<!DOCTYPE html>')) {
+        const resp = await BSE.Utils.fetchWithTimeout(chosenTrack.baseUrl, { signal }, 8000);
+        rawCaptionText = await resp.text();
+      }
+      if (rawCaptionText && !rawCaptionText.includes('<!DOCTYPE html>')) {
+        item.stageArtifacts = { ...(item.stageArtifacts || {}), captionText: rawCaptionText };
+        await saveItem(item);
+      }
     }
 
     if (!rawCaptionText || rawCaptionText.includes('<!DOCTYPE html>')) {
@@ -879,10 +936,7 @@
     }
 
     // === Stage 2: Postprocessing ===
-    item.stage = 'postprocessing';
-    item.progress = 85;
-    item.stageHint = '正在整理结构化段落与 SRT…';
-    await saveItem(item);
+    await enterStage(item, 'postprocessing', 85, '正在整理结构化段落与 SRT…');
 
     const processed = formatCuesToStructured(cues, item.title, item.author, item.url);
 
@@ -901,6 +955,7 @@
     item.progress = 100;
     item.stageHint = `完成 · 共 ${processed.cueCount} 句字幕`;
     item.completedAt = Date.now();
+    finishExecution(item);
     await saveItem(item);
   }
 
@@ -927,6 +982,13 @@
             const controller = new AbortController();
             inFlightControllers.set(item.id, controller);
             item.startedAt = Date.now();
+            item.stageUpdatedAt = item.startedAt;
+            item.executionLease = {
+              owner: `queue-${item.id}`,
+              acquiredAt: item.startedAt,
+              expiresAt: item.startedAt + EXECUTION_LEASE_MS
+            };
+            await saveItem(item);
             try {
               if (item.platform === 'bilibili') {
                 await processBilibiliItem(item, controller.signal);
@@ -939,6 +1001,7 @@
               item.progress = 0;
               item.error = err.message || '转录处理异常';
               item.stageHint = `失败：${item.error}`;
+              finishExecution(item);
               await saveItem(item);
             } finally {
               inFlightControllers.delete(item.id);
