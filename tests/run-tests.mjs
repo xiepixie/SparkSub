@@ -97,8 +97,22 @@ assert.equal(BSE.I18n.t('follow'), '跟随');
 BSE.I18n.setLocale('en');
 assert.equal(BSE.I18n.t('follow'), 'Follow');
 assert.equal(BSE.I18n.t('ai_prompt_summary'), '📝 Core Essence & Logic');
+assert.equal(BSE.I18n.t('tab_tracker'), '🔔 Tracker Center');
+assert.equal(BSE.I18n.t('tracker_filter_all', { n: 4 }), 'All (4)');
+BSE.I18n.setLocale('zh-TW');
+assert.equal(BSE.I18n.t('tab_tracker'), '🔔 追蹤中心');
+assert.equal(BSE.I18n.t('tracker_filter_all', { n: 4 }), '全部 (4)');
 BSE.I18n.setLocale('zh-CN');
+assert.equal(BSE.I18n.t('tab_tracker'), '🔔 追踪中心');
 assert.equal(BSE.I18n.formatTimeSpan(159), '2分39秒');
+
+// 1.1 Symmetrical Dictionary Key Verification
+const zhCnKeys = Object.keys(BSE.DICTIONARIES['zh-CN']).sort();
+const enKeys = Object.keys(BSE.DICTIONARIES['en']).sort();
+const zhTwKeys = Object.keys(BSE.DICTIONARIES['zh-TW']).sort();
+assert.deepEqual(zhCnKeys, enKeys, 'zh-CN 与 en 词典键集必须完全一致');
+assert.deepEqual(zhCnKeys, zhTwKeys, 'zh-CN 与 zh-TW 词典键集必须完全一致');
+assert.ok(zhCnKeys.some((k) => k.startsWith('tracker_')), '词典中必须包含追踪中心翻译键');
 
 // 2. Parser Tests
 const json3 = JSON.stringify({
@@ -277,7 +291,7 @@ assert.match(sidePanelHtml, /id="tracker-search-input"/, '追踪中心应提供�
 assert.match(sidePanelHtml, /id="tracker-sort-select"/, '追踪中心应提供订阅排序入口');
 assert.match(sidePanelHtml, /id="tracker-status-line"[^>]+aria-live="polite"/, '追踪中心状态摘要应向辅助技术播报');
 assert.match(sidePanelSource, /expandedTrackerCards/, '追踪卡片应支持展开历史更新而不只显示最新一条');
-assert.match(sidePanelSource, /window\.confirm\(`确定取消追踪/, '删除订阅前必须进行明确确认');
+assert.match(sidePanelSource, /window\.confirm\([^)]*tracker_confirm_untrack/, '删除订阅前必须通过 i18n 进行明确确认');
 assert.match(sidePanelSource, /item\.subtitle\?\.status === 'ready'/, '合并复制应只包含字幕已就绪的未读条目');
 
 // 10. Batch Export Fault Tolerance & Markdown Fallbacks
@@ -508,9 +522,13 @@ const sampleImportJson = JSON.stringify({
 const imported = await BSE.Tracker.importConfigJson(sampleImportJson);
 assert.equal(imported.importedCount, 1, '导入配置必须成功解析 1 个有效订阅源');
 
+const renamedSub = await BSE.Tracker.renameSubscription('bilibili:up:12345', '自定义UP名称');
+assert.equal(renamedSub?.title, '自定义UP名称', '订阅源重命名必须成功生效并持久化');
+
 const exported = await BSE.Tracker.exportConfigJson();
 const parsedExport = JSON.parse(exported);
 assert.equal(parsedExport.version, '0.2.0', '导出的 JSON 必须包含 SparkSub 版本标识');
+assert.equal(parsedExport.subscriptions[0].title, '自定义UP名称', '导出配置必须包含重命名后的新名称');
 // 15. TrackedItem Subtitle & Merged Markdown export tests
 const sampleTrackedItems = [
   {
@@ -545,8 +563,15 @@ const sampleTrackedItems = [
   }
 ];
 
-const mergedDoc = BSE.Tracker.exportMergedMarkdown(sampleTrackedItems);
-assert.ok(typeof mergedDoc === 'string' && mergedDoc.length > 50, '合并导出的 Markdown 文档必须为非空字符串');
+BSE.I18n.setLocale('zh-CN');
+const mergedDocZh = BSE.Tracker.exportMergedMarkdown(sampleTrackedItems);
+assert.ok(typeof mergedDocZh === 'string' && mergedDocZh.length > 50, '合并导出的 Markdown 文档必须为非空字符串');
+assert.match(mergedDocZh, /# 批量视频更新字幕汇总 \(2 篇\)/, '中文环境下必须输出中文标题');
+
+BSE.I18n.setLocale('en');
+const mergedDocEn = BSE.Tracker.exportMergedMarkdown(sampleTrackedItems);
+assert.match(mergedDocEn, /# Batch Subtitle Summary \(2 items\)/, '英文环境下必须输出英文标题');
+BSE.I18n.setLocale('zh-CN');
 // 16. Bilibili runBatchExport execution & delay verification
 const sampleTree = {
   title: '测试合集',

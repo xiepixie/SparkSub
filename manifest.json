@@ -38,9 +38,8 @@
   "content_scripts": [
     {
       "matches": [
-        "*://www.youtube.com/watch*",
-        "*://www.youtube.com/shorts/*",
-        "*://m.youtube.com/watch*"
+        "*://www.youtube.com/*",
+        "*://m.youtube.com/*"
       ],
       "js": ["content/main-world-bridge.js"],
       "run_at": "document_start",
@@ -48,15 +47,15 @@
     },
     {
       "matches": [
-        "*://www.youtube.com/watch*",
-        "*://www.youtube.com/shorts/*",
-        "*://m.youtube.com/watch*",
+        "*://www.youtube.com/*",
+        "*://m.youtube.com/*",
         "*://www.bilibili.com/video/*",
         "*://www.bilibili.com/festival/*",
         "*://www.bilibili.com/blackboard/*",
         "*://www.bilibili.com/list/*",
         "*://www.bilibili.com/bangumi/play/*",
-        "*://www.bilibili.com/medialist/play/*"
+        "*://www.bilibili.com/medialist/play/*",
+        "*://space.bilibili.com/*"
       ],
       "js": [
         "core/namespace.js",

@@ -66,7 +66,7 @@
           </select>
         </div>
         <div class="drawer-card">
-          <span class="drawer-card-label">巡检周期</span>
+          <span class="drawer-card-label" id="label-interval">巡检周期</span>
           <select id="tracker-interval-select" class="drawer-select" aria-label="订阅巡检周期">
             <option value="30">每 30 分钟</option>
             <option value="60" selected>每 1 小时 (推荐)</option>
@@ -75,7 +75,7 @@
           </select>
         </div>
         <div class="drawer-card">
-          <span class="drawer-card-label">桌面通知</span>
+          <span class="drawer-card-label" id="label-notify">桌面通知</span>
           <select id="tracker-notify-select" class="drawer-select" aria-label="更新桌面通知">
             <option value="true" selected>🔔 开启桌面通知</option>
             <option value="false">🔕 仅角标红点</option>
@@ -88,6 +88,17 @@
         <input type="file" id="tracker-import-file" accept=".json" hidden>
       </div>
     </section>
+
+    <!-- Tabs: View Mode Selection (Pinned right below header) -->
+    <nav class="tabs-bar">
+      <button class="tab-btn active" data-tab="timestamp" id="tab-timestamp">带时间戳</button>
+      <button class="tab-btn" data-tab="plain" id="tab-plain">纯文本</button>
+      <button class="tab-btn" data-tab="ai" id="tab-ai">AI 总结</button>
+      <button class="tab-btn tab-tracker" data-tab="tracker" id="tab-tracker">
+        <span id="tab-tracker-text">🔔 追踪中心</span>
+        <span class="tracker-badge" id="tracker-unread-badge" hidden>0</span>
+      </button>
+    </nav>
 
     <!-- Video Subtitle Toolbar (Track & Export Controls) -->
     <section class="video-bar">
@@ -114,17 +125,6 @@
         </div>
       </div>
     </section>
-
-    <!-- Tabs: View Mode Selection -->
-    <nav class="tabs-bar">
-      <button class="tab-btn active" data-tab="timestamp" id="tab-timestamp">带时间戳</button>
-      <button class="tab-btn" data-tab="plain" id="tab-plain">纯文本</button>
-      <button class="tab-btn" data-tab="ai" id="tab-ai">AI 总结</button>
-      <button class="tab-btn tab-tracker" data-tab="tracker" id="tab-tracker">
-        <span>🔔 追踪中心</span>
-        <span class="tracker-badge" id="tracker-unread-badge" hidden>0</span>
-      </button>
-    </nav>
 
     <!-- Toolbar: Search & Action Bar -->
     <section class="toolbar" id="toolbar-search">
@@ -187,37 +187,48 @@
     <!-- Subscriptions & Tracker View -->
     <section class="tracker-section" id="tracker-section" hidden>
       <div class="tracker-quick-bar" id="tracker-quick-bar">
-        <div class="tracker-quick-info">
-          <div class="tracker-quick-row">
-            <span class="tracker-quick-label">📺 当前视频：</span>
-            <span class="tracker-quick-title" id="tracker-current-source">等待视频连接…</span>
-          </div>
-          <div class="tracker-quick-author-row">
-            <span class="tracker-quick-author-label">👤 播放作者：</span>
-            <span class="tracker-quick-author-val" id="tracker-current-author">等待连接…</span>
+        <div class="tracker-quick-media">
+          <div class="tracker-quick-avatar" id="tracker-quick-avatar" aria-hidden="true">📺</div>
+          <div class="tracker-quick-info">
+            <div class="tracker-quick-title" id="tracker-current-source" title="等待视频连接…">等待视频连接…</div>
+            <div class="tracker-quick-meta">
+              <span class="tracker-author-badge" id="tracker-quick-author-label">UP</span>
+              <span class="tracker-quick-author-val" id="tracker-current-author">等待连接…</span>
+            </div>
           </div>
         </div>
         <div class="tracker-quick-actions">
-          <button class="tracker-btn-pill" id="tracker-subscribe-up-btn" disabled>+ 关注 UP 主</button>
-          <button class="tracker-btn-pill" id="tracker-subscribe-season-btn" hidden>+ 订阅本合集</button>
+          <button class="tracker-btn-pill" id="tracker-subscribe-up-btn" disabled>+ 关注</button>
+          <button class="tracker-btn-pill" id="tracker-subscribe-season-btn" hidden>+ 合集</button>
         </div>
       </div>
 
       <div class="tracker-toolbar">
-        <div class="tracker-filter-group">
-          <button class="tracker-filter-btn active" data-filter="all" id="tracker-filter-all">全部 (<span id="tracker-cnt-all">0</span>)</button>
-          <button class="tracker-filter-btn" data-filter="unread" id="tracker-filter-unread">未读更新 (<span id="tracker-cnt-unread">0</span>)</button>
+        <div class="tracker-filter-group" role="tablist">
+          <button class="tracker-filter-btn active" data-filter="all" id="tracker-filter-all" role="tab" aria-selected="true">
+            <span id="tracker-filter-all-text">全部</span> <span class="tracker-cnt-badge" id="tracker-cnt-all">0</span>
+          </button>
+          <button class="tracker-filter-btn" data-filter="unread" id="tracker-filter-unread" role="tab" aria-selected="false">
+            <span id="tracker-filter-unread-text">未读更新</span> <span class="tracker-cnt-badge unread" id="tracker-cnt-unread">0</span>
+          </button>
         </div>
         <div class="tracker-tools">
-          <button class="tracker-tool-btn" id="tracker-copy-all-btn" title="一键合并复制所有未读更新的字幕为 Markdown">📋 合并复制未读</button>
-          <button class="tracker-tool-btn" id="tracker-check-all-btn" title="立即检查全量更新">🔄 刷新</button>
-          <button class="tracker-tool-btn" id="tracker-read-all-btn" title="全部标记为已读">✓ 已读</button>
+          <button class="tracker-tool-btn" id="tracker-copy-all-btn" title="一键合并复制所有未读更新的字幕为 Markdown" aria-label="合并复制未读" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <span class="tracker-tool-btn-text">复制未读</span>
+          </button>
+          <button class="tracker-tool-btn" id="tracker-check-all-btn" title="立即检查全量更新" aria-label="刷新">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          </button>
+          <button class="tracker-tool-btn" id="tracker-read-all-btn" title="全部标记为已读" aria-label="全部已读" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          </button>
         </div>
       </div>
 
       <div class="tracker-discovery-bar">
         <label class="tracker-search-box">
-          <span aria-hidden="true">⌕</span>
+          <svg class="tracker-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           <input id="tracker-search-input" type="search" placeholder="搜索频道、UP 主或合集" autocomplete="off" aria-label="搜索订阅">
         </label>
         <select id="tracker-sort-select" class="tracker-sort-select" aria-label="订阅排序">

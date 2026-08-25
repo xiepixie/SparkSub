@@ -29,6 +29,8 @@
     labelLang: document.querySelector('#label-lang'),
     labelPref: document.querySelector('#label-pref'),
     labelSize: document.querySelector('#label-size'),
+    labelInterval: document.querySelector('#label-interval'),
+    labelNotify: document.querySelector('#label-notify'),
     themeSelect: document.querySelector('#theme-select'),
     langSelect: document.querySelector('#lang-select'),
     prefSelect: document.querySelector('#pref-select'),
@@ -101,15 +103,22 @@
     batchCancelBtn: document.querySelector('#batch-cancel-btn'),
     // Tracker & Subscriptions Elements
     tabTracker: document.querySelector('#tab-tracker'),
+    tabTrackerText: document.querySelector('#tab-tracker-text'),
     trackerUnreadBadge: document.querySelector('#tracker-unread-badge'),
     trackerSection: document.querySelector('#tracker-section'),
     trackerQuickBar: document.querySelector('#tracker-quick-bar'),
+    trackerQuickAvatar: document.querySelector('#tracker-quick-avatar'),
+    trackerQuickCurrentLabel: document.querySelector('#tracker-quick-current-label'),
+    trackerQuickSource: document.querySelector('#tracker-current-source'),
     trackerCurrentSource: document.querySelector('#tracker-current-source'),
+    trackerQuickAuthorLabel: document.querySelector('#tracker-quick-author-label'),
     trackerCurrentAuthor: document.querySelector('#tracker-current-author'),
     trackerSubscribeUpBtn: document.querySelector('#tracker-subscribe-up-btn'),
     trackerSubscribeSeasonBtn: document.querySelector('#tracker-subscribe-season-btn'),
     trackerFilterAll: document.querySelector('#tracker-filter-all'),
+    trackerFilterAllText: document.querySelector('#tracker-filter-all-text'),
     trackerFilterUnread: document.querySelector('#tracker-filter-unread'),
+    trackerFilterUnreadText: document.querySelector('#tracker-filter-unread-text'),
     trackerCntAll: document.querySelector('#tracker-cnt-all'),
     trackerCntUnread: document.querySelector('#tracker-cnt-unread'),
     trackerSearchInput: document.querySelector('#tracker-search-input'),
@@ -216,8 +225,8 @@
       elements.transcript.hidden = true;
       elements.aiSection.hidden = false;
       if (elements.trackerSection) elements.trackerSection.hidden = true;
-      document.querySelector('.toolbar')?.removeAttribute('hidden');
-      document.querySelector('.video-bar')?.removeAttribute('hidden');
+      document.querySelector('.toolbar')?.setAttribute('hidden', 'true');
+      document.querySelector('.video-bar')?.setAttribute('hidden', 'true');
     } else {
       elements.transcript.hidden = false;
       elements.aiSection.hidden = true;
@@ -242,8 +251,9 @@
   async function loadAndRenderTracker() {
     if (!BSE.Tracker) return;
     trackerLoading = true;
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     if (elements.trackerList) elements.trackerList.setAttribute('aria-busy', 'true');
-    if (elements.trackerStatusLine) elements.trackerStatusLine.textContent = '正在读取订阅…';
+    if (elements.trackerStatusLine) elements.trackerStatusLine.textContent = t('tracker_status_loading');
     try {
       subscriptionsCache = await BSE.Tracker.getSubscriptions();
       trackerStorageStats = BSE.Tracker.getStorageStats?.(subscriptionsCache) || null;
@@ -253,8 +263,8 @@
       await updateQuickSubscribeBar();
     } catch (err) {
       console.warn('[BSE Tracker] 读取订阅列表异常:', err);
-      if (elements.trackerStatusLine) elements.trackerStatusLine.textContent = `读取失败：${err?.message || '请稍后重试'}`;
-      toast('读取订阅列表失败，请稍后重试', true);
+      if (elements.trackerStatusLine) elements.trackerStatusLine.textContent = `${t('status_error')}：${err?.message || ''}`;
+      toast(t('tracker_toast_load_failed'), true);
     } finally {
       trackerLoading = false;
       if (elements.trackerList) elements.trackerList.setAttribute('aria-busy', 'false');
@@ -299,7 +309,7 @@
         targetId: state.authorInfo.targetId,
         avatar: state.authorInfo.avatar || '',
         seasonId: state.authorInfo.seasonId,
-        seasonTitle: state.authorInfo.seasonTitle || '视频合集',
+        seasonTitle: state.authorInfo.seasonTitle || (BSE.I18n?.t('tracker_type_season') || '视频合集'),
         videoTitle: state.title || ''
       };
     }
@@ -337,7 +347,7 @@
         }
       }
 
-      const upName = owner.name || state.authorInfo?.name || 'B站 UP 主';
+      const upName = owner.name || state.authorInfo?.name || (BSE.I18n?.t('tracker_type_bilibili_up') || 'B站 UP 主');
       const mid = String(owner.mid || state.authorInfo?.mid || state.authorInfo?.targetId || '');
       const avatar = owner.face || state.authorInfo?.avatar || '';
 
@@ -346,10 +356,13 @@
 
       if (ugc && (ugc.id || ugc.season_id)) {
         seasonId = String(ugc.id || ugc.season_id);
-        seasonTitle = ugc.title || '视频合集';
+        seasonTitle = ugc.title || (videoTitle ? `${videoTitle} (合集)` : (BSE.I18n?.t('tracker_type_season') || '视频合集'));
       } else if (state.authorInfo?.seasonId) {
         seasonId = state.authorInfo.seasonId;
-        seasonTitle = state.authorInfo.seasonTitle || '视频合集';
+        const rawTitle = state.authorInfo.seasonTitle;
+        seasonTitle = (rawTitle && rawTitle !== '合集' && rawTitle !== '视频合集')
+          ? rawTitle
+          : (videoTitle ? `${videoTitle} (合集)` : (BSE.I18n?.t('tracker_type_season') || '视频合集'));
       } else if (pages.length > 1) {
         seasonId = bvid;
         seasonTitle = `${videoTitle || '分P连载'} (共${pages.length}P)`;
@@ -375,7 +388,7 @@
         platform: 'youtube',
         type: 'channel',
         title: state.title || 'YouTube 视频',
-        upName: state.authorInfo?.name || 'YouTube 频道',
+        upName: state.authorInfo?.name || (BSE.I18n?.t('tracker_type_youtube_channel') || 'YouTube 频道'),
         targetId: state.authorInfo?.targetId || '',
         avatar: state.authorInfo?.avatar || '',
         videoTitle: state.title || ''
@@ -387,25 +400,45 @@
 
   async function updateQuickSubscribeBar() {
     if (!elements.trackerQuickBar) return;
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     currentAuthorInfo = await detectCurrentVideoAuthorInfo();
 
-    const videoTitle = state?.title || currentAuthorInfo?.videoTitle || '等待视频连接…';
+    const videoTitle = state?.title || currentAuthorInfo?.videoTitle || t('tracker_wait_video');
     if (elements.trackerCurrentSource) {
       elements.trackerCurrentSource.textContent = videoTitle;
       elements.trackerCurrentSource.title = videoTitle;
     }
 
+    if (elements.trackerQuickAvatar) {
+      if (currentAuthorInfo?.avatar) {
+        elements.trackerQuickAvatar.innerHTML = `<img src="${BSE.Utils.escapeHtml(currentAuthorInfo.avatar)}" alt="" style="width:100%;height:100%;border-radius:inherit;object-fit:cover;">`;
+      } else if (state?.platform === 'youtube') {
+        elements.trackerQuickAvatar.textContent = '▶';
+      } else {
+        elements.trackerQuickAvatar.textContent = '📺';
+      }
+    }
+
+    if (elements.trackerQuickAuthorLabel) {
+      elements.trackerQuickAuthorLabel.textContent = state?.platform === 'youtube' ? 'CH' : 'UP';
+    }
+
     if (elements.trackerCurrentAuthor) {
       if (currentAuthorInfo && (currentAuthorInfo.upName || currentAuthorInfo.title)) {
-        elements.trackerCurrentAuthor.textContent = currentAuthorInfo.upName || currentAuthorInfo.title;
-        elements.trackerCurrentAuthor.title = currentAuthorInfo.upName || currentAuthorInfo.title;
+        const authName = currentAuthorInfo.upName || currentAuthorInfo.title;
+        elements.trackerCurrentAuthor.textContent = authName;
+        elements.trackerCurrentAuthor.title = authName;
       } else {
-        elements.trackerCurrentAuthor.textContent = state ? (state.platform === 'bilibili' ? 'B站视频' : 'YouTube') : '等待连接…';
+        elements.trackerCurrentAuthor.textContent = state ? (state.platform === 'bilibili' ? t('tracker_type_bilibili_up') : 'YouTube') : t('tracker_wait_connect');
       }
     }
 
     if (!currentAuthorInfo) {
-      if (elements.trackerSubscribeUpBtn) elements.trackerSubscribeUpBtn.disabled = true;
+      if (elements.trackerSubscribeUpBtn) {
+        elements.trackerSubscribeUpBtn.disabled = true;
+        elements.trackerSubscribeUpBtn.textContent = t('tracker_btn_follow_short');
+        elements.trackerSubscribeUpBtn.title = t('tracker_unidentified_author');
+      }
       if (elements.trackerSubscribeSeasonBtn) elements.trackerSubscribeSeasonBtn.hidden = true;
       return;
     }
@@ -419,11 +452,13 @@
     if (elements.trackerSubscribeUpBtn) {
       elements.trackerSubscribeUpBtn.disabled = !authorTargetId;
       elements.trackerSubscribeUpBtn.classList.toggle('subscribed', isUpSubscribed);
+      const upName = currentAuthorInfo.upName || 'UP';
       elements.trackerSubscribeUpBtn.textContent = !authorTargetId
-        ? '暂未识别频道 / UP 主'
-        : (isUpSubscribed
-          ? `✓ 已关注 ${currentAuthorInfo.upName || 'UP'}`
-          : `+ 关注 UP 主 (${currentAuthorInfo.upName || 'UP'})`);
+        ? t('tracker_unidentified_author')
+        : (isUpSubscribed ? t('tracker_btn_followed_short') : t('tracker_btn_follow_short'));
+      elements.trackerSubscribeUpBtn.title = !authorTargetId
+        ? t('tracker_unidentified_author')
+        : (isUpSubscribed ? t('tracker_btn_followed_up', { name: upName }) : t('tracker_btn_follow_up', { name: upName }));
     }
 
     if (currentAuthorInfo.seasonId) {
@@ -432,66 +467,112 @@
       if (elements.trackerSubscribeSeasonBtn) {
         elements.trackerSubscribeSeasonBtn.hidden = false;
         elements.trackerSubscribeSeasonBtn.classList.toggle('subscribed', isSeasonSubscribed);
+        const seasonTitle = currentAuthorInfo.seasonTitle || t('tracker_type_season');
         elements.trackerSubscribeSeasonBtn.textContent = isSeasonSubscribed
-          ? `✓ 已订阅《${currentAuthorInfo.seasonTitle || '合集'}》`
-          : `+ 订阅合集《${currentAuthorInfo.seasonTitle || '合集'}》`;
+          ? t('tracker_btn_subbed_season_short')
+          : t('tracker_btn_sub_season_short');
+        elements.trackerSubscribeSeasonBtn.title = isSeasonSubscribed
+          ? t('tracker_btn_subbed_season', { title: seasonTitle })
+          : t('tracker_btn_sub_season', { title: seasonTitle });
       }
     } else if (elements.trackerSubscribeSeasonBtn) {
       elements.trackerSubscribeSeasonBtn.hidden = true;
     }
   }
 
+  function getSubscriptionUrl(sub) {
+    if (!sub) return '';
+    if (sub.sourceUrl) return sub.sourceUrl;
+    if (sub.platform === 'bilibili') {
+      if (sub.type === 'season') {
+        if (sub.items?.[0]?.url) return sub.items[0].url;
+        if (sub.targetId && (sub.targetId.startsWith('BV') || sub.targetId.startsWith('av'))) {
+          return `https://www.bilibili.com/video/${sub.targetId}`;
+        }
+        return `https://space.bilibili.com/${sub.ownerId || ''}/channel/collectiondetail?sid=${sub.targetId}`;
+      }
+      return `https://space.bilibili.com/${sub.targetId}`;
+    }
+    if (sub.platform === 'youtube') {
+      if (sub.type === 'channel') return `https://www.youtube.com/channel/${sub.targetId}`;
+      return sub.items?.[0]?.url || `https://www.youtube.com/watch?v=${sub.targetId}`;
+    }
+    return sub.items?.[0]?.url || '';
+  }
+
+  function getSubscriptionBvid(sub) {
+    if (!sub) return '';
+    if (sub.targetId && /^BV[a-zA-Z0-9]+/i.test(sub.targetId)) return sub.targetId;
+    if (sub.items?.[0]?.id && /^BV[a-zA-Z0-9]+/i.test(sub.items[0].id)) return sub.items[0].id;
+    if (sub.sourceUrl) {
+      const bvid = BSE.Utils?.getBvid?.(sub.sourceUrl);
+      if (bvid) return bvid;
+    }
+    if (sub.items?.[0]?.url) {
+      const bvid = BSE.Utils?.getBvid?.(sub.items[0].url);
+      if (bvid) return bvid;
+    }
+    return '';
+  }
+
   function formatTrackerTime(value) {
     const time = Number(value || 0);
-    if (!time) return '尚未巡检';
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
+    if (!time) return t('tracker_time_not_checked');
     const deltaMinutes = Math.max(0, Math.floor((Date.now() - time) / 60000));
-    if (deltaMinutes < 1) return '刚刚';
-    if (deltaMinutes < 60) return `${deltaMinutes} 分钟前`;
-    if (deltaMinutes < 1440) return `${Math.floor(deltaMinutes / 60)} 小时前`;
-    if (deltaMinutes < 10080) return `${Math.floor(deltaMinutes / 1440)} 天前`;
-    return new Date(time).toLocaleDateString();
+    if (deltaMinutes < 1) return t('tracker_time_just_now');
+    if (deltaMinutes < 60) return t('tracker_time_mins_ago', { n: deltaMinutes });
+    if (deltaMinutes < 1440) return t('tracker_time_hours_ago', { n: Math.floor(deltaMinutes / 60) });
+    if (deltaMinutes < 10080) return t('tracker_time_days_ago', { n: Math.floor(deltaMinutes / 1440) });
+    const locale = BSE.I18n?.getLocale() === 'en' ? 'en-US' : (BSE.I18n?.getLocale() === 'zh-TW' ? 'zh-TW' : 'zh-CN');
+    return new Date(time).toLocaleDateString(locale);
   }
 
   function renderTrackerItem(sub, item, previewId, isUnread) {
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     const subtitle = item.subtitle;
-    let badge = '<span class="tracker-sub-badge not-found">⚪ 待提取字幕</span>';
-    let actions = `<button class="tracker-btn-copy tracker-btn-retry-sub" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}">⚡ 提取</button>`;
+    let badge = `<span class="tracker-sub-badge not-found">${t('tracker_badge_extract_pending')}</span>`;
+    let actions = `<button class="tracker-item-act-btn tracker-btn-copy tracker-btn-retry-sub" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}" title="提取字幕">${t('tracker_btn_extract')}</button>`;
     let preview = '';
 
     if (subtitle?.status === 'ready') {
-      badge = `<span class="tracker-sub-badge ready">✓ 已缓存 ${subtitle.cueCount || 0} 行</span>`;
+      badge = `<span class="tracker-sub-badge ready">${t('tracker_badge_cached', { n: subtitle.cueCount || 0 })}</span>`;
       actions = `
-        <button class="tracker-btn-copy" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}">📋 复制</button>
-        <button class="tracker-btn-preview-toggle" data-target="${previewId}" aria-expanded="false">👁 预览</button>`;
+        <button class="tracker-item-act-btn tracker-btn-copy" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}" title="复制字幕">${t('tracker_btn_copy')}</button>
+        <button class="tracker-item-act-btn tracker-btn-preview-toggle" data-target="${previewId}" aria-expanded="false" title="展开预览">${t('tracker_btn_preview')}</button>`;
       preview = `<div class="tracker-preview-drawer" id="${previewId}">${BSE.Utils.escapeHtml(subtitle.markdown || subtitle.plainText || '')}</div>`;
     } else if (subtitle?.status === 'pending') {
-      badge = '<span class="tracker-sub-badge pending">⏳ 正在提取</span>';
+      badge = `<span class="tracker-sub-badge pending">${t('tracker_badge_extracting')}</span>`;
       actions = '';
     } else if (subtitle?.status === 'not_found' || subtitle?.status === 'error' || subtitle?.status === 'evicted') {
-      const label = subtitle.status === 'error' ? '提取失败' : (subtitle.status === 'evicted' ? '缓存已释放' : '无官方字幕');
+      const label = subtitle.status === 'error' ? t('tracker_badge_error') : (subtitle.status === 'evicted' ? t('tracker_badge_evicted') : t('tracker_badge_no_sub'));
       badge = `<span class="tracker-sub-badge not-found" title="${BSE.Utils.escapeHtml(subtitle.errorHint || '')}">⚪ ${label}</span>`;
-      actions = `<button class="tracker-btn-copy tracker-btn-retry-sub" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}">↻ 重试</button>`;
+      actions = `<button class="tracker-item-act-btn tracker-btn-copy tracker-btn-retry-sub" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}" title="重新提取">${t('tracker_btn_retry')}</button>`;
     }
 
     return `
-      <article class="tracker-item-block${isUnread ? ' is-unread' : ''}">
-        <div class="tracker-item-header">
-          <span class="tracker-item-title" title="${BSE.Utils.escapeHtml(item.title)}">${isUnread ? '<span class="tracker-item-unread-dot" aria-label="未读"></span>' : ''}${BSE.Utils.escapeHtml(item.title)}</span>
+      <div class="tracker-item-row${isUnread ? ' is-unread' : ''}">
+        <div class="tracker-item-top">
+          <div class="tracker-item-title-wrap">
+            ${isUnread ? `<span class="tracker-item-unread-dot" aria-label="${t('tracker_tag_unread', { n: 1 })}"></span>` : ''}
+            <span class="tracker-item-title" title="${BSE.Utils.escapeHtml(item.title)}">${BSE.Utils.escapeHtml(item.title)}</span>
+          </div>
           <span class="tracker-item-time">${formatTrackerTime(item.pubdate)}</span>
         </div>
-        <div class="tracker-item-sub-row">
+        <div class="tracker-item-bot">
           ${badge}
-          <div class="tracker-sub-actions">
+          <div class="tracker-item-actions">
             ${actions}
-            ${item.url ? `<button class="tracker-btn-preview-toggle tracker-btn-watch" data-url="${BSE.Utils.escapeHtml(item.url)}">▶ 打开</button>` : ''}
+            ${item.url ? `<button class="tracker-item-act-btn tracker-btn-watch" data-url="${BSE.Utils.escapeHtml(item.url)}" title="打开视频播放页">${t('tracker_btn_watch')}</button>` : ''}
           </div>
         </div>
         ${preview}
-      </article>`;
+      </div>`;
   }
 
   function renderTrackerList() {
     if (!elements.trackerList) return;
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     elements.trackerList.innerHTML = '';
 
     let list = [...subscriptionsCache];
@@ -500,7 +581,7 @@
       list = list.filter((sub) => `${sub.title || ''} ${sub.author || ''}`.toLocaleLowerCase().includes(trackerSearchQuery));
     }
     list.sort((a, b) => {
-      if (trackerSort === 'name') return String(a.title || '').localeCompare(String(b.title || ''), 'zh-CN');
+      if (trackerSort === 'name') return String(a.title || '').localeCompare(String(b.title || ''), BSE.I18n?.getLocale() || 'zh-CN');
       if (trackerSort === 'unread') return (b.unreadCount || 0) - (a.unreadCount || 0) || (b.lastCheckedAt || 0) - (a.lastCheckedAt || 0);
       const aActivity = a.items?.[0]?.pubdate || a.lastCheckedAt || a.subscribedAt || 0;
       const bActivity = b.items?.[0]?.pubdate || b.lastCheckedAt || b.subscribedAt || 0;
@@ -510,10 +591,10 @@
     if (elements.trackerEmpty) elements.trackerEmpty.hidden = list.length > 0;
     if (!list.length && elements.trackerEmptyTitle && elements.trackerEmptyDesc) {
       const constrained = trackerFilter === 'unread' || trackerSearchQuery;
-      elements.trackerEmptyTitle.textContent = constrained ? '没有符合条件的订阅' : '暂无关注的 UP 主或课程合集';
+      elements.trackerEmptyTitle.textContent = constrained ? t('tracker_empty_title_filtered') : t('tracker_empty_title_all');
       elements.trackerEmptyDesc.textContent = constrained
-        ? '试试清空搜索词，或切换到“全部”查看所有订阅。'
-        : '在视频播放页使用上方按钮关注作者或合集，之后的新投稿会自动出现在这里。';
+        ? t('tracker_empty_desc_filtered')
+        : t('tracker_empty_desc_all');
     }
 
     const unreadTotal = subscriptionsCache.reduce((sum, sub) => sum + (sub.unreadCount || 0), 0);
@@ -522,8 +603,14 @@
       return sum + unreadItems.filter((item) => item.subtitle?.status === 'ready' && (item.subtitle.markdown || item.subtitle.plainText)).length;
     }, 0);
     if (elements.trackerStatusLine) {
-      const cacheLabel = trackerStorageStats ? ` · 缓存 ${Math.ceil(trackerStorageStats.approximateBytes / 1024)} KB` : '';
-      elements.trackerStatusLine.textContent = `显示 ${list.length}/${subscriptionsCache.length} 个订阅 · ${unreadTotal} 条未读 · ${copyableUnread} 篇字幕可复制${cacheLabel}`;
+      const cacheLabel = trackerStorageStats ? t('tracker_cache_label', { kb: Math.ceil(trackerStorageStats.approximateBytes / 1024) }) : '';
+      elements.trackerStatusLine.textContent = t('tracker_status_summary', {
+        shown: list.length,
+        total: subscriptionsCache.length,
+        unread: unreadTotal,
+        copyable: copyableUnread,
+        cache: cacheLabel
+      });
     }
     if (elements.trackerCopyAllBtn) elements.trackerCopyAllBtn.disabled = copyableUnread === 0 || trackerLoading;
     if (elements.trackerReadAllBtn) elements.trackerReadAllBtn.disabled = unreadTotal === 0 || trackerLoading;
@@ -531,32 +618,46 @@
     const fragment = document.createDocumentFragment();
     list.forEach((sub, subIndex) => {
       const card = document.createElement('section');
-      card.className = `tracker-card${(sub.unreadCount || 0) > 0 ? ' has-unread' : ''}`;
+      const hasUnread = (sub.unreadCount || 0) > 0;
+      card.className = `tracker-card ${hasUnread ? 'has-unread' : 'is-read'}`;
       card.dataset.id = sub.id;
       const items = sub.items || [];
       const unreadCount = Math.min(sub.unreadCount || 0, items.length);
       const expanded = expandedTrackerCards.has(sub.id);
       const visibleCount = expanded ? items.length : Math.max(1, Math.min(unreadCount || 1, 3));
       const visibleItems = items.slice(0, visibleCount);
-      const typeLabel = sub.type === 'season' ? '合集' : (sub.platform === 'youtube' ? 'YouTube 频道' : 'Bilibili UP 主');
+      const typeLabel = sub.type === 'season' ? t('tracker_type_season') : (sub.platform === 'youtube' ? t('tracker_type_youtube_channel') : t('tracker_type_bilibili_up'));
+
+      const subUrl = getSubscriptionUrl(sub);
+      const openHint = sub.type === 'season' ? '打开合集播放页' : '打开主页';
+      const showBatchExport = sub.type === 'season' || items.length > 1 || (sub.platform === 'bilibili' && getSubscriptionBvid(sub));
+      const authorText = sub.author || (sub.type === 'up' ? sub.title : '');
 
       card.innerHTML = `
         <div class="tracker-card-head">
-          <div class="tracker-card-brand">
+          <div class="tracker-card-brand tracker-card-link" data-url="${BSE.Utils.escapeHtml(subUrl)}" title="${openHint}: ${BSE.Utils.escapeHtml(sub.title)}" role="button" tabindex="0">
             <div class="tracker-avatar-wrap">${sub.avatar ? `<img src="${BSE.Utils.escapeHtml(sub.avatar)}" alt="">` : (sub.platform === 'youtube' ? '▶' : '📺')}</div>
             <div class="tracker-card-meta">
-              <strong class="tracker-card-title" title="${BSE.Utils.escapeHtml(sub.title)}">${BSE.Utils.escapeHtml(sub.title)}</strong>
-              <span class="tracker-card-subtext">${typeLabel} · ${items.length} 条记录 · 巡检于 ${formatTrackerTime(sub.lastCheckedAt)}</span>
+              <div class="tracker-card-title-row">
+                <strong class="tracker-card-title">${BSE.Utils.escapeHtml(sub.title)}</strong>
+                <span class="tracker-card-open-icon" aria-hidden="true">↗</span>
+              </div>
+              <div class="tracker-card-subtext">
+                ${authorText ? `<span class="tracker-card-author" title="UP主/作者: ${BSE.Utils.escapeHtml(authorText)}">👤 ${BSE.Utils.escapeHtml(authorText)}</span><span class="tracker-card-sep">·</span>` : ''}<span>${typeLabel} · ${items.length} 篇 · ${formatTrackerTime(sub.lastCheckedAt)}</span>
+              </div>
             </div>
           </div>
-          ${unreadCount ? `<span class="tracker-card-tag unread">${unreadCount} 条未读</span>` : '<span class="tracker-card-tag">已读</span>'}
+          <div class="tracker-card-head-actions">
+            <button class="tracker-card-icon-btn tracker-btn-rename" data-id="${BSE.Utils.escapeHtml(sub.id)}" data-title="${BSE.Utils.escapeHtml(sub.title)}" title="${t('tracker_btn_rename_title')}">
+              <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+            </button>
+            ${showBatchExport ? `<button class="tracker-card-act-btn tracker-btn-batch-card" data-id="${BSE.Utils.escapeHtml(sub.id)}" title="${t('tracker_btn_batch_card_title')}">${t('tracker_btn_batch_card')}</button>` : ''}
+            ${unreadCount ? `<button class="tracker-card-unread-pill tracker-btn-read" data-id="${BSE.Utils.escapeHtml(sub.id)}" title="${t('tracker_btn_mark_card_read')}">${t('tracker_tag_unread', { n: unreadCount })}</button>` : `<span class="tracker-card-tag is-read-tag">✓ ${t('tracker_tag_read')}</span>`}
+            <button class="tracker-card-del-btn tracker-btn-del" data-id="${BSE.Utils.escapeHtml(sub.id)}" data-title="${BSE.Utils.escapeHtml(sub.title)}" title="${t('tracker_btn_untrack')}">✕</button>
+          </div>
         </div>
         <div class="tracker-items">${visibleItems.map((item, itemIndex) => renderTrackerItem(sub, item, `tracker-preview-${subIndex}-${itemIndex}`, itemIndex < unreadCount)).join('')}</div>
-        ${items.length > visibleCount ? `<button class="tracker-expand-btn" data-id="${BSE.Utils.escapeHtml(sub.id)}">查看其余 ${items.length - visibleCount} 条记录⌄</button>` : (expanded && items.length > 1 ? `<button class="tracker-expand-btn" data-id="${BSE.Utils.escapeHtml(sub.id)}">收起记录⌃</button>` : '')}
-        <div class="tracker-card-foot">
-          <div class="tracker-foot-actions">${unreadCount ? `<button class="tracker-btn-sm tracker-btn-read" data-id="${BSE.Utils.escapeHtml(sub.id)}">✓ 全部已读</button>` : ''}</div>
-          <button class="tracker-btn-del" data-id="${BSE.Utils.escapeHtml(sub.id)}" data-title="${BSE.Utils.escapeHtml(sub.title)}">取消追踪</button>
-        </div>`;
+        ${items.length > visibleCount ? `<button class="tracker-expand-btn" data-id="${BSE.Utils.escapeHtml(sub.id)}">${t('tracker_btn_expand_more', { n: items.length - visibleCount })}</button>` : (expanded && items.length > 1 ? `<button class="tracker-expand-btn" data-id="${BSE.Utils.escapeHtml(sub.id)}">${t('tracker_btn_collapse_more')}</button>` : '')}`;
       fragment.appendChild(card);
     });
     elements.trackerList.appendChild(fragment);
@@ -597,24 +698,17 @@
         paragraphs.forEach((pText) => {
           const p = document.createElement('div');
           p.className = 'paragraph';
-          p.style.cssText = 'padding: 10px 12px; margin-bottom: 8px; line-height: 1.68; font-size: var(--bse-cue-font-size, 14.5px); border-radius: 8px; background: var(--surface); position: relative; border: 1px solid var(--border);';
-          
-          const header = document.createElement('div');
-          header.style.cssText = 'display:flex; align-items:center; justify-content:flex-end; margin-bottom:4px;';
-          
-          const copyBtn = document.createElement('button');
-          copyBtn.className = 'cue-copy-btn paragraph-copy-btn';
-          copyBtn.style.opacity = '1';
-          copyBtn.title = '复制本段';
-          copyBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
-          header.appendChild(copyBtn);
 
           const content = document.createElement('div');
           content.className = 'paragraph-body';
-          content.style.cssText = 'color: var(--text-body); font-size: var(--bse-cue-font-size, 14.5px);';
           content.textContent = pText;
 
-          p.append(header, content);
+          const copyBtn = document.createElement('button');
+          copyBtn.className = 'cue-copy-btn paragraph-copy-btn';
+          copyBtn.title = '复制本段';
+          copyBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+
+          p.append(content, copyBtn);
           fragment.appendChild(p);
         });
       } else {
@@ -767,21 +861,53 @@
   }
 
   async function loadInitialState() {
-    const result = await chrome.runtime.sendMessage({ type: 'BSE_GET_ACTIVE_STATE' });
-    activeTabId = result?.tab?.id || null;
-    if (result?.state) renderState(result.state);
+    try {
+      const result = await chrome.runtime.sendMessage({ type: 'BSE_GET_ACTIVE_STATE' });
+      activeTabId = result?.tab?.id || null;
+      if (result?.state) {
+        renderState(result.state);
+      } else {
+        const isBili = result?.tab?.url && /bilibili\.com/i.test(result.tab.url);
+        const isYt = result?.tab?.url && /youtube\.com|youtu\.be/i.test(result.tab.url);
+        renderState({
+          status: 'empty',
+          platform: isBili ? 'bilibili' : (isYt ? 'youtube' : 'unknown'),
+          message: BSE.I18n?.t('no_subtitles') || '当前页面未检测到视频字幕',
+          cues: [],
+          tracks: [],
+          title: result?.tab?.title || ''
+        });
+      }
+    } catch {
+      // Ignore
+    }
   }
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === 'BSE_ACTIVE_TAB_CHANGED') {
       activeTabId = message.tabId;
-      if (message.state) renderState(message.state);
+      if (message.state) {
+        renderState(message.state);
+      } else {
+        loadInitialState();
+      }
     } else if (message?.type === 'BSE_STATE_BROADCAST' && (!activeTabId || message.tabId === activeTabId)) {
       activeTabId = message.tabId;
-      renderState(message.state);
+      if (message.state) {
+        renderState(message.state);
+      } else {
+        loadInitialState();
+      }
     } else if (message?.type === 'BSE_PLAYBACK_BROADCAST' && message.tabId === activeTabId) {
       updatePlayback(message.activeIndex);
     }
+  });
+
+  window.addEventListener('focus', () => {
+    loadInitialState();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) loadInitialState();
   });
 
   function applyI18nAndTheme() {
@@ -817,8 +943,12 @@
     if (elements.settingsToggle) elements.settingsToggle.title = t('settings_title');
     if (elements.labelTheme) elements.labelTheme.textContent = t('theme_label');
     if (elements.labelLang) elements.labelLang.textContent = t('lang_label');
-    if (elements.labelPref) elements.labelPref.textContent = '字幕偏好';
-    if (elements.labelSize) elements.labelSize.textContent = '正文字号';
+    if (elements.labelPref) elements.labelPref.textContent = t('pref_subtitle_label');
+    if (elements.labelSize) elements.labelSize.textContent = t('pref_size_label');
+    if (elements.labelInterval) elements.labelInterval.textContent = t('tracker_setting_interval_label');
+    if (elements.labelNotify) elements.labelNotify.textContent = t('tracker_setting_notify_label');
+    if (elements.trackerExportBtn) elements.trackerExportBtn.textContent = t('tracker_setting_export_btn');
+    if (elements.trackerImportBtn) elements.trackerImportBtn.textContent = t('tracker_setting_import_btn');
     if (elements.search) elements.search.placeholder = t('search_placeholder');
     if (elements.refresh) elements.refresh.title = t('refresh_subtitles');
     if (elements.copy) elements.copy.title = t('copy_full_text');
@@ -832,12 +962,60 @@
     if (elements.tabTimestamp) elements.tabTimestamp.textContent = t('tab_timestamp');
     if (elements.tabPlain) elements.tabPlain.textContent = t('tab_plain');
     if (elements.tabAi) elements.tabAi.textContent = t('tab_ai');
+    if (elements.tabTrackerText) elements.tabTrackerText.textContent = t('tab_tracker');
     if (elements.batchBtnText) elements.batchBtnText.textContent = t('btn_batch_export');
     if (elements.aiTitle) elements.aiTitle.textContent = `🤖 ${t('ai_summary_title')}`;
     if (elements.aiCardSummary) elements.aiCardSummary.textContent = t('ai_prompt_summary');
     if (elements.aiCardKeypoints) elements.aiCardKeypoints.textContent = t('ai_prompt_keypoints');
     if (elements.aiCardNotes) elements.aiCardNotes.textContent = t('ai_prompt_notes');
     if (elements.aiCardQuestions) elements.aiCardQuestions.textContent = t('ai_prompt_questions');
+
+    // Tracker UI Static & Dropdown Elements
+    if (elements.trackerQuickAuthorLabel) elements.trackerQuickAuthorLabel.textContent = state?.platform === 'youtube' ? 'CH' : 'UP';
+    if (elements.trackerFilterAllText) elements.trackerFilterAllText.textContent = t('tracker_filter_all', { n: 0 }).replace(/\s*\(.*\)/, '');
+    if (elements.trackerFilterUnreadText) elements.trackerFilterUnreadText.textContent = t('tracker_filter_unread', { n: 0 }).replace(/\s*\(.*\)/, '');
+    if (elements.trackerCopyAllBtn) {
+      elements.trackerCopyAllBtn.title = t('tracker_tool_copy_unread_title');
+      elements.trackerCopyAllBtn.setAttribute('aria-label', t('tracker_tool_copy_unread'));
+    }
+    if (elements.trackerCheckAllBtn) {
+      elements.trackerCheckAllBtn.title = t('tracker_tool_check_all_title');
+      elements.trackerCheckAllBtn.setAttribute('aria-label', t('tracker_tool_refresh'));
+    }
+    if (elements.trackerReadAllBtn) {
+      elements.trackerReadAllBtn.title = t('tracker_tool_mark_all_read_title');
+      elements.trackerReadAllBtn.setAttribute('aria-label', t('tracker_tool_mark_read'));
+    }
+    if (elements.trackerSearchInput) elements.trackerSearchInput.placeholder = t('tracker_search_placeholder');
+
+    if (elements.trackerIntervalSelect && elements.trackerIntervalSelect.options?.length >= 4) {
+      const curVal = elements.trackerIntervalSelect.value;
+      elements.trackerIntervalSelect.options[0].textContent = t('tracker_setting_interval_30m');
+      elements.trackerIntervalSelect.options[1].textContent = t('tracker_setting_interval_1h');
+      elements.trackerIntervalSelect.options[2].textContent = t('tracker_setting_interval_3h');
+      elements.trackerIntervalSelect.options[3].textContent = t('tracker_setting_interval_manual');
+      elements.trackerIntervalSelect.value = curVal;
+    }
+
+    if (elements.trackerNotifySelect && elements.trackerNotifySelect.options?.length >= 2) {
+      const curVal = elements.trackerNotifySelect.value;
+      elements.trackerNotifySelect.options[0].textContent = t('tracker_setting_notify_on');
+      elements.trackerNotifySelect.options[1].textContent = t('tracker_setting_notify_badge_only');
+      elements.trackerNotifySelect.value = curVal;
+    }
+
+    if (elements.trackerSortSelect && elements.trackerSortSelect.options?.length >= 3) {
+      const curVal = elements.trackerSortSelect.value;
+      elements.trackerSortSelect.options[0].textContent = t('tracker_sort_activity');
+      elements.trackerSortSelect.options[1].textContent = t('tracker_sort_unread');
+      elements.trackerSortSelect.options[2].textContent = t('tracker_sort_name');
+      elements.trackerSortSelect.value = curVal;
+    }
+
+    updateQuickSubscribeBar().catch(() => {});
+    if (currentTab === 'tracker') {
+      renderTrackerList();
+    }
   }
 
   if (BSE.I18n) {
@@ -854,23 +1032,25 @@
   // Tracker Subscriptions Event Listeners
   elements.trackerSubscribeUpBtn?.addEventListener('click', async () => {
     if (!currentAuthorInfo || !currentAuthorInfo.targetId) return;
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     const subId = `${currentAuthorInfo.platform}:${currentAuthorInfo.type || 'up'}:${currentAuthorInfo.mid || currentAuthorInfo.targetId}`;
     const exists = subscriptionsCache.some((s) => s.id === subId);
+    const upName = currentAuthorInfo.upName || currentAuthorInfo.title || 'UP';
     if (exists) {
       await BSE.Tracker.removeSubscription(subId);
-      toast(`已取消关注: ${currentAuthorInfo.upName}`);
+      toast(t('tracker_toast_untracked', { name: upName }));
     } else {
       await BSE.Tracker.addSubscription({
         id: subId,
         platform: currentAuthorInfo.platform,
         type: currentAuthorInfo.type || 'up',
-        title: currentAuthorInfo.upName || currentAuthorInfo.title,
-        author: currentAuthorInfo.upName,
+        title: upName,
+        author: upName,
         avatar: currentAuthorInfo.avatar,
         targetId: currentAuthorInfo.mid || currentAuthorInfo.targetId,
         sourceUrl: state?.url || ''
       });
-      toast(`✓ 已成功关注 UP 主: ${currentAuthorInfo.upName}`);
+      toast(t('tracker_toast_tracked_up', { name: upName }));
     }
     await loadAndRenderTracker();
     chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
@@ -878,24 +1058,26 @@
 
   elements.trackerSubscribeSeasonBtn?.addEventListener('click', async () => {
     if (!currentAuthorInfo || !currentAuthorInfo.seasonId) return;
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     const subId = `${currentAuthorInfo.platform}:season:${currentAuthorInfo.seasonId}`;
     const exists = subscriptionsCache.some((s) => s.id === subId);
+    const seasonTitle = currentAuthorInfo.seasonTitle || currentAuthorInfo.title || t('tracker_type_season');
     if (exists) {
       await BSE.Tracker.removeSubscription(subId);
-      toast(`已取消订阅合集: ${currentAuthorInfo.seasonTitle || '本合集'}`);
+      toast(t('tracker_toast_untracked_season', { title: seasonTitle }));
     } else {
       await BSE.Tracker.addSubscription({
         id: subId,
         platform: currentAuthorInfo.platform,
         type: 'season',
-        title: currentAuthorInfo.seasonTitle || currentAuthorInfo.title || '课程合集',
+        title: seasonTitle,
         author: currentAuthorInfo.upName || currentAuthorInfo.title || '',
         ownerId: currentAuthorInfo.mid || '',
         avatar: currentAuthorInfo.avatar,
         targetId: currentAuthorInfo.seasonId,
         sourceUrl: state?.url || ''
       });
-      toast(`✓ 已成功订阅合集: ${currentAuthorInfo.seasonTitle || '本合集'}`);
+      toast(t('tracker_toast_tracked_season', { title: seasonTitle }));
     }
     await loadAndRenderTracker();
     chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
@@ -926,39 +1108,42 @@
   });
 
   elements.trackerCheckAllBtn?.addEventListener('click', async () => {
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     if (elements.trackerCheckAllBtn) {
-      elements.trackerCheckAllBtn.textContent = '⏳ 检查中…';
+      elements.trackerCheckAllBtn.classList.add('busy');
       elements.trackerCheckAllBtn.disabled = true;
     }
-    toast('正在后台检测所有订阅源更新…');
+    toast(t('tracker_toast_checking'));
     try {
       const res = await chrome.runtime.sendMessage({ type: 'BSE_TRACKER_CHECK_NOW' });
       if (res?.error) throw new Error(res.error);
       await loadAndRenderTracker();
       const updatedCount = (res?.updatedSubs || []).length;
       if (updatedCount > 0) {
-        toast(`✓ 发现 ${updatedCount} 个订阅源更新！`);
+        toast(t('tracker_toast_updates_found', { n: updatedCount }));
       } else {
-        toast('所有订阅源已是最新状态');
+        toast(t('tracker_toast_no_updates'));
       }
     } catch (err) {
-      toast(`检查更新失败: ${err.message}`, true);
+      toast(t('tracker_toast_extract_failed', { error: err.message }), true);
     } finally {
       if (elements.trackerCheckAllBtn) {
-        elements.trackerCheckAllBtn.textContent = '🔄 刷新';
+        elements.trackerCheckAllBtn.classList.remove('busy');
         elements.trackerCheckAllBtn.disabled = false;
       }
     }
   });
 
   elements.trackerReadAllBtn?.addEventListener('click', async () => {
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     await BSE.Tracker?.markAllAsRead?.();
     await loadAndRenderTracker();
     chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
-    toast('✓ 已全部标记为已读');
+    toast(t('tracker_toast_marked_all_read'));
   });
 
   elements.trackerCopyAllBtn?.addEventListener('click', async () => {
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     const list = subscriptionsCache;
     const unreadItems = [];
     let skippedWithoutSubtitle = 0;
@@ -975,16 +1160,18 @@
     });
 
     if (!unreadItems.length) {
-      toast(skippedWithoutSubtitle ? '未读更新的字幕尚未提取完成' : '暂无未读更新，无需合并复制', true);
+      toast(t(skippedWithoutSubtitle ? 'tracker_toast_copy_unread_pending' : 'tracker_toast_copy_unread_empty'), true);
       return;
     }
 
     const mergedMd = BSE.Tracker.exportMergedMarkdown(unreadItems);
     await navigator.clipboard.writeText(mergedMd);
-    toast(`✓ 已复制 ${unreadItems.length} 篇字幕${skippedWithoutSubtitle ? `，跳过 ${skippedWithoutSubtitle} 篇未就绪` : ''}`);
+    const skipText = skippedWithoutSubtitle ? t('tracker_toast_copy_unread_skip', { n: skippedWithoutSubtitle }) : '';
+    toast(`${t('tracker_toast_copy_unread_success', { n: unreadItems.length })}${skipText}`);
   });
 
   elements.trackerList?.addEventListener('click', async (e) => {
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     const copyBtn = e.target.closest('.tracker-btn-copy:not(.tracker-btn-retry-sub)');
     if (copyBtn) {
       const subId = copyBtn.dataset.subId;
@@ -993,12 +1180,12 @@
       const item = (sub?.items || []).find((i) => i.id === itemId);
       if (item?.subtitle?.markdown) {
         await navigator.clipboard.writeText(item.subtitle.markdown);
-        toast(`✓ 已复制《${item.title}》Markdown 字幕`);
+        toast(t('tracker_toast_copied_md', { title: item.title }));
       } else if (item?.subtitle?.plainText) {
         await navigator.clipboard.writeText(item.subtitle.plainText);
-        toast(`✓ 已复制《${item.title}》纯文本字幕`);
+        toast(t('tracker_toast_copied_txt', { title: item.title }));
       } else {
-        toast('该视频字幕尚未提取完成，请点击「提取」重试', true);
+        toast(t('tracker_toast_extract_not_ready'), true);
       }
       return;
     }
@@ -1011,7 +1198,7 @@
         drawer.classList.toggle('open');
         const open = drawer.classList.contains('open');
         previewBtn.setAttribute('aria-expanded', String(open));
-        previewBtn.textContent = open ? '▲ 收起' : '👁 预览';
+        previewBtn.textContent = open ? t('tracker_btn_collapse') : t('tracker_btn_preview');
       }
       return;
     }
@@ -1029,19 +1216,62 @@
     if (retrySubBtn) {
       const subId = retrySubBtn.dataset.subId;
       const itemId = retrySubBtn.dataset.itemId;
-      retrySubBtn.textContent = '⏳ 提取中…';
+      retrySubBtn.textContent = t('tracker_tool_refreshing');
       retrySubBtn.disabled = true;
       try {
         const subRes = await BSE.Tracker.fetchSubtitleForItem(subId, itemId);
         await loadAndRenderTracker();
         if (subRes.status === 'ready') {
-          toast(`✓ 成功提取《${itemId}》字幕 (${subRes.cueCount}行)`);
+          toast(t('tracker_toast_extract_success', { title: itemId, n: subRes.cueCount || 0 }));
         } else {
-          toast(`提取结果: ${subRes.errorHint || '无官方字幕'}`, true);
+          toast(t('tracker_toast_extract_failed', { error: subRes.errorHint || t('tracker_badge_no_sub') }), true);
         }
       } catch (err) {
-        toast(`提取失败: ${err.message}`, true);
+        toast(t('tracker_toast_extract_failed', { error: err.message }), true);
       }
+      return;
+    }
+
+    const cardLink = e.target.closest('.tracker-card-link');
+    if (cardLink && !e.target.closest('button')) {
+      const url = cardLink.dataset.url;
+      if (url) chrome.tabs.create({ url });
+      return;
+    }
+
+    const renameBtn = e.target.closest('.tracker-btn-rename');
+    if (renameBtn) {
+      const subId = renameBtn.dataset.id;
+      const oldTitle = renameBtn.dataset.title || '';
+      const newTitle = window.prompt(t('tracker_prompt_rename'), oldTitle);
+      if (newTitle && newTitle.trim() && newTitle.trim() !== oldTitle) {
+        await BSE.Tracker?.renameSubscription?.(subId, newTitle.trim());
+        await loadAndRenderTracker();
+        toast(t('tracker_toast_renamed', { title: newTitle.trim() }));
+      }
+      return;
+    }
+
+    const batchCardBtn = e.target.closest('.tracker-btn-batch-card');
+    if (batchCardBtn) {
+      const subId = batchCardBtn.dataset.id;
+      const sub = subscriptionsCache.find((s) => s.id === subId);
+      if (!sub) return;
+
+      const bvid = getSubscriptionBvid(sub);
+      if (bvid && typeof openBatchModal === 'function') {
+        openBatchModal(bvid);
+        return;
+      }
+
+      const readyItems = (sub.items || []).filter((item) => item.subtitle?.status === 'ready' && (item.subtitle.markdown || item.subtitle.plainText));
+      if (!readyItems.length) {
+        toast(t('tracker_toast_batch_no_sub'), true);
+        return;
+      }
+      const mergedMd = BSE.Tracker.exportMergedMarkdown(readyItems.map(i => ({ ...i, author: i.author || sub.author || sub.title })));
+      await navigator.clipboard.writeText(mergedMd);
+      toast(t('tracker_toast_batch_copied', { title: sub.title, n: readyItems.length }));
       return;
     }
 
@@ -1058,21 +1288,32 @@
         await BSE.Tracker?.markAsRead?.(id);
         await loadAndRenderTracker();
         chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
-        toast('✓ 已标记已读');
+        toast(t('tracker_toast_marked_read'));
       }
       return;
     }
     const delBtn = e.target.closest('.tracker-btn-del');
     if (delBtn) {
       const id = delBtn.dataset.id;
-      const title = delBtn.dataset.title || '该订阅';
-      if (id && window.confirm(`确定取消追踪“${title}”吗？已缓存的更新记录也会被删除。`)) {
+      const title = delBtn.dataset.title || t('tracker_type_season');
+      if (id && window.confirm(t('tracker_confirm_untrack', { title }))) {
         await BSE.Tracker?.removeSubscription?.(id);
         await loadAndRenderTracker();
         chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
-        toast('已取消该订阅');
+        toast(t('tracker_toast_untracked', { name: title }));
       }
       return;
+    }
+  });
+
+  elements.trackerList?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      const cardLink = e.target.closest('.tracker-card-link');
+      if (cardLink && !e.target.closest('button')) {
+        e.preventDefault();
+        const url = cardLink.dataset.url;
+        if (url) chrome.tabs.create({ url });
+      }
     }
   });
 
@@ -1086,23 +1327,26 @@
       const val = Number(elements.trackerIntervalSelect.value);
       await BSE.Tracker?.saveSettings?.({ checkIntervalMinutes: val });
       chrome.runtime.sendMessage({ type: 'BSE_TRACKER_RESET_ALARM' }).catch(() => {});
-      toast('✓ 巡检周期已更新');
+      const t = (k, p) => BSE.I18n?.t(k, p) || k;
+      toast(t('tracker_toast_interval_saved'));
     });
 
     elements.trackerNotifySelect?.addEventListener('change', async () => {
       const val = elements.trackerNotifySelect.value === 'true';
       await BSE.Tracker?.saveSettings?.({ enableNotification: val });
-      toast('✓ 桌面通知偏好已保存');
+      const t = (k, p) => BSE.I18n?.t(k, p) || k;
+      toast(t('tracker_toast_notify_saved'));
     });
   }
 
   elements.trackerExportBtn?.addEventListener('click', async () => {
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     try {
       const json = await BSE.Tracker?.exportConfigJson?.();
       BSE.Utils.downloadText(json, `SparkSub_Subscriptions_${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
-      toast('✓ 订阅配置已导出');
+      toast(t('tracker_toast_export_success'));
     } catch (err) {
-      toast(`导出失败: ${err.message}`, true);
+      toast(t('tracker_toast_extract_failed', { error: err.message }), true);
     }
   });
 
@@ -1111,15 +1355,16 @@
   });
 
   elements.trackerImportFile?.addEventListener('change', async (e) => {
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     const file = e.target.files?.[0];
     if (!file) return;
     try {
       const text = await file.text();
       const res = await BSE.Tracker?.importConfigJson?.(text);
       await loadAndRenderTracker();
-      toast(`✓ 成功导入 ${res.importedCount} 个订阅源！`);
+      toast(t('tracker_toast_import_success', { n: res.importedCount }));
     } catch (err) {
-      toast(`导入失败: ${err.message}`, true);
+      toast(t('tracker_toast_extract_failed', { error: err.message }), true);
     } finally {
       elements.trackerImportFile.value = '';
     }
@@ -1489,9 +1734,9 @@
     });
   }
 
-  async function openBatchModal() {
+  async function openBatchModal(targetBvid) {
     try {
-      const bvid = BSE.Utils.getBvid(state?.url || location.href);
+      const bvid = targetBvid || BSE.Utils.getBvid(state?.url || location.href);
       if (!bvid) {
         toast('未识别到 B 站视频 BV 号', true);
         return;

@@ -327,6 +327,11 @@ function isMatchingVideoUrl(url = '') {
   return isBili;
 }
 
+function isMatchingSiteUrl(url = '') {
+  if (!url) return false;
+  return /(^https?:\/\/)(www\.|m\.)?(youtube\.com|bilibili\.com|youtu\.be)/i.test(url);
+}
+
 async function injectContentScripts(tabId, url = '') {
   if (!tabId || !chrome.scripting) return false;
   try {
@@ -368,7 +373,7 @@ chrome.runtime.onInstalled.addListener(() => {
   updateBadgeFromUnread().catch(() => {});
   chrome.tabs.query({}).then((tabs) => {
     for (const tab of tabs) {
-      if (tab.id && isMatchingVideoUrl(tab.url)) {
+      if (tab.id && isMatchingSiteUrl(tab.url)) {
         injectContentScripts(tab.id, tab.url).catch(() => {});
       }
     }
@@ -383,17 +388,18 @@ if (chrome.alarms?.onAlarm) {
         await updateBadgeFromUnread();
 
         const settings = await BSE.Tracker?.getSettings?.() || { enableNotification: true };
-        if (settings.enableNotification && updatedSubs && updatedSubs.length > 0 && chrome.notifications) {
-          chrome.notifications.create({
+        if (settings.enableNotification && updatedSubs.length > 0) {
+          const t = (k, p) => BSE.I18n?.t(k, p) || k;
+          chrome.notifications?.create({
             type: 'basic',
-            iconUrl: 'assets/icon128.png',
-            title: 'SparkSub: 您关注的UP主/合集有更新',
-            message: updatedSubs.slice(0, 3).join('\n'),
+            iconUrl: chrome.runtime.getURL('icons/icon-128.png'),
+            title: 'SparkSub 订阅更新提醒',
+            message: `发现 ${updatedSubs.length} 个订阅源有新更新：${updatedSubs.map((s) => s.title).slice(0, 3).join('、')}`,
             priority: 1
           });
         }
       } catch (err) {
-        console.warn('[BSE Tracker] 增量巡检任务异常:', err);
+        console.warn('[SparkSub Alarm] Subscription check error:', err);
       }
     }
   });
@@ -446,13 +452,35 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   }).catch(() => {});
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!changeInfo.url) return;
-  const enabled = isMatchingVideoUrl(changeInfo.url);
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  const url = changeInfo.url || tab?.url || '';
+  if (changeInfo.status === 'loading' || changeInfo.url) {
+    const cached = tabStates.get(tabId);
+    if (cached && changeInfo.url && cached.url !== changeInfo.url) {
+      tabStates.delete(tabId);
+      captionRequests.delete(tabId);
+    }
+  }
+
+  const isVideo = isMatchingVideoUrl(url);
+  const isSite = isMatchingSiteUrl(url);
+  const enabled = isVideo || isSite;
+
   chrome.sidePanel.setOptions({ tabId, path: 'sidepanel/sidepanel.html', enabled }).catch(() => {});
+
   if (!enabled) {
     tabStates.delete(tabId);
     captionRequests.delete(tabId);
+  } else if (changeInfo.status === 'complete' || (changeInfo.url && isVideo)) {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+    if (activeTab?.id === tabId) {
+      const state = await getTabState(tabId);
+      chrome.runtime.sendMessage({
+        type: 'BSE_ACTIVE_TAB_CHANGED',
+        tabId,
+        state
+      }).catch(() => {});
+    }
   }
 });
 
@@ -462,20 +490,35 @@ async function getActiveTab() {
 }
 
 async function getTabState(tabId) {
-  if (tabStates.has(tabId)) return tabStates.get(tabId);
-  try {
-    return await chrome.tabs.sendMessage(tabId, { type: 'BSE_GET_STATE' });
-  } catch {
-    const tab = await chrome.tabs.get(tabId).catch(() => null);
-    if (tab && isMatchingVideoUrl(tab.url)) {
-      const injected = await injectContentScripts(tabId, tab.url);
-      if (injected) {
-        await new Promise((r) => setTimeout(r, 200));
-        return await chrome.tabs.sendMessage(tabId, { type: 'BSE_GET_STATE' }).catch(() => null);
-      }
-    }
-    return null;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) return null;
+
+  const cached = tabStates.get(tabId);
+  if (cached && tab.url && cached.url === tab.url) {
+    return cached;
   }
+  tabStates.delete(tabId);
+
+  try {
+    const state = await chrome.tabs.sendMessage(tabId, { type: 'BSE_GET_STATE' });
+    if (state) {
+      tabStates.set(tabId, state);
+      return state;
+    }
+  } catch {
+    // Content script not ready yet
+  }
+
+  if (tab.url && isMatchingSiteUrl(tab.url)) {
+    const injected = await injectContentScripts(tabId, tab.url);
+    if (injected) {
+      await new Promise((r) => setTimeout(r, 220));
+      const state = await chrome.tabs.sendMessage(tabId, { type: 'BSE_GET_STATE' }).catch(() => null);
+      if (state) tabStates.set(tabId, state);
+      return state;
+    }
+  }
+  return null;
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

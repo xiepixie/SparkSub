@@ -426,6 +426,18 @@
     return false;
   }
 
+  async function renameSubscription(id, newTitle) {
+    if (!id || typeof newTitle !== 'string') return null;
+    const title = newTitle.trim();
+    if (!title) return null;
+    const list = await getSubscriptions();
+    const sub = list.find((s) => s.id === id);
+    if (!sub) return null;
+    sub.title = title;
+    await saveSubscriptions(list);
+    return sub;
+  }
+
   async function markAsRead(subscriptionId, itemId) {
     const list = await getSubscriptions();
     const sub = list.find((s) => s.id === subscriptionId);
@@ -682,13 +694,14 @@
   }
 
   function formatCuesToMarkdown(title, author, url, cues) {
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     const lines = [];
     lines.push(`# ${title || '视频字幕'}`);
     lines.push('');
-    lines.push(`- **来源作者**: ${author || 'UP主'}`);
-    if (url) lines.push(`- **视频链接**: [${url}](${url})`);
-    lines.push(`- **提取时间**: ${new Date().toLocaleString()}`);
-    lines.push(`- **字幕行数**: ${cues.length} 行`);
+    lines.push(`- **${t('tracker_md_author')}**: ${author || 'UP主'}`);
+    if (url) lines.push(`- **${t('tracker_md_url')}**: [${url}](${url})`);
+    lines.push(`- **${t('tracker_md_extracted_time')}**: ${new Date().toLocaleString()}`);
+    lines.push(`- **${t('tracker_md_lines_count')}**: ${cues.length} ${t('cues_count', { n: cues.length }).replace(/^\d+\s*/, '') || '行'}`);
     lines.push('');
     lines.push('---');
     lines.push('');
@@ -834,16 +847,17 @@
 
   function exportMergedMarkdown(items) {
     if (!items || !items.length) return '';
+    const t = (k, p) => BSE.I18n?.t(k, p) || k;
     const sections = [];
-    sections.push(`# 批量视频更新字幕汇总 (${items.length} 篇)`);
-    sections.push(`> 导出时间：${new Date().toLocaleString()}`);
+    sections.push(`# ${t('tracker_md_export_title', { n: items.length })}`);
+    sections.push(`> ${t('tracker_md_export_time')}：${new Date().toLocaleString()}`);
     sections.push('');
 
     items.forEach((item, idx) => {
       sections.push(`## [${idx + 1}/${items.length}] ${item.title}`);
-      sections.push(`- **UP 主 / 作者**: ${item.author || '未知'}`);
-      if (item.url) sections.push(`- **视频直达**: [${item.url}](${item.url})`);
-      if (item.pubdate) sections.push(`- **发布时间**: ${new Date(item.pubdate).toLocaleString()}`);
+      sections.push(`- **${t('tracker_md_author')}**: ${item.author || '未知'}`);
+      if (item.url) sections.push(`- **${t('tracker_md_url')}**: [${item.url}](${item.url})`);
+      if (item.pubdate) sections.push(`- **${t('tracker_md_pubdate')}**: ${new Date(item.pubdate).toLocaleString()}`);
       sections.push('');
 
       if (item.subtitle && item.subtitle.status === 'ready' && item.subtitle.markdown) {
@@ -852,7 +866,7 @@
       } else if (item.subtitle && item.subtitle.plainText) {
         sections.push(item.subtitle.plainText);
       } else {
-        sections.push(`*(暂无已缓存字幕，点击视频直达可在播放器中即时解析)*`);
+        sections.push(t('tracker_md_no_sub_cached'));
       }
       sections.push('\n---\n');
     });
@@ -986,6 +1000,7 @@
     getSubscription,
     addSubscription,
     removeSubscription,
+    renameSubscription,
     markAsRead,
     markAllAsRead,
     getSettings,
