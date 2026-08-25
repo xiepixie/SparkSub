@@ -29,6 +29,8 @@
   };
 
   const bodyCache = new Map();
+  const MAX_BODY_CACHE_CHARS = 1_500_000;
+  let bodyCacheChars = 0;
   let panel = null;
   let generation = 0;
   let trackGeneration = 0;
@@ -247,9 +249,27 @@
   }
 
   function cacheBody(key, cues) {
+    const cost = (cues || []).reduce((sum, cue) => sum + String(cue.content || '').length + 24, 0);
+    const previous = bodyCache.get(key);
+    if (previous) bodyCacheChars -= previous.cost;
     bodyCache.delete(key);
-    bodyCache.set(key, cues);
-    while (bodyCache.size > 8) bodyCache.delete(bodyCache.keys().next().value);
+    if (cost > MAX_BODY_CACHE_CHARS) return;
+    bodyCache.set(key, { cues, cost });
+    bodyCacheChars += cost;
+    while (bodyCache.size > 8 || bodyCacheChars > MAX_BODY_CACHE_CHARS) {
+      const oldestKey = bodyCache.keys().next().value;
+      const oldest = bodyCache.get(oldestKey);
+      bodyCacheChars -= oldest?.cost || 0;
+      bodyCache.delete(oldestKey);
+    }
+  }
+
+  function readCachedBody(key) {
+    const cached = bodyCache.get(key);
+    if (!cached) return null;
+    bodyCache.delete(key);
+    bodyCache.set(key, cached);
+    return cached.cues;
   }
 
   async function loadTrack(track, options = {}) {
@@ -274,7 +294,7 @@
 
     const cacheKey = `${state.mediaKey}:${track.id}`;
     try {
-      let cues = bodyCache.get(cacheKey);
+      let cues = readCachedBody(cacheKey);
       if (!cues || options.force) {
         const adapter = platform === BSE.PLATFORM.YOUTUBE ? BSE.YouTube : BSE.Bilibili;
         cues = await adapter.loadTrack(track, { signal: controller.signal, diagnostic });

@@ -10,6 +10,9 @@
   });
 
   const MAX_HISTORY_PER_SUB = 20;
+  const MAX_SUBSCRIPTIONS = 100;
+  const MAX_CACHED_SUBTITLE_CHARS = 3_500_000;
+  const MAX_SINGLE_SUBTITLE_CHARS = 750_000;
 
   const DEFAULT_SETTINGS = Object.freeze({
     checkIntervalMinutes: 60,
@@ -17,6 +20,19 @@
     enableBadge: true,
     autoExtractSubtitles: false
   });
+
+  function normalizeSettings(value = {}) {
+    const requestedInterval = Number(value.checkIntervalMinutes);
+    const checkIntervalMinutes = requestedInterval === 0
+      ? 0
+      : Math.min(1440, Math.max(5, Number.isFinite(requestedInterval) ? requestedInterval : DEFAULT_SETTINGS.checkIntervalMinutes));
+    return {
+      checkIntervalMinutes,
+      enableNotification: value.enableNotification !== false,
+      enableBadge: value.enableBadge !== false,
+      autoExtractSubtitles: value.autoExtractSubtitles === true
+    };
+  }
 
   // === 1. Lightweight Pure-JS MD5 Implementation ===
   function safeAdd(x, y) {
@@ -250,10 +266,11 @@
   // === 4. Storage Operations with 20-Item Buffer Cap & Memory Fallback ===
   const _memoryStorage = new Map();
 
-  async function getStorageItem(key, defaultValue) {
-    if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+  async function getStorageItem(key, defaultValue, areaName = 'local') {
+    const area = typeof chrome !== 'undefined' ? chrome?.storage?.[areaName] : null;
+    if (area) {
       try {
-        const data = await chrome.storage.local.get(key);
+        const data = await area.get(key);
         return data[key] !== undefined ? data[key] : defaultValue;
       } catch {
         return defaultValue;
@@ -262,11 +279,14 @@
     return _memoryStorage.has(key) ? _memoryStorage.get(key) : defaultValue;
   }
 
-  async function setStorageItem(key, value) {
-    if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+  async function setStorageItem(key, value, areaName = 'local') {
+    const area = typeof chrome !== 'undefined' ? chrome?.storage?.[areaName] : null;
+    if (area) {
       try {
-        await chrome.storage.local.set({ [key]: value });
-      } catch {}
+        await area.set({ [key]: value });
+      } catch (error) {
+        throw new Error(`无法写入 ${areaName} 存储：${error?.message || error}`);
+      }
     }
     _memoryStorage.set(key, value);
   }
@@ -276,11 +296,81 @@
     return Array.isArray(list) ? list : [];
   }
 
-  async function saveSubscriptions(subs) {
-    const sanitized = (subs || []).map((s) => ({
+  function compactSubscriptions(subs) {
+    const originalById = new Map((subs || []).map((sub) => [sub.id, sub]));
+    const sanitized = (subs || []).slice(0, MAX_SUBSCRIPTIONS).map((s) => ({
       ...s,
-      items: Array.isArray(s.items) ? s.items.slice(0, MAX_HISTORY_PER_SUB) : []
+      id: String(s.id || '').slice(0, 256),
+      title: String(s.title || '').slice(0, 300),
+      author: String(s.author || '').slice(0, 200),
+      avatar: String(s.avatar || '').slice(0, 2048),
+      sourceUrl: String(s.sourceUrl || '').slice(0, 2048),
+      targetId: String(s.targetId || '').slice(0, 256),
+      unreadCount: Math.min(Number(s.unreadCount) || 0, MAX_HISTORY_PER_SUB),
+      items: Array.isArray(s.items) ? s.items.slice(0, MAX_HISTORY_PER_SUB).map((item) => ({
+        ...item,
+        id: String(item.id || '').slice(0, 256),
+        title: String(item.title || '').slice(0, 500),
+        author: String(item.author || '').slice(0, 200),
+        url: String(item.url || '').slice(0, 2048),
+        subtitle: item.subtitle ? {
+          ...item.subtitle,
+          markdown: undefined,
+          plainText: undefined
+        } : item.subtitle
+      })) : []
     }));
+
+    const candidates = [];
+    sanitized.forEach((sub, subIndex) => {
+      const originalSub = originalById.get(sub.id) || {};
+      sub.items.forEach((item, itemIndex) => {
+        const original = originalSub.items?.find((entry) => entry.id === item.id);
+        const markdown = String(original?.subtitle?.markdown || '');
+        const plainText = markdown ? '' : String(original?.subtitle?.plainText || '');
+        const content = markdown || plainText;
+        if (!content) return;
+        candidates.push({
+          subIndex,
+          itemIndex,
+          content,
+          field: markdown ? 'markdown' : 'plainText',
+          unread: itemIndex < (sub.unreadCount || 0),
+          fetchedAt: Number(original?.subtitle?.fetchedAt || item.pubdate || 0)
+        });
+      });
+    });
+    candidates.sort((a, b) => Number(b.unread) - Number(a.unread) || b.fetchedAt - a.fetchedAt);
+
+    let remaining = MAX_CACHED_SUBTITLE_CHARS;
+    let evictedCount = 0;
+    for (const candidate of candidates) {
+      const subtitle = sanitized[candidate.subIndex].items[candidate.itemIndex].subtitle;
+      if (candidate.content.length <= MAX_SINGLE_SUBTITLE_CHARS && candidate.content.length <= remaining) {
+        subtitle[candidate.field] = candidate.content;
+        remaining -= candidate.content.length;
+      } else {
+        subtitle.status = 'evicted';
+        subtitle.errorHint = '字幕正文已按缓存容量策略释放，可点击重新提取';
+        evictedCount++;
+      }
+    }
+    return { subscriptions: sanitized, evictedCount, cachedChars: MAX_CACHED_SUBTITLE_CHARS - remaining };
+  }
+
+  function getStorageStats(subs = []) {
+    const compacted = compactSubscriptions(subs);
+    return {
+      subscriptionCount: compacted.subscriptions.length,
+      itemCount: compacted.subscriptions.reduce((sum, sub) => sum + sub.items.length, 0),
+      cachedSubtitleCount: compacted.subscriptions.reduce((sum, sub) => sum + sub.items.filter((item) => item.subtitle?.markdown || item.subtitle?.plainText).length, 0),
+      evictedCount: compacted.evictedCount,
+      approximateBytes: new TextEncoder().encode(JSON.stringify(compacted.subscriptions)).length
+    };
+  }
+
+  async function saveSubscriptions(subs) {
+    const { subscriptions: sanitized } = compactSubscriptions(subs);
     await setStorageItem(STORAGE_KEYS.SUBSCRIPTIONS, sanitized);
     return true;
   }
@@ -307,6 +397,7 @@
       avatar: subData.avatar || '',
       targetId: String(subData.targetId || '').trim(),
       sourceUrl: subData.sourceUrl || '',
+      ownerId: String(subData.ownerId || '').trim(),
       subscribedAt: existingIndex >= 0 ? list[existingIndex].subscribedAt : now,
       lastCheckedAt: existingIndex >= 0 ? list[existingIndex].lastCheckedAt : 0,
       lastUpdatedItemId: existingIndex >= 0 ? list[existingIndex].lastUpdatedItemId : '',
@@ -355,14 +446,18 @@
   }
 
   async function getSettings() {
-    const data = await getStorageItem(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
-    return Object.assign({}, DEFAULT_SETTINGS, data);
+    let data = await getStorageItem(STORAGE_KEYS.SETTINGS, null, 'sync');
+    if (!data) {
+      data = await getStorageItem(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
+      await setStorageItem(STORAGE_KEYS.SETTINGS, data, 'sync').catch(() => {});
+    }
+    return normalizeSettings(data);
   }
 
   async function saveSettings(settingsPatch) {
     const current = await getSettings();
-    const updated = Object.assign({}, current, settingsPatch);
-    await setStorageItem(STORAGE_KEYS.SETTINGS, updated);
+    const updated = normalizeSettings(Object.assign({}, current, settingsPatch));
+    await setStorageItem(STORAGE_KEYS.SETTINGS, updated, 'sync');
     return updated;
   }
 
@@ -374,14 +469,43 @@
   async function recordCheckFailure() {
     const state = await getBackoffState();
     const failures = (state.failures || 0) + 1;
-    // Exponential backoff: 5m, 15m, 30m, max 60m
-    const delayMinutes = Math.min(60, Math.pow(2, failures) * 3);
+    const backoffMinutes = [5, 15, 30, 60];
+    const delayMinutes = backoffMinutes[Math.min(failures - 1, backoffMinutes.length - 1)];
     const nextCheckTime = Date.now() + delayMinutes * 60 * 1000;
     await setStorageItem(STORAGE_KEYS.BACKOFF, { failures, nextCheckTime });
   }
 
   async function resetCheckBackoff() {
     await setStorageItem(STORAGE_KEYS.BACKOFF, { failures: 0, nextCheckTime: 0 });
+  }
+
+  async function resolveYouTubeChannelId(sub, signal) {
+    const cachedChannelId = String(sub.resolvedTargetId || '').trim();
+    if (/^UC[\w-]{20,}$/i.test(cachedChannelId)) return cachedChannelId;
+    const targetId = String(sub.targetId || '').trim();
+    if (/^UC[\w-]{20,}$/i.test(targetId)) return targetId;
+
+    const channelPath = targetId.startsWith('@') ? targetId : `@${targetId}`;
+    const response = await BSE.Utils.fetchWithTimeout(
+      `https://www.youtube.com/${encodeURI(channelPath)}`,
+      { signal, credentials: 'omit' },
+      6000
+    );
+    if (!response.ok) throw new Error(`YouTube 频道解析失败 (HTTP ${response.status})`);
+    const html = await response.text();
+    const match = html.match(/"externalId"\s*:\s*"(UC[\w-]+)"/)
+      || html.match(/<meta\s+itemprop="channelId"\s+content="(UC[\w-]+)"/i);
+    if (!match) throw new Error('无法从频道页面解析 YouTube Channel ID');
+    return match[1];
+  }
+
+  function normalizeFetchedItems(items) {
+    const unique = new Map();
+    for (const item of items || []) {
+      if (!item?.id || unique.has(String(item.id))) continue;
+      unique.set(String(item.id), { ...item, id: String(item.id) });
+    }
+    return [...unique.values()].sort((a, b) => Number(b.pubdate || 0) - Number(a.pubdate || 0));
   }
 
   // === 6. Update Checking Implementation for Bilibili & YouTube ===
@@ -404,7 +528,7 @@
   }
 
   async function checkSubscriptionUpdates(sub, { signal } = {}) {
-    if (!sub || !sub.id) return { updated: false, newItems: [] };
+    if (!sub || !sub.id) return { checked: false, updated: false, newItems: [], error: '无效订阅数据' };
     const platform = sub.platform;
     const type = sub.type;
     let fetchedItems = [];
@@ -437,6 +561,9 @@
             );
             resJson = await wbiResp.json();
           }
+          if (resJson?.code !== 0) {
+            throw new Error(`Bilibili UP 主接口失败 (code ${resJson?.code ?? 'unknown'})`);
+          }
 
           const vlist = resJson?.data?.list?.vlist || [];
           fetchedItems = vlist.map((v) => ({
@@ -454,6 +581,7 @@
             // 多P分集连载检查
             const resp = await BSE.Utils.fetchWithTimeout(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(targetId)}`, { signal }, 6000);
             const resJson = await resp.json();
+            if (resJson?.code !== 0) throw new Error(`Bilibili 视频接口失败 (code ${resJson?.code ?? 'unknown'})`);
             const pages = resJson?.data?.pages || [];
             fetchedItems = pages.map((p) => ({
               id: `${targetId}:p${p.page}`,
@@ -466,12 +594,16 @@
           } else {
             // UGC 合集/系列增量检查
             const seasonId = encodeURIComponent(targetId);
-            const mid = encodeURIComponent(sub.author || '');
+            // ownerId avoids overloading the human-readable author field. Keep
+            // numeric legacy values compatible with subscriptions from v0.2.0.
+            const ownerId = sub.ownerId || (/^\d+$/.test(String(sub.author || '')) ? sub.author : '');
+            const mid = encodeURIComponent(ownerId);
             const url = mid
               ? `https://api.bilibili.com/x/polymer/web-space/seasons_archives_list?mid=${mid}&season_id=${seasonId}&page_num=1&page_size=20`
               : `https://api.bilibili.com/x/v2/medialist/resource/list?type=1&oid=${seasonId}&ps=20`;
             const resp = await BSE.Utils.fetchWithTimeout(url, { signal, credentials: 'include' }, 6000);
             const resJson = await resp.json();
+            if (resJson?.code !== 0) throw new Error(`Bilibili 合集接口失败 (code ${resJson?.code ?? 'unknown'})`);
             const archives = resJson?.data?.archives || resJson?.data?.media_list || [];
             fetchedItems = archives.map((v) => ({
               id: v.bvid || (v.bv_id ? v.bv_id : `aid:${v.id}`),
@@ -485,24 +617,40 @@
         }
       } else if (platform === BSE.PLATFORM.YOUTUBE) {
         // YouTube 官方无鉴权 RSS 订阅流查询
-        const channelId = encodeURIComponent(sub.targetId);
+        const resolvedChannelId = await resolveYouTubeChannelId(sub, signal);
+        const channelId = encodeURIComponent(resolvedChannelId);
         const rssUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
         const resp = await BSE.Utils.fetchWithTimeout(rssUrl, { signal }, 6000);
-        if (resp.ok) {
-          const xmlText = await resp.text();
-          fetchedItems = parseYouTubeRssFeed(xmlText);
-        }
+        if (!resp.ok) throw new Error(`YouTube RSS 请求失败 (HTTP ${resp.status})`);
+        const xmlText = await resp.text();
+        fetchedItems = parseYouTubeRssFeed(xmlText);
+        if (!fetchedItems.length) throw new Error('YouTube RSS 未返回有效视频');
+        if (sub.targetId !== resolvedChannelId) sub.resolvedTargetId = resolvedChannelId;
       }
     } catch (err) {
       if (err?.name === 'AbortError') throw err;
-      return { updated: false, newItems: [] };
+      return { checked: false, updated: false, newItems: [], error: err?.message || String(err) };
     }
 
+    fetchedItems = normalizeFetchedItems(fetchedItems);
     if (!fetchedItems.length) {
-      return { updated: false, newItems: [] };
+      sub.lastCheckedAt = Date.now();
+      return { checked: true, updated: false, newItems: [] };
     }
 
     const existingIds = new Set((sub.items || []).map((item) => item.id));
+    const newItems = fetchedItems.filter((item) => !existingIds.has(item.id));
+
+    // The first successful poll establishes a baseline. Existing feed entries
+    // predate the subscription and must not be reported as unread updates.
+    if (!sub.lastCheckedAt && existingIds.size === 0) {
+      sub.items = fetchedItems.slice(0, MAX_HISTORY_PER_SUB);
+      sub.lastCheckedAt = Date.now();
+      sub.lastUpdatedItemId = fetchedItems[0]?.id || '';
+      sub.lastUpdatedTitle = fetchedItems[0]?.title || '';
+      return { checked: true, initialized: true, updated: false, newItems: [] };
+    }
+
     if (newItems.length > 0) {
       // 自动在后台拉取新视频的字幕并缓存
       try {
@@ -511,7 +659,7 @@
           for (const item of newItems) {
             try {
               item.subtitle = { status: 'pending' };
-              const subRes = await fetchItemSubtitle(item, options);
+              const subRes = await fetchItemSubtitle(item, { signal });
               item.subtitle = subRes;
               item.hasSubtitle = subRes.status === 'ready';
             } catch {}
@@ -522,15 +670,15 @@
       // 合并并截断为最近 MAX_HISTORY_PER_SUB 条
       const merged = [...newItems, ...(sub.items || [])].slice(0, MAX_HISTORY_PER_SUB);
       sub.items = merged;
-      sub.unreadCount = (sub.unreadCount || 0) + newItems.length;
+      sub.unreadCount = Math.min(merged.length, (sub.unreadCount || 0) + newItems.length);
       sub.lastUpdatedItemId = newItems[0].id;
       sub.lastUpdatedTitle = newItems[0].title;
       sub.lastCheckedAt = Date.now();
-      return { updated: true, newItems };
+      return { checked: true, updated: true, newItems };
     }
 
     sub.lastCheckedAt = Date.now();
-    return { updated: false, newItems: [] };
+    return { checked: true, updated: false, newItems: [] };
   }
 
   function formatCuesToMarkdown(title, author, url, cues) {
@@ -721,16 +869,15 @@
     const list = await getSubscriptions();
     if (!list.length) return { totalUnread: 0, updatedSubs: [] };
 
-    let hasAnyUpdate = false;
     let hadNetworkSuccess = false;
     const updatedSubTitles = [];
 
     for (const sub of list) {
       try {
-        const { updated, newItems } = await checkSubscriptionUpdates(sub);
+        const { checked, updated, newItems } = await checkSubscriptionUpdates(sub);
+        if (!checked) continue;
         hadNetworkSuccess = true;
         if (updated) {
-          hasAnyUpdate = true;
           updatedSubTitles.push(`${sub.title}: ${newItems.map((i) => i.title).join('、')}`);
         }
       } catch {
@@ -740,12 +887,13 @@
     }
 
     if (hadNetworkSuccess) {
-      await recordCheckSuccess();
+      await resetCheckBackoff();
     } else {
       await recordCheckFailure();
     }
 
-    if (hasAnyUpdate) {
+    // Successful no-update checks and first-run baselines also mutate metadata.
+    if (hadNetworkSuccess) {
       await saveSubscriptions(list);
     }
 
@@ -771,6 +919,7 @@
         avatar: s.avatar,
         targetId: s.targetId,
         sourceUrl: s.sourceUrl,
+        ownerId: s.ownerId,
         subscribedAt: s.subscribedAt,
         autoExtractSubtitle: s.autoExtractSubtitle
       })),
@@ -805,6 +954,7 @@
         avatar: item.avatar || '',
         targetId: String(item.targetId || '').trim(),
         sourceUrl: item.sourceUrl || '',
+        ownerId: String(item.ownerId || '').trim(),
         subscribedAt: item.subscribedAt || Date.now(),
         lastCheckedAt: 0,
         lastUpdatedItemId: '',
@@ -840,6 +990,7 @@
     markAllAsRead,
     getSettings,
     saveSettings,
+    getStorageStats,
     checkSubscriptionUpdates,
     checkAllUpdates,
     fetchItemSubtitle,
