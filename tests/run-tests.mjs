@@ -202,6 +202,12 @@ const sidePanelCss = fs.readFileSync(path.join(root, 'sidepanel/sidepanel.css'),
 assert.match(backgroundSource, /BSE_FETCH_BILIBILI_RESOURCE/, '后台必须提供哔哩哔资源读取通道');
 assert.match(backgroundSource, /HOST_NOT_ALLOWED/, '后台代理必须拒绝非白名单域名');
 assert.match(backgroundSource, /INVALID_SENDER/, '后台代理必须验证请求页面来源');
+assert.match(backgroundSource, /sender\.id\s*!==\s*chrome\.runtime\.id/, '后台代理必须拒绝非本扩展消息来源');
+assert.match(backgroundSource, /sender\.url\.startsWith\(extensionRoot\)/, '后台代理仅应信任本扩展拥有的无标签页页面');
+assert.doesNotMatch(backgroundSource, /parsed\.hostname\.endsWith\('bilibili\.com'\)/, '发送者域名校验必须要求点分隔，不能信任 evilbilibili.com 一类后缀伪造域名');
+assert.match(backgroundSource, /BSE_FETCH_YOUTUBE_RESOURCE[\s\S]+?fetchYouTubeResource\(message\.url, sender\)/, 'YouTube 字幕代理必须传递发送者用于来源校验');
+assert.match(backgroundSource, /fetchYouTubeResource[\s\S]+?UNSAFE_REDIRECT[\s\S]+?BODY_TOO_LARGE/, 'YouTube 字幕代理必须限制重定向目标与响应体大小');
+assert.match(backgroundSource, /BSE_DOWNLOAD_MEDIA_FILE[\s\S]+?isTrustedSender\(sender, 'bilibili'\)/, '媒体下载通道必须验证消息来源');
 assert.match(bilibiliSource, /requestBackgroundJson\((?:track\.subtitleUrl|cleanUrl)/, '哔哩哔字幕正文必须走后台通道');
 assert.match(appSource, /revision/, '状态必须携带单调版本号');
 assert.match(appSource, /刷新失败，已保留现有字幕/, '刷新失败必须保留已成功字幕');
@@ -425,8 +431,6 @@ assert.equal(batchExportResult.stats.completed, 2, '批量导出必须在模拟�
 assert.ok(progressCount > 0, '批量导出必须持续触发进度回调');
 
 console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)、后台无人值守字幕抓取与一键 Markdown 复制、B站批量导出并发调度与 delay 延迟重试。');
-
-
 
 
 
