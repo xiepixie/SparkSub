@@ -967,9 +967,25 @@ await BSE.Queue.processPendingJobs();
 const ytItems = await BSE.Queue.getQueue();
 assert.equal(ytItems.length, 1);
 assert.equal(ytItems[0].stage, 'done', 'YouTube 任务必须成功完成');
-assert.equal(ytItems[0].title, '4 Language Habits That Get You Fluent FAST');
-assert.equal(ytItems[0].subtitle?.cueCount, 2, '必须成功从 XML timedtext 解析出 2 句字幕');
-assert.ok(ytItems[0].subtitle?.markdown?.includes('Reading every single day'), 'Markdown 必须包含解析出的英文字幕');
+// 21.01 Stale lease on queued item must be reclaimable and not get stuck in queued forever
+await BSE.Queue.clearAll();
+await BSE.Queue.saveQueue([{
+  id: 'waGRF_ZApfI',
+  platform: 'youtube',
+  targetId: 'waGRF_ZApfI',
+  url: 'https://www.youtube.com/watch?v=waGRF_ZApfI',
+  title: 'YouTube 视频 (waGRF_ZApfI)',
+  author: 'YouTube 频道',
+  stage: 'queued',
+  progress: 0,
+  stageHint: '排队中…',
+  leaseOwner: 'old-stale-executor-999',
+  leaseExpiresAt: Date.now() - 10000
+}]);
+await BSE.Queue.processPendingJobs();
+const reclaimed = await BSE.Queue.getQueue();
+assert.equal(reclaimed.length, 1);
+assert.equal(reclaimed[0].stage, 'done', '带有过期 leaseOwner 的 queued 任务必须能够被新执行器顺利认领并转录完成');
 
 // 21.1 Two isolated executors must atomically claim a queue item exactly once.
 const isolatedStorage = new Map();

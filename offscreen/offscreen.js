@@ -464,8 +464,11 @@
   // 监听本地存储变化，一旦检测到有待处理队列自动启动
   if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
     chrome.storage.onChanged.addListener((changes, areaName) => {
-      if (areaName === 'local' && changes?.bse_transcription_queue_v1) {
-        runQueueLoop();
+      if (areaName === 'local') {
+        const hasQueueChanges = Object.keys(changes || {}).some((k) => k.startsWith('bse_transcription_queue_v1'));
+        if (hasQueueChanges) {
+          runQueueLoop();
+        }
       }
     });
   }

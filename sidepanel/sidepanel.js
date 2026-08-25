@@ -707,6 +707,9 @@
         if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
           chrome.runtime.sendMessage({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
         }
+        if (BSE.Queue?.processPendingJobs) {
+          BSE.Queue.processPendingJobs().catch(() => {});
+        }
       }
     } catch (err) {
       console.warn('[SparkSub Queue] 读取队列异常:', err);
@@ -1152,6 +1155,17 @@
       loadAndRenderQueue();
     }
   });
+
+  if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName === 'local') {
+        const hasQueueChanges = Object.keys(changes || {}).some((k) => k.startsWith('bse_transcription_queue_v1'));
+        if (hasQueueChanges) {
+          loadAndRenderQueue();
+        }
+      }
+    });
+  }
 
   window.addEventListener('focus', () => {
     loadInitialState();

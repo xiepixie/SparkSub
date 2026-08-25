@@ -96,13 +96,12 @@ async function ensureOffscreenDocument() {
 }
 
 async function startQueueExecutor() {
-  const offscreenReady = await ensureOffscreenDocument();
-  if (!offscreenReady) {
-    // Explicit single-executor degradation: once Offscreen is unavailable or
-    // creation failed, consume locally and do not send further wake messages.
-    await BSE.Queue?.processPendingJobs?.();
+  ensureOffscreenDocument().catch(() => {});
+  if (BSE.Queue?.processPendingJobs) {
+    await BSE.Queue.processPendingJobs().catch((err) => {
+      console.warn('[SparkSub ServiceWorker] 队列执行异常:', err);
+    });
   }
-  return offscreenReady;
 }
 
 async function closeOffscreenDocument() {

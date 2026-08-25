@@ -474,6 +474,11 @@
           delete item.leaseExpiresAt;
           delete item.executionLease;
           changed.push(item);
+        } else if (item.stage === 'queued' && (item.leaseOwner || item.executionLease) && !isLeaseActive) {
+          delete item.leaseOwner;
+          delete item.leaseExpiresAt;
+          delete item.executionLease;
+          changed.push(item);
         }
       }
       if (changed.length) await writeItems(changed);
@@ -856,8 +861,7 @@
         {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11)'
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify(androidPayload),
           signal
@@ -935,6 +939,26 @@
           if (titleMatch) title = titleMatch[1].replace(/\s*-\s*YouTube$/i, '').trim();
         }
       } catch {}
+    }
+
+    // Normalize track URLs and synthesize Chinese auto-translation track if non-Chinese
+    if (captionTracks && captionTracks.length) {
+      captionTracks.forEach((t) => {
+        if (t.baseUrl && t.baseUrl.startsWith('//')) t.baseUrl = `https:${t.baseUrl}`;
+      });
+      const hasChinese = captionTracks.some((t) => /zh|cn|chinese|中/i.test(t.languageCode || t.name?.simpleText || ''));
+      if (!hasChinese && captionTracks[0]?.baseUrl) {
+        const base = captionTracks[0].baseUrl;
+        const transUrl = base.includes('tlang=') ? base : `${base}&tlang=zh-Hans`;
+        captionTracks.unshift({
+          baseUrl: transUrl,
+          languageCode: 'zh-Hans',
+          name: { simpleText: `${captionTracks[0].name?.simpleText || captionTracks[0].languageCode} → 中文（自动翻译）` },
+          vssId: '.zh-Hans',
+          isTranslatable: false,
+          isTranslated: true
+        });
+      }
     }
 
     return { title, author, cover, captionTracks };
@@ -1049,11 +1073,21 @@
         const claim = async () => {
           return serializeQueueMutation(async (queue) => {
             const claimed = [];
+            const now = Date.now();
             for (const candidate of candidates) {
               const item = queue.find((entry) => entry.id === candidate.id);
-              if (!item || item.stage !== 'queued' || (item.leaseOwner && item.leaseOwner !== EXECUTOR_ID)) continue;
+              if (!item || item.stage !== 'queued') continue;
+              const leaseExpiresAt = item.leaseExpiresAt ?? item.executionLease?.expiresAt ?? 0;
+              const isLockedByOther = item.leaseOwner && item.leaseOwner !== EXECUTOR_ID && leaseExpiresAt > now;
+              if (isLockedByOther) continue;
+
               item.leaseOwner = EXECUTOR_ID;
-              item.leaseExpiresAt = Date.now() + LEASE_DURATION_MS;
+              item.leaseExpiresAt = now + LEASE_DURATION_MS;
+              item.executionLease = {
+                owner: EXECUTOR_ID,
+                acquiredAt: now,
+                expiresAt: now + EXECUTION_LEASE_MS
+              };
               await writeItems([item], false);
               claimed.push(safeClone(item));
             }
@@ -1074,7 +1108,7 @@
             item.startedAt = Date.now();
             item.stageUpdatedAt = item.startedAt;
             item.executionLease = {
-              owner: `queue-${item.id}`,
+              owner: EXECUTOR_ID,
               acquiredAt: item.startedAt,
               expiresAt: item.startedAt + EXECUTION_LEASE_MS
             };
