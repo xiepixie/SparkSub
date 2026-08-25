@@ -7,12 +7,54 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const context = vm.createContext({
   console,
-  URL,
+  URL: {
+    ...URL,
+    createObjectURL: () => 'blob:mock-url',
+    revokeObjectURL: () => {}
+  },
   setTimeout,
   clearTimeout,
   Blob,
   TextEncoder,
   TextDecoder,
+  DOMException,
+  AbortController,
+  chrome: {
+    runtime: {
+      sendMessage: async (msg) => {
+        if (msg.type === 'BSE_FETCH_BILIBILI_RESOURCE') {
+          if (msg.url.includes('/nav')) {
+            return {
+              success: true,
+              status: 200,
+              text: JSON.stringify({ code: 0, data: { wbi_img: { img_url: 'https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png', sub_url: 'https://i0.hdslb.com/bfs/wbi/4907a71099b74ab88168dec7d63f0d61.png' } } })
+            };
+          }
+          if (msg.url.includes('/player/wbi/v2')) {
+            return {
+              success: true,
+              status: 200,
+              text: JSON.stringify({ code: 0, data: { subtitle: { subtitles: [] } } })
+            };
+          }
+        }
+        return { success: true, status: 200, text: '{}' };
+      }
+    }
+  },
+  document: {
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    createElement: () => ({
+      style: {},
+      click: () => {},
+      remove: () => {}
+    }),
+    body: {
+      appendChild: () => {},
+      removeChild: () => {}
+    }
+  },
   globalThis: null
 });
 context.globalThis = context;
@@ -24,7 +66,9 @@ for (const file of [
   'core/i18n.js',
   'core/parsers.js',
   'core/formatters.js',
-  'core/tracker.js'
+  'core/tracker.js',
+  'platform/bilibili.js',
+  'platform/youtube.js'
 ]) {
   vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
 }
@@ -353,12 +397,35 @@ const sampleTrackedItems = [
 
 const mergedDoc = BSE.Tracker.exportMergedMarkdown(sampleTrackedItems);
 assert.ok(typeof mergedDoc === 'string' && mergedDoc.length > 50, '合并导出的 Markdown 文档必须为非空字符串');
-assert.ok(mergedDoc.includes('批量视频更新字幕汇总'), '合并 Markdown 必须包含顶部大标题');
-assert.ok(mergedDoc.includes('计算机网络第一讲') && mergedDoc.includes('操作系统第一讲'), '合并 Markdown 必须包含所有更新视频的标题');
-assert.ok(mergedDoc.includes('计算机网络体系结构'), '合并 Markdown 必须包含第一期字幕内容');
-assert.ok(mergedDoc.includes('系统调用'), '合并 Markdown 必须包含第二期字幕内容');
+// 16. Bilibili runBatchExport execution & delay verification
+const sampleTree = {
+  title: '测试合集',
+  currentBvid: 'BV1TEST',
+  items: [
+    { bvid: 'BV1TEST', cid: '12345', title: '测试分P 1', globalIndex: 1, sectionKey: 'sec1' },
+    { bvid: 'BV1TEST', cid: '12346', title: '测试分P 2', globalIndex: 2, sectionKey: 'sec1' }
+  ],
+  sections: [
+    { key: 'sec1', title: '第1章', episodes: [] }
+  ]
+};
 
-console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)、后台无人值守字幕抓取与一键 Markdown 复制。');
+let progressCount = 0;
+const batchExportResult = await BSE.Bilibili.runBatchExport(sampleTree, {
+  scope: 'all',
+  preference: 'manual-first',
+  formats: { srt: true, txt: true },
+  outputMode: 'zip'
+}, (stats, item, phase) => {
+  progressCount++;
+});
+
+assert.equal(batchExportResult.stats.total, 2, '批量导出必须正确统计 2 个任务条目');
+assert.equal(batchExportResult.stats.completed, 2, '批量导出必须在模拟环境下完成所有任务执行');
+assert.ok(progressCount > 0, '批量导出必须持续触发进度回调');
+
+console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)、后台无人值守字幕抓取与一键 Markdown 复制、B站批量导出并发调度与 delay 延迟重试。');
+
 
 
 

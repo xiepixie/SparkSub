@@ -2,7 +2,7 @@
   'use strict';
 
   const BSE = globalThis.BSE;
-  const { fetchWithTimeout, getBvid, getBilibiliPage } = BSE.Utils;
+  const { delay, fetchWithTimeout, getBvid, getBilibiliPage } = BSE.Utils;
 
   function createError(code, message, hint = '') {
     const error = new Error(message);
