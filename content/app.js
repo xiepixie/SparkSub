@@ -34,6 +34,7 @@
   let panel = null;
   let generation = 0;
   let trackGeneration = 0;
+  let isLoadingTrack = false;
   let controller = null;
   let scheduleTicket = 0;
   let retryMediaKey = null;
@@ -349,6 +350,10 @@
         await BSE.Utils.delay(1500);
         if (options.mediaGeneration === generation && state.mediaKey === retryMediaKey) scheduleLoad('auto_retry', true);
       }
+    } finally {
+      if (ownGeneration === trackGeneration) {
+        isLoadingTrack = false;
+      }
     }
   }
 
@@ -507,10 +512,10 @@
         if (!isContextValid()) return false;
         if (message?.type === 'BSE_CAPTION_REQUEST_CAPTURED') {
           BSE.YouTube?.rememberRequest(message.request);
-          if (state.platform === BSE.PLATFORM.YOUTUBE && (state.status === 'loading' || !state.cues?.length)) {
+          if (state.platform === BSE.PLATFORM.YOUTUBE && (state.status === 'empty' || state.status === 'error') && !state.cues?.length && !isLoadingTrack) {
             const currentTrack = state.tracks.find((t) => String(t.id) === String(state.selectedTrackId)) || state.tracks[0];
             if (currentTrack) {
-              loadTrack(currentTrack, { force: true, mediaGeneration: generation });
+              loadTrack(currentTrack, { force: false, mediaGeneration: generation });
             }
           }
           sendResponse({ ok: true });
