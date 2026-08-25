@@ -874,17 +874,22 @@
     return sections.join('\n');
   }
 
-  async function checkAllUpdates() {
-    const backoff = await getBackoffState();
-    if (backoff.nextCheckTime && Date.now() < backoff.nextCheckTime) {
-      return { totalUnread: 0, updatedSubs: [] };
-    }
+  let checkAllUpdatesPromise = null;
 
+  async function runCheckAllUpdates() {
     const list = await getSubscriptions();
     if (!list.length) return { totalUnread: 0, updatedSubs: [] };
 
+    const backoff = await getBackoffState();
+    if (backoff.nextCheckTime && Date.now() < backoff.nextCheckTime) {
+      return {
+        totalUnread: list.reduce((sum, sub) => sum + (sub.unreadCount || 0), 0),
+        updatedSubs: []
+      };
+    }
+
     let hadNetworkSuccess = false;
-    const updatedSubTitles = [];
+    const updatedSubs = [];
 
     for (const sub of list) {
       try {
@@ -892,7 +897,11 @@
         if (!checked) continue;
         hadNetworkSuccess = true;
         if (updated) {
-          updatedSubTitles.push(`${sub.title}: ${newItems.map((i) => i.title).join('、')}`);
+          updatedSubs.push({
+            id: sub.id,
+            title: sub.title,
+            newItemCount: newItems.length
+          });
         }
       } catch {
         // Individual failure doesn't break the full loop
@@ -912,7 +921,17 @@
     }
 
     const totalUnread = list.reduce((sum, s) => sum + (s.unreadCount || 0), 0);
-    return { totalUnread, updatedSubs: updatedSubTitles };
+    return { totalUnread, updatedSubs };
+  }
+
+  function checkAllUpdates() {
+    // Alarm and manual refresh can arrive together. Sharing the in-flight task
+    // prevents duplicate network traffic and last-writer-wins storage races.
+    if (checkAllUpdatesPromise) return checkAllUpdatesPromise;
+    checkAllUpdatesPromise = runCheckAllUpdates().finally(() => {
+      checkAllUpdatesPromise = null;
+    });
+    return checkAllUpdatesPromise;
   }
 
   // === 7. JSON Configuration Import & Export ===

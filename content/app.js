@@ -18,6 +18,7 @@
     status: 'idle',
     message: '准备中…',
     revision: 0,
+    cueRevision: 0,
     isRefreshing: false,
     lastError: null,
     tracks: [],
@@ -221,7 +222,10 @@
     } else if (status === 'ready') {
       state.lastError = null;
       state.isRefreshing = false;
-      if (payload.cues) state.cues = payload.cues;
+      if (payload.cues) {
+        state.cues = payload.cues;
+        state.cueRevision += 1;
+      }
       if (payload.tracks) state.tracks = payload.tracks;
       if (payload.selectedTrackId) state.selectedTrackId = payload.selectedTrackId;
     } else if (status === 'loading') {
@@ -615,6 +619,10 @@
         return;
       }
       if (document.hidden || !state.cues.length) return;
+      // YouTube reuses the player video element for pre/mid-roll ads. Its ad
+      // timeline is unrelated to the video's cues, so keep the last real cue
+      // highlighted until playback returns instead of broadcasting index -1.
+      if (platform === BSE.PLATFORM.YOUTUBE && document.querySelector('.html5-video-player.ad-showing, ytd-player.ad-interrupting')) return;
       const video = document.querySelector('video');
       if (!video) return;
       const index = BSE.Utils.findActiveCueIndex(state.cues, video.currentTime, state.activeIndex);

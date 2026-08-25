@@ -45,6 +45,8 @@ export interface AppState {
   status: StatusKind;
   message: string;
   revision: number;
+  /** Increments only when a newly loaded subtitle body is committed. */
+  cueRevision: number;
   isRefreshing: boolean;
   lastError: ErrorFault | null;
   tracks: SubtitleTrack[];

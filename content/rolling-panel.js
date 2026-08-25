@@ -12,8 +12,6 @@
       this.collapsed = false;
       this.programmaticScrolling = false;
       this.programmaticScrollTimer = null;
-      this.autoResumeTimer = null;
-      this.autoResumeDelay = 4000;
       this.renderedMediaKey = null;
       this.platform = null;
       this.resizeObserver = new ResizeObserver(() => {
@@ -938,7 +936,6 @@
       });
       this.trackSelect.addEventListener('change', () => this.actions.selectTrack?.(this.trackSelect.value));
       this.followButton.addEventListener('click', () => {
-        clearTimeout(this.autoResumeTimer);
         this.following = true;
         this.updateFollowButton();
         this.scrollToActive(true);
@@ -1308,14 +1305,6 @@
           this.following = false;
           this.updateFollowButton();
         }
-        clearTimeout(this.autoResumeTimer);
-        this.autoResumeTimer = setTimeout(() => {
-          if (!this.following && this.state?.cues?.length && !this.collapsed) {
-            this.following = true;
-            this.updateFollowButton();
-            this.scrollToActive(false);
-          }
-        }, this.autoResumeDelay);
       };
 
       this.list.addEventListener('wheel', handleUserScrollInteraction, { passive: true });
@@ -1323,7 +1312,13 @@
       this.list.addEventListener('pointerdown', handleUserScrollInteraction, { passive: true });
       this.list.addEventListener('mousedown', handleUserScrollInteraction, { passive: true });
       this.list.addEventListener('scroll', () => {
-        if (this.programmaticScrolling) return;
+        if (this.programmaticScrolling) {
+          clearTimeout(this.programmaticScrollTimer);
+          this.programmaticScrollTimer = setTimeout(() => {
+            this.programmaticScrolling = false;
+          }, 160);
+          return;
+        }
         handleUserScrollInteraction();
       }, { passive: true });
       this.list.addEventListener('click', async (event) => {
@@ -1354,7 +1349,6 @@
         if (selection && selection.trim().length > 0) return;
         const cue = event.target.closest('.cue');
         if (!cue) return;
-        clearTimeout(this.autoResumeTimer);
         this.actions.seek?.(Number(cue.dataset.time));
         this.following = true;
         this.updateFollowButton();
@@ -2119,8 +2113,12 @@
         }
       }
 
-      if (hasCues && this.renderedMediaKey !== `${state.mediaKey}:${state.selectedTrackId}:${state.cues.length}`) {
-        this.renderedMediaKey = `${state.mediaKey}:${state.selectedTrackId}:${state.cues.length}`;
+      // Rebuild only for a newly committed subtitle body. A normal state revision
+      // may contain diagnostics only, while cueRevision also catches a refresh
+      // whose replacement happens to contain the same number of cues.
+      const cueRenderKey = `${state.mediaKey}:${state.selectedTrackId}:${state.cueRevision || 0}:${state.cues.length}`;
+      if (hasCues && this.renderedMediaKey !== cueRenderKey) {
+        this.renderedMediaKey = cueRenderKey;
         const paragraphs = this.buildParagraphs(state.cues);
         const fragment = document.createDocumentFragment();
         paragraphs.forEach((p) => {
