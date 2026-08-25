@@ -595,12 +595,21 @@
       target.error = undefined;
       target.progress = 0;
       target.stageHint = '重新排队中…';
+      delete target.leaseOwner;
+      delete target.leaseExpiresAt;
+      delete target.executionLease;
+      delete target.startedAt;
+      delete target.stageUpdatedAt;
+      delete target.completedAt;
+      target.stageArtifacts = {};
+      target.metaCache = {};
       await writeItems([target]);
       return target;
     });
     if (!item) return null;
     broadcastQueueUpdate();
     notifyOrchestrator();
+    processPendingJobs().catch(() => {});
     return item;
   }
 
@@ -1018,7 +1027,11 @@
         ];
         for (const targetUrl of candidateUrls) {
           try {
-            const resp = await BSE.Utils.fetchWithTimeout(targetUrl, { signal }, 8000);
+            const resp = await BSE.Utils.fetchWithTimeout(targetUrl, {
+              credentials: 'include',
+              cache: 'no-store',
+              signal
+            }, 8000);
             const text = await resp.text();
             if (text && !text.includes('<!DOCTYPE html>')) {
               const parsed = BSE.Parsers.parse(text);

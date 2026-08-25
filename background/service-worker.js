@@ -394,9 +394,7 @@ async function fetchYouTubeResource(url, sender) {
 
   const fetchUrl = String(url).startsWith('http://') ? url.replace(/^http:\/\//i, 'https://') : url;
   const headers = {
-    'Accept': '*/*',
-    'Referer': 'https://www.youtube.com/',
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'Accept': '*/*'
   };
 
   try {
