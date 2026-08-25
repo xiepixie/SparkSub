@@ -318,7 +318,7 @@
       }
 
       const upName = owner.name || state.authorInfo?.name || 'B站 UP 主';
-      const mid = String(owner.mid || state.authorInfo?.mid || state.authorInfo?.targetId || bvid || '');
+      const mid = String(owner.mid || state.authorInfo?.mid || state.authorInfo?.targetId || '');
       const avatar = owner.face || state.authorInfo?.avatar || '';
 
       let seasonId = null;
@@ -351,17 +351,12 @@
 
     // 3. YouTube 视频
     if (platform === 'youtube') {
-      let videoId = BSE.Utils.getYouTubeVideoId(url);
-      if (!videoId && state.mediaKey) {
-        const match = state.mediaKey.match(/yt:([a-zA-Z0-9_-]+)/i);
-        if (match) videoId = match[1];
-      }
       return {
         platform: 'youtube',
         type: 'channel',
         title: state.title || 'YouTube 视频',
         upName: state.authorInfo?.name || 'YouTube 频道',
-        targetId: state.authorInfo?.targetId || videoId || 'youtube_channel',
+        targetId: state.authorInfo?.targetId || '',
         avatar: state.authorInfo?.avatar || '',
         videoTitle: state.title || ''
       };
@@ -389,21 +384,26 @@
       }
     }
 
-    if (!currentAuthorInfo || !currentAuthorInfo.targetId) {
+    if (!currentAuthorInfo) {
       if (elements.trackerSubscribeUpBtn) elements.trackerSubscribeUpBtn.disabled = true;
       if (elements.trackerSubscribeSeasonBtn) elements.trackerSubscribeSeasonBtn.hidden = true;
       return;
     }
 
-    const upSubId = `${currentAuthorInfo.platform}:${currentAuthorInfo.type || 'up'}:${currentAuthorInfo.mid || currentAuthorInfo.targetId}`;
-    const isUpSubscribed = subscriptionsCache.some((s) => s.id === upSubId);
+    const authorTargetId = currentAuthorInfo.mid || currentAuthorInfo.targetId;
+    const upSubId = authorTargetId
+      ? `${currentAuthorInfo.platform}:${currentAuthorInfo.type || 'up'}:${authorTargetId}`
+      : '';
+    const isUpSubscribed = Boolean(upSubId && subscriptionsCache.some((s) => s.id === upSubId));
 
     if (elements.trackerSubscribeUpBtn) {
-      elements.trackerSubscribeUpBtn.disabled = false;
+      elements.trackerSubscribeUpBtn.disabled = !authorTargetId;
       elements.trackerSubscribeUpBtn.classList.toggle('subscribed', isUpSubscribed);
-      elements.trackerSubscribeUpBtn.textContent = isUpSubscribed
-        ? `✓ 已关注 ${currentAuthorInfo.upName || 'UP'}`
-        : `+ 关注 UP 主 (${currentAuthorInfo.upName || 'UP'})`;
+      elements.trackerSubscribeUpBtn.textContent = !authorTargetId
+        ? '暂未识别频道 / UP 主'
+        : (isUpSubscribed
+          ? `✓ 已关注 ${currentAuthorInfo.upName || 'UP'}`
+          : `+ 关注 UP 主 (${currentAuthorInfo.upName || 'UP'})`);
     }
 
     if (currentAuthorInfo.seasonId) {
@@ -857,7 +857,8 @@
         platform: currentAuthorInfo.platform,
         type: 'season',
         title: currentAuthorInfo.seasonTitle || currentAuthorInfo.title || '课程合集',
-        author: currentAuthorInfo.mid || '',
+        author: currentAuthorInfo.upName || currentAuthorInfo.title || '',
+        ownerId: currentAuthorInfo.mid || '',
         avatar: currentAuthorInfo.avatar,
         targetId: currentAuthorInfo.seasonId,
         sourceUrl: state?.url || ''

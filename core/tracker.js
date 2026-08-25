@@ -307,6 +307,7 @@
       avatar: subData.avatar || '',
       targetId: String(subData.targetId || '').trim(),
       sourceUrl: subData.sourceUrl || '',
+      ownerId: String(subData.ownerId || '').trim(),
       subscribedAt: existingIndex >= 0 ? list[existingIndex].subscribedAt : now,
       lastCheckedAt: existingIndex >= 0 ? list[existingIndex].lastCheckedAt : 0,
       lastUpdatedItemId: existingIndex >= 0 ? list[existingIndex].lastUpdatedItemId : '',
@@ -384,6 +385,35 @@
     await setStorageItem(STORAGE_KEYS.BACKOFF, { failures: 0, nextCheckTime: 0 });
   }
 
+  async function resolveYouTubeChannelId(sub, signal) {
+    const cachedChannelId = String(sub.resolvedTargetId || '').trim();
+    if (/^UC[\w-]{20,}$/i.test(cachedChannelId)) return cachedChannelId;
+    const targetId = String(sub.targetId || '').trim();
+    if (/^UC[\w-]{20,}$/i.test(targetId)) return targetId;
+
+    const channelPath = targetId.startsWith('@') ? targetId : `@${targetId}`;
+    const response = await BSE.Utils.fetchWithTimeout(
+      `https://www.youtube.com/${encodeURI(channelPath)}`,
+      { signal, credentials: 'omit' },
+      6000
+    );
+    if (!response.ok) throw new Error(`YouTube 频道解析失败 (HTTP ${response.status})`);
+    const html = await response.text();
+    const match = html.match(/"externalId"\s*:\s*"(UC[\w-]+)"/)
+      || html.match(/<meta\s+itemprop="channelId"\s+content="(UC[\w-]+)"/i);
+    if (!match) throw new Error('无法从频道页面解析 YouTube Channel ID');
+    return match[1];
+  }
+
+  function normalizeFetchedItems(items) {
+    const unique = new Map();
+    for (const item of items || []) {
+      if (!item?.id || unique.has(String(item.id))) continue;
+      unique.set(String(item.id), { ...item, id: String(item.id) });
+    }
+    return [...unique.values()].sort((a, b) => Number(b.pubdate || 0) - Number(a.pubdate || 0));
+  }
+
   // === 6. Update Checking Implementation for Bilibili & YouTube ===
   async function fetchBilibiliNavWbiKeys(signal) {
     try {
@@ -404,7 +434,7 @@
   }
 
   async function checkSubscriptionUpdates(sub, { signal } = {}) {
-    if (!sub || !sub.id) return { updated: false, newItems: [] };
+    if (!sub || !sub.id) return { checked: false, updated: false, newItems: [], error: '无效订阅数据' };
     const platform = sub.platform;
     const type = sub.type;
     let fetchedItems = [];
@@ -437,6 +467,9 @@
             );
             resJson = await wbiResp.json();
           }
+          if (resJson?.code !== 0) {
+            throw new Error(`Bilibili UP 主接口失败 (code ${resJson?.code ?? 'unknown'})`);
+          }
 
           const vlist = resJson?.data?.list?.vlist || [];
           fetchedItems = vlist.map((v) => ({
@@ -454,6 +487,7 @@
             // 多P分集连载检查
             const resp = await BSE.Utils.fetchWithTimeout(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(targetId)}`, { signal }, 6000);
             const resJson = await resp.json();
+            if (resJson?.code !== 0) throw new Error(`Bilibili 视频接口失败 (code ${resJson?.code ?? 'unknown'})`);
             const pages = resJson?.data?.pages || [];
             fetchedItems = pages.map((p) => ({
               id: `${targetId}:p${p.page}`,
@@ -466,12 +500,16 @@
           } else {
             // UGC 合集/系列增量检查
             const seasonId = encodeURIComponent(targetId);
-            const mid = encodeURIComponent(sub.author || '');
+            // ownerId avoids overloading the human-readable author field. Keep
+            // numeric legacy values compatible with subscriptions from v0.2.0.
+            const ownerId = sub.ownerId || (/^\d+$/.test(String(sub.author || '')) ? sub.author : '');
+            const mid = encodeURIComponent(ownerId);
             const url = mid
               ? `https://api.bilibili.com/x/polymer/web-space/seasons_archives_list?mid=${mid}&season_id=${seasonId}&page_num=1&page_size=20`
               : `https://api.bilibili.com/x/v2/medialist/resource/list?type=1&oid=${seasonId}&ps=20`;
             const resp = await BSE.Utils.fetchWithTimeout(url, { signal, credentials: 'include' }, 6000);
             const resJson = await resp.json();
+            if (resJson?.code !== 0) throw new Error(`Bilibili 合集接口失败 (code ${resJson?.code ?? 'unknown'})`);
             const archives = resJson?.data?.archives || resJson?.data?.media_list || [];
             fetchedItems = archives.map((v) => ({
               id: v.bvid || (v.bv_id ? v.bv_id : `aid:${v.id}`),
@@ -485,24 +523,40 @@
         }
       } else if (platform === BSE.PLATFORM.YOUTUBE) {
         // YouTube 官方无鉴权 RSS 订阅流查询
-        const channelId = encodeURIComponent(sub.targetId);
+        const resolvedChannelId = await resolveYouTubeChannelId(sub, signal);
+        const channelId = encodeURIComponent(resolvedChannelId);
         const rssUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
         const resp = await BSE.Utils.fetchWithTimeout(rssUrl, { signal }, 6000);
-        if (resp.ok) {
-          const xmlText = await resp.text();
-          fetchedItems = parseYouTubeRssFeed(xmlText);
-        }
+        if (!resp.ok) throw new Error(`YouTube RSS 请求失败 (HTTP ${resp.status})`);
+        const xmlText = await resp.text();
+        fetchedItems = parseYouTubeRssFeed(xmlText);
+        if (!fetchedItems.length) throw new Error('YouTube RSS 未返回有效视频');
+        if (sub.targetId !== resolvedChannelId) sub.resolvedTargetId = resolvedChannelId;
       }
     } catch (err) {
       if (err?.name === 'AbortError') throw err;
-      return { updated: false, newItems: [] };
+      return { checked: false, updated: false, newItems: [], error: err?.message || String(err) };
     }
 
+    fetchedItems = normalizeFetchedItems(fetchedItems);
     if (!fetchedItems.length) {
-      return { updated: false, newItems: [] };
+      sub.lastCheckedAt = Date.now();
+      return { checked: true, updated: false, newItems: [] };
     }
 
     const existingIds = new Set((sub.items || []).map((item) => item.id));
+    const newItems = fetchedItems.filter((item) => !existingIds.has(item.id));
+
+    // The first successful poll establishes a baseline. Existing feed entries
+    // predate the subscription and must not be reported as unread updates.
+    if (!sub.lastCheckedAt && existingIds.size === 0) {
+      sub.items = fetchedItems.slice(0, MAX_HISTORY_PER_SUB);
+      sub.lastCheckedAt = Date.now();
+      sub.lastUpdatedItemId = fetchedItems[0]?.id || '';
+      sub.lastUpdatedTitle = fetchedItems[0]?.title || '';
+      return { checked: true, initialized: true, updated: false, newItems: [] };
+    }
+
     if (newItems.length > 0) {
       // 自动在后台拉取新视频的字幕并缓存
       try {
@@ -511,7 +565,7 @@
           for (const item of newItems) {
             try {
               item.subtitle = { status: 'pending' };
-              const subRes = await fetchItemSubtitle(item, options);
+              const subRes = await fetchItemSubtitle(item, { signal });
               item.subtitle = subRes;
               item.hasSubtitle = subRes.status === 'ready';
             } catch {}
@@ -522,15 +576,15 @@
       // 合并并截断为最近 MAX_HISTORY_PER_SUB 条
       const merged = [...newItems, ...(sub.items || [])].slice(0, MAX_HISTORY_PER_SUB);
       sub.items = merged;
-      sub.unreadCount = (sub.unreadCount || 0) + newItems.length;
+      sub.unreadCount = Math.min(merged.length, (sub.unreadCount || 0) + newItems.length);
       sub.lastUpdatedItemId = newItems[0].id;
       sub.lastUpdatedTitle = newItems[0].title;
       sub.lastCheckedAt = Date.now();
-      return { updated: true, newItems };
+      return { checked: true, updated: true, newItems };
     }
 
     sub.lastCheckedAt = Date.now();
-    return { updated: false, newItems: [] };
+    return { checked: true, updated: false, newItems: [] };
   }
 
   function formatCuesToMarkdown(title, author, url, cues) {
@@ -721,16 +775,15 @@
     const list = await getSubscriptions();
     if (!list.length) return { totalUnread: 0, updatedSubs: [] };
 
-    let hasAnyUpdate = false;
     let hadNetworkSuccess = false;
     const updatedSubTitles = [];
 
     for (const sub of list) {
       try {
-        const { updated, newItems } = await checkSubscriptionUpdates(sub);
+        const { checked, updated, newItems } = await checkSubscriptionUpdates(sub);
+        if (!checked) continue;
         hadNetworkSuccess = true;
         if (updated) {
-          hasAnyUpdate = true;
           updatedSubTitles.push(`${sub.title}: ${newItems.map((i) => i.title).join('、')}`);
         }
       } catch {
@@ -740,12 +793,13 @@
     }
 
     if (hadNetworkSuccess) {
-      await recordCheckSuccess();
+      await resetCheckBackoff();
     } else {
       await recordCheckFailure();
     }
 
-    if (hasAnyUpdate) {
+    // Successful no-update checks and first-run baselines also mutate metadata.
+    if (hadNetworkSuccess) {
       await saveSubscriptions(list);
     }
 
@@ -771,6 +825,7 @@
         avatar: s.avatar,
         targetId: s.targetId,
         sourceUrl: s.sourceUrl,
+        ownerId: s.ownerId,
         subscribedAt: s.subscribedAt,
         autoExtractSubtitle: s.autoExtractSubtitle
       })),
@@ -805,6 +860,7 @@
         avatar: item.avatar || '',
         targetId: String(item.targetId || '').trim(),
         sourceUrl: item.sourceUrl || '',
+        ownerId: String(item.ownerId || '').trim(),
         subscribedAt: item.subscribedAt || Date.now(),
         lastCheckedAt: 0,
         lastUpdatedItemId: '',

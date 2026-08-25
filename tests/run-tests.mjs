@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+let mockFetch = async () => { throw new Error('Unexpected network request in test'); };
 const context = vm.createContext({
   console,
   URL: {
@@ -19,6 +20,7 @@ const context = vm.createContext({
   TextDecoder,
   DOMException,
   AbortController,
+  fetch: (...args) => mockFetch(...args),
   chrome: {
     runtime: {
       sendMessage: async (msg) => {
@@ -198,6 +200,7 @@ const bilibiliSource = fs.readFileSync(path.join(root, 'platform/bilibili.js'), 
 const appSource = fs.readFileSync(path.join(root, 'content/app.js'), 'utf8');
 const rollingPanelSource = fs.readFileSync(path.join(root, 'content/rolling-panel.js'), 'utf8');
 const sidePanelCss = fs.readFileSync(path.join(root, 'sidepanel/sidepanel.css'), 'utf8');
+const sidePanelSource = fs.readFileSync(path.join(root, 'sidepanel/sidepanel.js'), 'utf8');
 
 assert.match(backgroundSource, /BSE_FETCH_BILIBILI_RESOURCE/, '后台必须提供哔哩哔资源读取通道');
 assert.match(backgroundSource, /HOST_NOT_ALLOWED/, '后台代理必须拒绝非白名单域名');
@@ -213,6 +216,8 @@ assert.match(appSource, /revision/, '状态必须携带单调版本号');
 assert.match(appSource, /刷新失败，已保留现有字幕/, '刷新失败必须保留已成功字幕');
 assert.match(rollingPanelSource, /ResizeObserver/, '滚动面板必须监听播放器尺寸变化');
 assert.match(rollingPanelSource, /\[hidden\]\s*\{\s*display\s*:\s*none\s*!important/, '滚动面板必须可靠隐藏旧状态 DOM');
+assert.doesNotMatch(sidePanelSource, /targetId:\s*state\.authorInfo\?\.targetId\s*\|\|\s*videoId/, 'YouTube 视频 ID 不得冒充 Channel ID 创建无效订阅');
+assert.doesNotMatch(sidePanelSource, /state\.authorInfo\?\.targetId\s*\|\|\s*bvid/, 'Bilibili BV 号不得冒充 MID 创建无效 UP 主订阅');
 // 8. TypeScript & Typesystem Integrity (Scheme A)
 assert.ok(fs.existsSync(path.join(root, 'types/bse.d.ts')), '必须提供核心类型定义 types/bse.d.ts');
 assert.ok(fs.existsSync(path.join(root, 'types/chrome.d.ts')), '必须提供 Chrome API 声明 types/chrome.d.ts');
@@ -335,6 +340,94 @@ assert.equal(parsedRss[0].author, 'Rick Astley', '作者名称提取必须准确
 assert.equal(parsedRss[1].id, 'testVideo123', '第二条视频 videoId 提取必须准确');
 assert.equal(parsedRss[1].title, 'Test Video Title <2>', '尖括号转义必须被正确还原');
 
+// Subscription polling must establish a baseline before reporting updates.
+const youtubeSub = {
+  id: 'youtube:channel:UC1234567890123456789012',
+  platform: 'youtube',
+  type: 'channel',
+  title: '测试频道',
+  targetId: 'UC1234567890123456789012',
+  lastCheckedAt: 0,
+  unreadCount: 0,
+  items: []
+};
+mockFetch = async (url) => {
+  assert.match(String(url), /feeds\/videos\.xml\?channel_id=UC1234567890123456789012/);
+  return { ok: true, status: 200, text: async () => sampleRssXml };
+};
+const youtubeBaseline = await BSE.Tracker.checkSubscriptionUpdates(youtubeSub);
+assert.equal(youtubeBaseline.initialized, true, 'YouTube 首次巡检必须建立基线');
+assert.equal(youtubeSub.unreadCount, 0, 'YouTube RSS 中订阅前的历史视频不得计为未读');
+assert.equal(youtubeSub.items.length, 2, 'YouTube 基线应缓存 RSS 历史条目');
+
+const newYoutubeEntry = `<entry><yt:videoId>newVideo456</yt:videoId><title>New Upload</title><published>2026-08-25T00:00:00Z</published><author><name>Channel Name</name></author></entry>`;
+mockFetch = async () => ({
+  ok: true,
+  status: 200,
+  text: async () => sampleRssXml.replace('</feed>', `${newYoutubeEntry}</feed>`)
+});
+const youtubeUpdate = await BSE.Tracker.checkSubscriptionUpdates(youtubeSub);
+assert.equal(youtubeUpdate.updated, true, 'YouTube 后续巡检必须识别新视频');
+assert.deepEqual(Array.from(youtubeUpdate.newItems, (item) => item.id), ['newVideo456']);
+assert.equal(youtubeSub.unreadCount, 1, 'YouTube 新视频必须准确增加未读数');
+
+const handleSub = { ...youtubeSub, id: 'youtube:channel:testhandle', targetId: 'testhandle', items: [], lastCheckedAt: 0, unreadCount: 0 };
+let handleResolved = false;
+mockFetch = async (url) => {
+  if (String(url).includes('/@testhandle')) {
+    handleResolved = true;
+    return { ok: true, status: 200, text: async () => '{"externalId":"UCabcdefghijklmnopqrstuv"}' };
+  }
+  assert.match(String(url), /channel_id=UCabcdefghijklmnopqrstuv/);
+  return { ok: true, status: 200, text: async () => sampleRssXml };
+};
+await BSE.Tracker.checkSubscriptionUpdates(handleSub);
+assert.equal(handleResolved, true, 'YouTube @handle 必须先解析为稳定 Channel ID');
+assert.equal(handleSub.resolvedTargetId, 'UCabcdefghijklmnopqrstuv');
+
+const bilibiliSub = {
+  id: 'bilibili:up:12345',
+  platform: 'bilibili',
+  type: 'up',
+  title: '测试 UP 主',
+  targetId: '12345',
+  lastCheckedAt: 0,
+  unreadCount: 0,
+  items: []
+};
+let bilibiliVideos = [{ bvid: 'BV1BASELINE1', title: '已有视频', created: 100, author: '测试 UP 主' }];
+mockFetch = async (url) => {
+  assert.match(String(url), /x\/space\/arc\/search/);
+  return { ok: true, status: 200, json: async () => ({ code: 0, data: { list: { vlist: bilibiliVideos } } }) };
+};
+const bilibiliBaseline = await BSE.Tracker.checkSubscriptionUpdates(bilibiliSub);
+assert.equal(bilibiliBaseline.initialized, true, 'Bilibili 首次巡检必须建立基线');
+assert.equal(bilibiliSub.unreadCount, 0, 'Bilibili 订阅前的历史视频不得计为未读');
+bilibiliVideos = [{ bvid: 'BV1NEWVIDEO1', title: '新投稿', created: 200, author: '测试 UP 主' }, ...bilibiliVideos];
+const bilibiliUpdate = await BSE.Tracker.checkSubscriptionUpdates(bilibiliSub);
+assert.equal(bilibiliUpdate.updated, true, 'Bilibili 后续巡检必须识别新投稿');
+assert.deepEqual(Array.from(bilibiliUpdate.newItems, (item) => item.id), ['BV1NEWVIDEO1']);
+assert.equal(bilibiliSub.unreadCount, 1, 'Bilibili 新投稿必须准确增加未读数');
+
+mockFetch = async () => { throw new Error('network unavailable'); };
+const failedCheck = await BSE.Tracker.checkSubscriptionUpdates({ ...youtubeSub, targetId: 'UC1234567890123456789012' });
+assert.equal(failedCheck.checked, false, '网络失败不得伪装成成功的无更新巡检');
+
+await BSE.Tracker.addSubscription({
+  id: 'youtube:channel:UC1234567890123456789012',
+  platform: 'youtube',
+  type: 'channel',
+  title: '巡检持久化测试',
+  targetId: 'UC1234567890123456789012'
+});
+mockFetch = async () => ({ ok: true, status: 200, text: async () => sampleRssXml });
+const allCheck = await BSE.Tracker.checkAllUpdates();
+assert.equal(allCheck.totalUnread, 0, '首次全量巡检不应制造历史未读');
+const persistedBaseline = await BSE.Tracker.getSubscription('youtube:channel:UC1234567890123456789012');
+assert.ok(persistedBaseline.lastCheckedAt > 0, '无新视频的成功巡检也必须持久化 lastCheckedAt');
+assert.equal(persistedBaseline.items.length, 2, '全量巡检必须持久化首次基线');
+await BSE.Tracker.removeSubscription('youtube:channel:UC1234567890123456789012');
+
 assert.ok(manifest.permissions.includes('alarms'), 'manifest.json 必须申请 alarms 权限');
 assert.ok(manifest.permissions.includes('notifications'), 'manifest.json 必须申请 notifications 权限');
 assert.ok(fs.existsSync(path.join(root, 'core/tracker.js')), '必须存在 core/tracker.js 文件');
@@ -431,7 +524,3 @@ assert.equal(batchExportResult.stats.completed, 2, '批量导出必须在模拟�
 assert.ok(progressCount > 0, '批量导出必须持续触发进度回调');
 
 console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)、后台无人值守字幕抓取与一键 Markdown 复制、B站批量导出并发调度与 delay 延迟重试。');
-
-
-
-

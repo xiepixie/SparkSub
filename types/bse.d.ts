@@ -284,6 +284,8 @@ export interface TrackedSubscription {
   avatar?: string;
   targetId: string;
   sourceUrl?: string;
+  ownerId?: string;
+  resolvedTargetId?: string;
   subscribedAt: number;
   lastCheckedAt: number;
   lastUpdatedItemId?: string;
@@ -309,7 +311,7 @@ export interface BSETrackerNamespace {
   markAllAsRead(): Promise<void>;
   getSettings(): Promise<TrackerSettings>;
   saveSettings(settings: Partial<TrackerSettings>): Promise<TrackerSettings>;
-  checkSubscriptionUpdates(sub: TrackedSubscription, options?: { signal?: AbortSignal }): Promise<{ updated: boolean; newItems: TrackedItem[] }>;
+  checkSubscriptionUpdates(sub: TrackedSubscription, options?: { signal?: AbortSignal }): Promise<{ checked: boolean; initialized?: boolean; updated: boolean; newItems: TrackedItem[]; error?: string }>;
   checkAllUpdates(): Promise<{ totalUnread: number; updatedSubs: string[] }>;
   fetchItemSubtitle(item: TrackedItem, options?: { signal?: AbortSignal }): Promise<TrackedItemSubtitle>;
   fetchSubtitleForItem(subscriptionId: string, itemId: string): Promise<TrackedItemSubtitle>;
