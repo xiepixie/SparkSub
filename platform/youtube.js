@@ -268,12 +268,68 @@
       : `【原生字幕轨】目标语言: ${track.lanDoc || track.lan} · 匹配到 ${existingCaptures.length} 条原生请求 (已隔离翻译轨)`);
 
     // 1. 优先重放已捕获的原生/翻译请求（最完整，带 session 与 pot）
-    for (const captured of existingCaptures) {
-      const cues = await fetchAndParse(captured.url, captured.fmt, signal, diagnostic, '原生请求重放');
-      if (cues.length) return cues;
+    if (isTrans) {
+      for (const captured of existingCaptures) {
+        const cues = await fetchAndParse(captured.url, captured.fmt, signal, diagnostic, '原生翻译重放');
+        if (cues.length) return cues;
+      }
+      // 从已捕获的可用原生请求（携带了合法 pot/session）中派生 tlang 实时拉取官方机翻
+      const nativeCaptures = Array.from(requests.values()).filter((item) => item.videoId === getYouTubeVideoId() && !item.tlang);
+      for (const nativeReq of nativeCaptures) {
+        try {
+          const transUrl = new URL(nativeReq.url);
+          transUrl.searchParams.set('tlang', track.tlang || track.lan || 'zh-Hans');
+          const cues = await fetchAndParse(transUrl.toString(), nativeReq.fmt || 'json3', signal, diagnostic, '原生派生翻译重放');
+          if (cues.length) return cues;
+        } catch {}
+      }
+    } else {
+      for (const captured of existingCaptures) {
+        const cues = await fetchAndParse(captured.url, captured.fmt, signal, diagnostic, '原生请求重放');
+        if (cues.length) return cues;
+      }
     }
 
-    // 2. 并行探测快速直链 (json3 与 raw url)
+    // 2. 驱动播放器切换轨道与翻译语言（触发原生带 PoToken 的官方字幕拉取）
+    try {
+      await bridgeRequest('SELECT_TRACK', track, 2000);
+      diagnostic?.('播放器', `已请求切换到 ${track.lanDoc || track.lan} 轨道`);
+    } catch (error) {
+      diagnostic?.('播放器', `切换轨道提示：${error.message}`);
+    }
+
+    // 3. 短轮询等待新拦截请求 (最高 2.5s)
+    const deadline = Date.now() + 2500;
+    const triedUrls = new Set();
+    while (Date.now() < deadline) {
+      await hydrateCapturedRequests();
+      const candidates = matchingRequests(track).filter((item) => !triedUrls.has(item.url));
+      if (candidates.length) {
+        for (const captured of candidates) {
+          triedUrls.add(captured.url);
+          const cues = await fetchAndParse(captured.url, captured.fmt, signal, diagnostic, '新拦截请求');
+          if (cues.length) return cues;
+        }
+      }
+      // 如果是翻译轨，再次尝试从最新捕获的原生请求中派生 tlang
+      if (isTrans) {
+        const latestNatives = Array.from(requests.values()).filter((item) => item.videoId === getYouTubeVideoId() && !item.tlang);
+        for (const nativeReq of latestNatives) {
+          try {
+            const transUrl = new URL(nativeReq.url);
+            transUrl.searchParams.set('tlang', track.tlang || track.lan || 'zh-Hans');
+            if (!triedUrls.has(transUrl.toString())) {
+              triedUrls.add(transUrl.toString());
+              const cues = await fetchAndParse(transUrl.toString(), nativeReq.fmt || 'json3', signal, diagnostic, '实时派生翻译重放');
+              if (cues.length) return cues;
+            }
+          } catch {}
+        }
+      }
+      await delay(100, signal);
+    }
+
+    // 4. 并行探测快速直链 (json3 与 raw url)
     if (track.subtitleUrl) {
       const probeUrls = [
         { url: buildFormatUrl(track.subtitleUrl, 'json3'), fmt: 'json3' },
@@ -292,30 +348,6 @@
         );
         if (directCues && directCues.length) return directCues;
       } catch {}
-    }
-
-    // 3. 驱动播放器切换轨道与翻译语言（触发原生带 PoToken 的官方字幕拉取）
-    try {
-      await bridgeRequest('SELECT_TRACK', track, 2000);
-      diagnostic?.('播放器', `已请求切换到 ${track.lanDoc || track.lan} 轨道`);
-    } catch (error) {
-      diagnostic?.('播放器', `切换轨道提示：${error.message}`);
-    }
-
-    // 4. 短轮询等待新拦截请求 (最高 2.5s)
-    const deadline = Date.now() + 2500;
-    const triedUrls = new Set();
-    while (Date.now() < deadline) {
-      await hydrateCapturedRequests();
-      const candidates = matchingRequests(track).filter((item) => !triedUrls.has(item.url));
-      if (candidates.length) {
-        for (const captured of candidates) {
-          triedUrls.add(captured.url);
-          const cues = await fetchAndParse(captured.url, captured.fmt, signal, diagnostic, '新拦截请求');
-          if (cues.length) return cues;
-        }
-      }
-      await delay(100, signal);
     }
 
     // 5. 转录面板回退
