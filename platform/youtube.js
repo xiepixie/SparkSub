@@ -126,6 +126,7 @@
           tracks.push({
             id: `${baseTrack.id}:tlang:zh-Hans`,
             lan: 'zh-Hans',
+            sourceLan: baseTrack.lan,
             lanDoc: `${baseTrack.lanDoc || baseTrack.lan} → 中文（自动翻译）`,
             subtitleUrl: transUrl.toString(),
             isAuto: true,
@@ -273,48 +274,48 @@
     }
 
     // 2. 并行探测快速直链 (json3 与 raw url)
-    const probeUrls = [
-      { url: buildFormatUrl(track.subtitleUrl, 'json3'), fmt: 'json3' },
-      { url: track.subtitleUrl, fmt: 'srv3' },
-      { url: buildFormatUrl(track.subtitleUrl, 'vtt'), fmt: 'vtt' }
-    ];
+    if (track.subtitleUrl) {
+      const probeUrls = [
+        { url: buildFormatUrl(track.subtitleUrl, 'json3'), fmt: 'json3' },
+        { url: track.subtitleUrl, fmt: 'srv3' },
+        { url: buildFormatUrl(track.subtitleUrl, 'vtt'), fmt: 'vtt' }
+      ];
 
-    try {
-      const directCues = await Promise.any(
-        probeUrls.map(({ url, fmt }) =>
-          fetchAndParse(url, fmt, signal, diagnostic, `直连探测(${fmt})`).then((res) => {
-            if (res && res.length) return res;
-            throw new Error('empty');
-          })
-        )
-      );
-      if (directCues && directCues.length) return directCues;
-    } catch {}
-
-    // 3. 原生轨道：请求播放器切换轨道触发原生字幕拉取
-    if (!isTrans) {
       try {
-        await bridgeRequest('SELECT_TRACK', track, 2000);
-        diagnostic?.('播放器', `已请求切换到 ${track.lanDoc || track.lan} 轨道`);
-      } catch (error) {
-        diagnostic?.('播放器', `切换轨道提示：${error.message}`);
-      }
+        const directCues = await Promise.any(
+          probeUrls.map(({ url, fmt }) =>
+            fetchAndParse(url, fmt, signal, diagnostic, `直连探测(${fmt})`).then((res) => {
+              if (res && res.length) return res;
+              throw new Error('empty');
+            })
+          )
+        );
+        if (directCues && directCues.length) return directCues;
+      } catch {}
+    }
 
-      // 4. 短轮询等待新拦截请求 (最高 1.8s)
-      const deadline = Date.now() + 1800;
-      const triedUrls = new Set();
-      while (Date.now() < deadline) {
-        await hydrateCapturedRequests();
-        const candidates = matchingRequests(track).filter((item) => !triedUrls.has(item.url));
-        if (candidates.length) {
-          for (const captured of candidates) {
-            triedUrls.add(captured.url);
-            const cues = await fetchAndParse(captured.url, captured.fmt, signal, diagnostic, '新拦截请求');
-            if (cues.length) return cues;
-          }
+    // 3. 驱动播放器切换轨道与翻译语言（触发原生带 PoToken 的官方字幕拉取）
+    try {
+      await bridgeRequest('SELECT_TRACK', track, 2000);
+      diagnostic?.('播放器', `已请求切换到 ${track.lanDoc || track.lan} 轨道`);
+    } catch (error) {
+      diagnostic?.('播放器', `切换轨道提示：${error.message}`);
+    }
+
+    // 4. 短轮询等待新拦截请求 (最高 2.5s)
+    const deadline = Date.now() + 2500;
+    const triedUrls = new Set();
+    while (Date.now() < deadline) {
+      await hydrateCapturedRequests();
+      const candidates = matchingRequests(track).filter((item) => !triedUrls.has(item.url));
+      if (candidates.length) {
+        for (const captured of candidates) {
+          triedUrls.add(captured.url);
+          const cues = await fetchAndParse(captured.url, captured.fmt, signal, diagnostic, '新拦截请求');
+          if (cues.length) return cues;
         }
-        await delay(100, signal);
       }
+      await delay(100, signal);
     }
 
     // 5. 转录面板回退

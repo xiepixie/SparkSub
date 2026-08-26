@@ -111,12 +111,29 @@
     const player = getPlayer();
     if (!player) throw new Error('播放器尚未就绪');
     const rawTracks = player.getOption?.('captions', 'tracklist') || [];
-    const selected = rawTracks.find((track) => (
-      (track.vssId && track.vssId === payload.id)
-      || (track.languageCode === payload.lan && Boolean(track.kind === 'asr') === Boolean(payload.isAuto))
-    ));
-    if (selected) player.setOption?.('captions', 'track', selected);
-    else if (payload.lan) player.setOption?.('captions', 'track', { languageCode: payload.lan });
+
+    const isTrans = Boolean(payload.tlang || payload.isTranslated);
+    if (isTrans) {
+      const baseTrackId = payload.id ? payload.id.split(':tlang:')[0] : '';
+      const baseTrack = rawTracks.find((t) => (baseTrackId && t.vssId === baseTrackId))
+        || rawTracks.find((t) => t.languageCode === (payload.sourceLan || 'en'))
+        || rawTracks[0];
+      if (baseTrack) {
+        player.setOption?.('captions', 'track', baseTrack);
+      }
+      player.setOption?.('captions', 'translationLanguage', {
+        languageCode: payload.tlang || payload.lan || 'zh-Hans',
+        languageName: '中文（简体）'
+      });
+    } else {
+      player.setOption?.('captions', 'translationLanguage', null);
+      const selected = rawTracks.find((track) => (
+        (track.vssId && track.vssId === payload.id)
+        || (track.languageCode === payload.lan && Boolean(track.kind === 'asr') === Boolean(payload.isAuto))
+      ));
+      if (selected) player.setOption?.('captions', 'track', selected);
+      else if (payload.lan) player.setOption?.('captions', 'track', { languageCode: payload.lan });
+    }
 
     const button = document.querySelector('.ytp-subtitles-button');
     if (button?.getAttribute('aria-pressed') !== 'true') button?.click();
