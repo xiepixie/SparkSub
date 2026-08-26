@@ -763,10 +763,10 @@
    *   backupUrls: string[],
    *   bandwidth: number,
    *   codecs: string,
-   *   id: number,
+   *   id: string | number | undefined,
    *   duration: number,
    *   headers: Record<string, string>,
-   *   allAudioStreams: Array<{ id: number, codecs: string, bandwidth: number, baseUrl: string }>
+   *   allAudioStreams: Array<{ id: string | number | undefined, codecs: string, bandwidth: number, baseUrl: string }>
    * }>}
    */
   async function fetchAudioStream({ signal, diagnostic } = {}) {
@@ -821,16 +821,14 @@
     }
 
     const audioStreams = playInfo?.data?.dash?.audio || [];
-    if (!audioStreams.length) {
+    const descriptor = BSE.Media?.selectBilibiliAudio(audioStreams);
+    const normalizedStreams = BSE.Media?.normalizeBilibiliAudioStreams(audioStreams) || [];
+    if (!descriptor) {
       throw createError('AUDIO_STREAM_NOT_FOUND', '未找到可用的独立 DASH 音频流', '视频可能为老旧 flv/mp4 格式或无访问权限');
     }
 
-    // 按码率降序排序，默认选取最佳音质 (192K > 132K > 64K)
-    const sorted = [...audioStreams].sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
-    const best = sorted[0];
-
-    const audioUrl = best.baseUrl || best.base_url || best.backupUrl?.[0] || best.backup_url?.[0];
-    const backupUrls = (best.backupUrl || best.backup_url || []).filter(u => u && u !== audioUrl);
+    const sorted = [...normalizedStreams].sort((a, b) => b.bandwidth - a.bandwidth);
+    const best = sorted.find((stream) => stream.url === descriptor.url) || sorted[0];
 
     diagnostic?.('音频提取', `成功提取 DASH 独立音频流 · 码率 ${(best.bandwidth / 1000).toFixed(0)} kbps · 编码 ${best.codecs || 'm4a'}`);
 
@@ -838,21 +836,18 @@
       bvid,
       cid,
       title,
-      audioUrl,
-      backupUrls,
+      audioUrl: descriptor.url,
+      backupUrls: descriptor.backupUrls,
       bandwidth: best.bandwidth || 0,
       codecs: best.codecs || 'mp4a.40.2',
       id: best.id,
       duration: playInfo?.data?.dash?.duration || 0,
-      headers: {
-        'User-Agent': navigator.userAgent,
-        'Referer': 'https://www.bilibili.com/'
-      },
+      headers: descriptor.headers,
       allAudioStreams: sorted.map(s => ({
         id: s.id,
         codecs: s.codecs,
         bandwidth: s.bandwidth,
-        baseUrl: s.baseUrl || s.base_url
+        baseUrl: s.url
       }))
     };
   }

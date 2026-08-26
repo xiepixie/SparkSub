@@ -4,6 +4,20 @@
 
 declare namespace chrome.runtime {
   export const id: string;
+  export const lastError: { message?: string } | undefined;
+  export interface Port {
+    name: string;
+    postMessage(message: any): void;
+    disconnect(): void;
+    onMessage: {
+      addListener(callback: (message: any, port: Port) => void): void;
+      removeListener(callback: (message: any, port: Port) => void): void;
+    };
+    onDisconnect: {
+      addListener(callback: (port: Port) => void): void;
+      removeListener(callback: (port: Port) => void): void;
+    };
+  }
   export interface MessageSender {
     tab?: chrome.tabs.Tab;
     frameId?: number;
@@ -20,8 +34,12 @@ declare namespace chrome.runtime {
   export const onInstalled: {
     addListener(callback: (details: { reason: string; previousVersion?: string }) => void): void;
   };
+  export const onStartup: {
+    addListener(callback: () => void): void;
+  };
   export function sendMessage(message: any): Promise<any>;
   export function sendMessage(extensionId: string, message: any): Promise<any>;
+  export function connectNative(application: string): Port;
 }
 
 declare namespace chrome.tabs {
@@ -105,4 +123,7 @@ declare namespace chrome.storage {
   export const sync: StorageArea;
   export const local: StorageArea;
   export const session: StorageArea;
+  export const onChanged: {
+    addListener(callback: (changes: Record<string, { oldValue?: any; newValue?: any }>, areaName: string) => void): void;
+  };
 }

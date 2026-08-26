@@ -2607,6 +2607,38 @@ mark {
   border-color: var(--primary);
 }
 
+.queue-language-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.queue-language-label {
+  color: var(--text-body);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.queue-language-select {
+  min-width: 170px;
+  max-width: 68%;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 10.5px;
+}
+
+.queue-language-hint {
+  margin: -2px 0 0;
+  color: var(--dim);
+  font-size: 9.5px;
+  line-height: 1.45;
+}
+
 .queue-input-actions {
   display: flex;
   justify-content: flex-end;
@@ -2632,6 +2664,57 @@ mark {
   border: 1px solid var(--border);
   font-size: 11px;
   cursor: pointer;
+}
+
+.queue-capability-panel {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-2) 80%, transparent);
+  flex-shrink: 0;
+}
+
+.queue-capability-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10.5px;
+}
+
+.queue-capability-head strong { color: var(--text-body); }
+
+.queue-capability-state {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--dim);
+  font-size: 9px;
+}
+
+.queue-capability-panel[data-state="queue_capability_ready"] .queue-capability-state { color: var(--success); }
+.queue-capability-panel[data-state="queue_capability_not_installed"] .queue-capability-state,
+.queue-capability-panel[data-state="queue_capability_incompatible"] .queue-capability-state { color: #f87171; }
+.queue-capability-panel[data-state="queue_capability_partial"] .queue-capability-state { color: var(--warning); }
+
+.queue-capability-refresh {
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dim);
+}
+
+.queue-capability-refresh:hover { color: var(--primary); border-color: var(--primary); }
+.queue-capability-refresh:disabled { opacity: .45; cursor: wait; }
+
+.queue-capability-details {
+  margin: 5px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--dim);
+  font: 9.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .queue-status-bar {
@@ -2836,6 +2919,14 @@ mark {
   white-space: nowrap;
 }
 
+.queue-source-engine {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--active-bg);
+  color: var(--primary);
+  white-space: nowrap;
+}
+
 /* Bottom Row: Status Badge (Left) & Actions (Right) */
 .queue-card-bottom-row {
   display: flex;
@@ -2957,6 +3048,22 @@ mark {
   transition: width 0.3s ease;
 }
 
+.queue-failure-detail {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--text-body);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
+.queue-failure-detail code { color: #f87171; overflow-wrap: anywhere; }
+.queue-failure-retryability { color: var(--dim); white-space: nowrap; }
+
 /* Preview Drawer */
 .queue-preview-drawer {
   display: none;
@@ -3050,4 +3157,3 @@ mark {
   margin: 0;
   max-width: 260px;
 }
-
