@@ -352,7 +352,46 @@
 
     // 5. 转录面板回退
     const transcript = await transcriptFallback(signal, diagnostic);
-    if (transcript.length) return transcript;
+    if (transcript.length) {
+      if (isTrans) {
+        diagnostic?.('智能翻译', `正在将转录面板提取的 ${transcript.length} 句字幕自动翻译为中文…`);
+        const translated = await BSE.Utils.translateCues(transcript, track.tlang || track.lan || 'zh-Hans', signal);
+        if (translated.length) return translated;
+      }
+      return transcript;
+    }
+
+    // 6. 终极自愈：若为自动翻译轨且上述通道均未返回，自动加载源语言原生轨并批量实时机翻
+    if (isTrans) {
+      diagnostic?.('智能翻译', '服务端翻译通道未响应，正在提取源语言原生字幕并实时翻译…');
+      try {
+        const state = await bridgeRequest('GET_PLAYER_STATE', {}, 1000);
+        const baseTrackId = track.id ? track.id.split(':tlang:')[0] : '';
+        const baseRawTrack = (state?.tracks || []).find((t) => t.id === baseTrackId || (track.sourceLan && t.lan === track.sourceLan)) || state?.tracks?.[0];
+        if (baseRawTrack) {
+          const baseTrackObj = {
+            id: baseRawTrack.id,
+            lan: baseRawTrack.lan,
+            lanDoc: baseRawTrack.lanDoc,
+            subtitleUrl: baseRawTrack.subtitleUrl,
+            isAuto: Boolean(baseRawTrack.isAuto),
+            isCC: !baseRawTrack.isAuto,
+            platform: BSE.PLATFORM.YOUTUBE
+          };
+          const baseCues = await loadTrack(baseTrackObj, { signal, diagnostic });
+          if (baseCues && baseCues.length) {
+            diagnostic?.('智能翻译', `已成功提取 ${baseCues.length} 条源语言字幕，正在进行全自动高质量中文翻译…`);
+            const translatedCues = await BSE.Utils.translateCues(baseCues, track.tlang || track.lan || 'zh-Hans', signal);
+            if (translatedCues.length) {
+              diagnostic?.('智能翻译', `✓ 成功完成 ${translatedCues.length} 条中文字幕翻译并呈现`);
+              return translatedCues;
+            }
+          }
+        }
+      } catch (transErr) {
+        diagnostic?.('智能翻译', `自愈翻译失败：${transErr.message}`);
+      }
+    }
 
     const error = new Error(`YouTube 字幕轨道 [${track.lanDoc || track.lan}] 存在，但所有正文通道均未返回有效字幕`);
     error.code = 'YOUTUBE_BODY_UNAVAILABLE';

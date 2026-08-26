@@ -317,6 +317,57 @@
     return isBili;
   }
 
+  /**
+   * 将字幕分段数组进行批量多语言机翻（基于 Google 官方客户端翻译接口）
+   * @param {Array<import('../types/bse').Cue>} cues
+   * @param {string} [targetLang='zh-CN']
+   * @param {AbortSignal} [signal]
+   * @returns {Promise<Array<import('../types/bse').Cue>>}
+   */
+  async function translateCues(cues, targetLang = 'zh-CN', signal) {
+    if (!Array.isArray(cues) || !cues.length) return [];
+    const normLang = targetLang.toLowerCase().includes('zh') ? 'zh-CN' : targetLang;
+    const lines = cues.map((c) => String(c.content || '').trim());
+    const batchSize = 35;
+    const translatedCues = [];
+
+    for (let i = 0; i < lines.length; i += batchSize) {
+      if (signal?.aborted) throw signal.reason || new DOMException('请求已取消', 'AbortError');
+      const chunk = lines.slice(i, i + batchSize);
+      const joined = chunk.join('\n');
+      if (!joined.trim()) {
+        for (let j = 0; j < chunk.length; j++) translatedCues.push(cues[i + j]);
+        continue;
+      }
+
+      try {
+        const url = `https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=${encodeURIComponent(normLang)}&q=${encodeURIComponent(joined)}`;
+        const resp = await fetchWithTimeout(url, { signal }, 6000);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const text = (Array.isArray(data) && data[0] && typeof data[0][0] === 'string')
+          ? data[0][0]
+          : (typeof data === 'string' ? data : '');
+        const translatedLines = text ? text.split('\n') : [];
+
+        for (let j = 0; j < chunk.length; j++) {
+          const origCue = cues[i + j];
+          const transText = (translatedLines[j] || '').trim();
+          translatedCues.push({
+            from: origCue.from,
+            to: origCue.to,
+            content: transText || origCue.content
+          });
+        }
+      } catch {
+        for (let j = 0; j < chunk.length; j++) {
+          translatedCues.push(cues[i + j]);
+        }
+      }
+    }
+    return translatedCues;
+  }
+
   BSE.Utils = Object.freeze({
     detectPlatform,
     isMatchingVideoUrl,
@@ -333,6 +384,7 @@
     findActiveCueIndex,
     downloadText,
     downloadBlob,
+    translateCues,
     SessionSnapshotManager
   });
 })();
