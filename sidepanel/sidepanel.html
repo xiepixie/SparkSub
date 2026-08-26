@@ -275,11 +275,25 @@
       <!-- Batch URL Input Panel -->
       <div class="queue-input-panel" id="queue-input-panel" hidden>
         <textarea id="queue-batch-input" class="queue-textarea" placeholder="每行输入一个 B站视频链接 (如 BV1xx... 或 https://bilibili.com/video/...) 或 YouTube 视频链接..."></textarea>
+        <label class="queue-language-field" for="queue-source-language">
+          <span class="queue-language-label" id="queue-source-language-label">转录来源语言</span>
+          <select id="queue-source-language" class="queue-language-select" aria-describedby="queue-source-language-hint"></select>
+        </label>
+        <p class="queue-language-hint" id="queue-source-language-hint">粤语仅使用平台字幕；无可用字幕时不会启动本机转录。</p>
         <div class="queue-input-actions">
           <button class="queue-btn-submit" id="queue-batch-submit">一键加入转录队列</button>
           <button class="queue-btn-cancel" id="queue-batch-cancel">取消</button>
         </div>
       </div>
+
+      <section class="queue-capability-panel" id="queue-capability-panel" aria-live="polite" hidden>
+        <div class="queue-capability-head">
+          <strong id="queue-capability-title">本机转录服务</strong>
+          <span class="queue-capability-state" id="queue-capability-status">正在检查…</span>
+          <button type="button" class="queue-capability-refresh" id="queue-capability-refresh" title="重新检查本机转录服务">↻</button>
+        </div>
+        <pre class="queue-capability-details" id="queue-capability-details"></pre>
+      </section>
 
       <div class="queue-status-bar" id="queue-status-bar">
         <span id="queue-status-text">队列就绪</span>
@@ -465,7 +479,10 @@
   <script src="../core/utils.js"></script>
   <script src="../core/jszip.js"></script>
   <script src="../core/i18n.js"></script>
+  <script src="../core/language-routing.js"></script>
+  <script src="../core/queue-ui.js"></script>
   <script src="../core/parsers.js"></script>
+  <script src="../core/media.js"></script>
   <script src="../core/formatters.js"></script>
   <script src="../platform/bilibili.js"></script>
   <script src="../platform/youtube.js"></script>

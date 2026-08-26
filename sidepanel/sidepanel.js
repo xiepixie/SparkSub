@@ -144,8 +144,16 @@
     queueBtnClearDone: document.querySelector('#queue-btn-clear-done'),
     queueInputPanel: document.querySelector('#queue-input-panel'),
     queueBatchInput: document.querySelector('#queue-batch-input'),
+    queueSourceLanguage: document.querySelector('#queue-source-language'),
+    queueSourceLanguageLabel: document.querySelector('#queue-source-language-label'),
+    queueSourceLanguageHint: document.querySelector('#queue-source-language-hint'),
     queueBatchSubmit: document.querySelector('#queue-batch-submit'),
     queueBatchCancel: document.querySelector('#queue-batch-cancel'),
+    queueCapabilityPanel: document.querySelector('#queue-capability-panel'),
+    queueCapabilityTitle: document.querySelector('#queue-capability-title'),
+    queueCapabilityStatus: document.querySelector('#queue-capability-status'),
+    queueCapabilityDetails: document.querySelector('#queue-capability-details'),
+    queueCapabilityRefresh: document.querySelector('#queue-capability-refresh'),
     queueStatusBar: document.querySelector('#queue-status-bar'),
     queueStatusText: document.querySelector('#queue-status-text'),
     queueCountPill: document.querySelector('#queue-count-pill'),
@@ -241,6 +249,7 @@
       document.querySelector('.toolbar')?.setAttribute('hidden', 'true');
       document.querySelector('.video-bar')?.setAttribute('hidden', 'true');
       loadAndRenderQueue();
+      if (!nativeCapabilitiesCache) loadNativeCapabilities(false);
     } else if (tabId === 'tracker') {
       elements.transcript.hidden = true;
       elements.aiSection.hidden = true;
@@ -695,6 +704,82 @@
 
   // === Queue (Background Transcription) State & Methods ===
   let queueCache = [];
+  let nativeCapabilitiesCache = null;
+  let nativeCapabilitiesError = null;
+
+  function queueLanguageLabel(code) {
+    const t = (key) => BSE.I18n?.t(key) || key;
+    if (code === 'auto') return t('queue_language_auto');
+    if (code === 'zh') return t('queue_language_zh');
+    if (code === 'yue') return t('queue_language_yue');
+    try {
+      const displayNames = new Intl.DisplayNames([BSE.I18n?.getLocale?.() || 'zh-CN'], { type: 'language' });
+      return `${displayNames.of(code) || code} [${code}] · Parakeet`;
+    } catch {
+      return `${code} · Parakeet`;
+    }
+  }
+
+  function populateQueueLanguageOptions(selectedValue) {
+    if (!elements.queueSourceLanguage || !BSE.QueueUI) return;
+    const selected = BSE.QueueUI.SUPPORTED_SOURCE_LANGUAGES.includes(selectedValue) ? selectedValue : 'auto';
+    const options = BSE.QueueUI.SUPPORTED_SOURCE_LANGUAGES.map((code) => {
+      const option = document.createElement('option');
+      option.value = code;
+      option.textContent = queueLanguageLabel(code);
+      option.selected = code === selected;
+      return option;
+    });
+    elements.queueSourceLanguage.replaceChildren(...options);
+    elements.queueSourceLanguage.value = selected;
+  }
+
+  async function initializeQueueLanguageControl() {
+    if (!BSE.QueueUI || !BSE.Queue?.getSettings) return;
+    const selected = await BSE.QueueUI.loadDefaultLanguage(() => BSE.Queue.getSettings());
+    populateQueueLanguageOptions(selected);
+  }
+
+  function renderNativeCapabilities() {
+    if (!BSE.QueueUI || !elements.queueCapabilityPanel || !elements.queueCapabilityStatus || !elements.queueCapabilityDetails) return;
+    const t = (key) => BSE.I18n?.t(key) || key;
+    BSE.QueueUI.renderCapabilityPanel(
+      /** @type {HTMLElement} */ (elements.queueCapabilityPanel),
+      /** @type {HTMLElement} */ (elements.queueCapabilityStatus),
+      /** @type {HTMLElement} */ (elements.queueCapabilityDetails),
+      nativeCapabilitiesCache,
+      nativeCapabilitiesError,
+      t
+    );
+  }
+
+  async function loadNativeCapabilities(force = false) {
+    if (!elements.queueCapabilityPanel) return;
+    const t = (key) => BSE.I18n?.t(key) || key;
+    elements.queueCapabilityPanel.hidden = false;
+    elements.queueCapabilityPanel.dataset.state = 'checking';
+    if (elements.queueCapabilityStatus) elements.queueCapabilityStatus.textContent = t('queue_capability_checking');
+    if (elements.queueCapabilityRefresh) elements.queueCapabilityRefresh.disabled = true;
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'BSE_NATIVE_CAPABILITIES', force });
+      if (!response?.ok || !response.capabilities) {
+        nativeCapabilitiesCache = null;
+        nativeCapabilitiesError = response?.error || { code: 'NATIVE_HOST_DISCONNECTED' };
+      } else {
+        nativeCapabilitiesCache = response.capabilities;
+        nativeCapabilitiesError = null;
+      }
+    } catch (error) {
+      nativeCapabilitiesCache = null;
+      nativeCapabilitiesError = {
+        code: error?.code || 'NATIVE_HOST_DISCONNECTED',
+        message: error?.message || ''
+      };
+    } finally {
+      renderNativeCapabilities();
+      if (elements.queueCapabilityRefresh) elements.queueCapabilityRefresh.disabled = false;
+    }
+  }
 
   async function loadAndRenderQueue() {
     if (!BSE.Queue) return;
@@ -706,9 +791,6 @@
       if (hasPending) {
         if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
           chrome.runtime.sendMessage({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
-        }
-        if (BSE.Queue?.processPendingJobs) {
-          BSE.Queue.processPendingJobs().catch(() => {});
         }
       }
     } catch (err) {
@@ -764,32 +846,41 @@
       };
 
       const stageText = stageLabels[item.stage] || item.stage;
-      const progressPercent = item.stage === 'done' ? 100 : (item.progress || 0);
+      const progressValue = Number(item.progress);
+      const progressPercent = item.stage === 'done' ? 100 : Math.max(0, Math.min(100, Number.isFinite(progressValue) ? progressValue : 0));
       const displayHint = item.stageHint || stageText;
       const isExpanded = expandedQueueCards.has(item.id);
       const isBili = item.platform === 'bilibili';
+      const t = (key) => BSE.I18n?.t(key) || key;
+      const safeId = BSE.Utils.escapeHtml(item.id || '');
+      const sourceLabel = item.stage === 'done' && item.subtitle && BSE.QueueUI
+        ? t(BSE.QueueUI.sourceEngineLabel(item).key)
+        : '';
+      const failure = item.stage === 'failed' && BSE.QueueUI
+        ? BSE.QueueUI.safeFailurePresentation(item)
+        : null;
 
       let actionButtonsHtml = '';
       if (item.stage === 'done') {
         actionButtonsHtml = `
-          <button type="button" class="queue-act-btn btn-preview ${isExpanded ? 'active' : ''}" data-id="${item.id}" title="展开/收起内联字幕预览">
+          <button type="button" class="queue-act-btn btn-preview ${isExpanded ? 'active' : ''}" data-id="${safeId}" title="展开/收起内联字幕预览">
             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
             <span>预览</span>
           </button>
-          <button type="button" class="queue-act-btn primary btn-copy" data-id="${item.id}" title="复制 Markdown 字幕全文">
+          <button type="button" class="queue-act-btn primary btn-copy" data-id="${safeId}" title="复制 Markdown 字幕全文">
             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             <span>复制</span>
           </button>
-          <button type="button" class="queue-act-btn btn-download-txt" data-id="${item.id}" title="下载纯文本 TXT">
+          <button type="button" class="queue-act-btn btn-download-txt" data-id="${safeId}" title="下载纯文本 TXT">
             <span>TXT</span>
           </button>
-          <button type="button" class="queue-act-btn btn-download-srt" data-id="${item.id}" title="下载 SRT 字幕">
+          <button type="button" class="queue-act-btn btn-download-srt" data-id="${safeId}" title="下载 SRT 字幕">
             <span>SRT</span>
           </button>
         `;
       } else if (item.stage === 'failed') {
         actionButtonsHtml = `
-          <button type="button" class="queue-act-btn primary btn-retry" data-id="${item.id}" title="重新执行转录">
+          <button type="button" class="queue-act-btn primary btn-retry" data-id="${safeId}" title="重新执行转录">
             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             <span>重试</span>
           </button>
@@ -797,10 +888,10 @@
       }
 
       card.innerHTML = `
-        <button type="button" class="queue-card-del-btn btn-remove" data-id="${item.id}" title="从队列中移除">✕</button>
+        <button type="button" class="queue-card-del-btn btn-remove" data-id="${safeId}" title="从队列中移除">✕</button>
         <div class="queue-card-main">
           <div class="queue-thumb-wrap" title="点击在新标签页打开视频">
-            <img class="queue-thumb-img" src="${item.cover || 'data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 100 60\' fill=\'%23334155\'><text x=\'50\' y=\'35\' fill=\'%2394a3b8\' font-size=\'14\' text-anchor=\'middle\'>SparkSub</text></svg>'}" alt="cover" loading="lazy">
+            <img class="queue-thumb-img" src="${BSE.Utils.escapeHtml(item.cover || 'data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 100 60\' fill=\'%23334155\'><text x=\'50\' y=\'35\' fill=\'%2394a3b8\' font-size=\'14\' text-anchor=\'middle\'>SparkSub</text></svg>')}" alt="cover" loading="lazy">
             <span class="queue-thumb-tag ${isBili ? 'bilibili' : 'youtube'}">${isBili ? 'B站' : 'YT'}</span>
             <div class="queue-thumb-hover-overlay">▶</div>
           </div>
@@ -810,10 +901,11 @@
             </a>
             <div class="queue-card-meta-line">
               <span class="queue-meta-author" title="作者">👤 ${BSE.Utils.escapeHtml(item.author || (isBili ? 'UP主' : '频道'))}</span>
+              ${sourceLabel ? `<span class="queue-source-engine">${BSE.Utils.escapeHtml(sourceLabel)}</span>` : ''}
             </div>
             <div class="queue-card-bottom-row">
               <span class="queue-status-badge stage-${item.stage}" title="${BSE.Utils.escapeHtml(displayHint)}">
-                ${displayHint}
+                ${BSE.Utils.escapeHtml(displayHint)}
               </span>
               <div class="queue-actions-cluster">
                 ${actionButtonsHtml}
@@ -824,6 +916,13 @@
         ${item.stage !== 'done' && item.stage !== 'failed' ? `
           <div class="queue-card-progress">
             <div class="queue-card-progress-fill" style="width: ${progressPercent}%"></div>
+          </div>
+        ` : ''}
+        ${failure ? `
+          <div class="queue-failure-detail" role="status">
+            <code>${BSE.Utils.escapeHtml(failure.code)}</code>
+            <span>${BSE.Utils.escapeHtml(failure.hint || t('queue_error_safe_hint'))}</span>
+            <span class="queue-failure-retryability">${BSE.Utils.escapeHtml(t(failure.retriable ? 'queue_error_retriable' : 'queue_error_not_retriable'))}</span>
           </div>
         ` : ''}
         ${item.subtitle?.plainText ? `
@@ -893,16 +992,25 @@
 
       card.querySelector('.btn-retry')?.addEventListener('click', async (e) => {
         e.stopPropagation();
-        await BSE.Queue.retryItem(item.id);
-        toast('已重新排队，正在执行…');
-        await loadAndRenderQueue();
-        chrome.runtime?.sendMessage?.({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
+        try {
+          const response = await chrome.runtime.sendMessage({ type: 'BSE_QUEUE_RETRY', id: item.id });
+          if (!response?.ok || !response.item) throw new Error(response?.error || '无法重新排队');
+          toast('已重新排队，正在执行…');
+          await loadAndRenderQueue();
+        } catch (error) {
+          toast(`重试失败：${error?.message || '后台服务不可用'}`, true);
+        }
       });
 
       card.querySelector('.btn-remove')?.addEventListener('click', async (e) => {
         e.stopPropagation();
-        await BSE.Queue.removeFromQueue(item.id);
-        loadAndRenderQueue();
+        try {
+          const response = await chrome.runtime.sendMessage({ type: 'BSE_QUEUE_REMOVE', id: item.id });
+          if (!response?.ok) throw new Error(response?.error || '无法移除任务');
+          await loadAndRenderQueue();
+        } catch (error) {
+          toast(`移除失败：${error?.message || '后台服务不可用'}`, true);
+        }
       });
 
       frag.appendChild(card);
@@ -1233,6 +1341,12 @@
     if (elements.queueBtnClearDone?.querySelector('span')) elements.queueBtnClearDone.querySelector('span').textContent = `🗑️ ${t('queue_btn_clear_done')}`;
     if (elements.queueBatchSubmit) elements.queueBatchSubmit.textContent = t('queue_btn_submit_batch');
     if (elements.queueBatchCancel) elements.queueBatchCancel.textContent = t('batch_btn_cancel');
+    if (elements.queueSourceLanguageLabel) elements.queueSourceLanguageLabel.textContent = t('queue_source_language_label');
+    if (elements.queueSourceLanguageHint) elements.queueSourceLanguageHint.textContent = t('queue_source_language_hint');
+    if (elements.queueSourceLanguage) populateQueueLanguageOptions(elements.queueSourceLanguage.value || 'auto');
+    if (elements.queueCapabilityTitle) elements.queueCapabilityTitle.textContent = t('queue_capabilities_title');
+    if (elements.queueCapabilityRefresh) elements.queueCapabilityRefresh.title = t('queue_capability_refresh');
+    if (nativeCapabilitiesCache || nativeCapabilitiesError) renderNativeCapabilities();
     if (elements.queueEmptyTitle) elements.queueEmptyTitle.textContent = t('queue_empty_title');
     if (elements.queueEmptyDesc) elements.queueEmptyDesc.textContent = t('queue_empty_desc');
     if (elements.batchBtnText) elements.batchBtnText.textContent = t('btn_batch_export');
@@ -1316,6 +1430,19 @@
     if (elements.queueInputPanel) elements.queueInputPanel.hidden = true;
   });
 
+  elements.queueSourceLanguage?.addEventListener('change', async () => {
+    if (!BSE.QueueUI || !BSE.Queue?.saveSettings) return;
+    const saved = await BSE.QueueUI.saveDefaultLanguage(
+      elements.queueSourceLanguage.value,
+      (partial) => BSE.Queue.saveSettings(partial)
+    );
+    elements.queueSourceLanguage.value = saved.sourceLanguage || 'auto';
+  });
+
+  elements.queueCapabilityRefresh?.addEventListener('click', () => {
+    loadNativeCapabilities(true);
+  });
+
   elements.queueBatchSubmit?.addEventListener('click', async () => {
     const rawText = elements.queueBatchInput?.value || '';
     const urls = rawText.split('\n').map((s) => s.trim()).filter(Boolean);
@@ -1324,18 +1451,13 @@
       return;
     }
     try {
-      let items = [];
-      try {
-        const res = await chrome.runtime.sendMessage({
-          type: 'BSE_QUEUE_ENQUEUE',
-          urls
-        });
-        if (res?.ok) items = res.items || [];
-      } catch {}
-
-      if (!items.length && BSE.Queue?.addToQueue) {
-        items = await BSE.Queue.addToQueue(urls);
-      }
+      const sourceLanguage = elements.queueSourceLanguage?.value || 'auto';
+      if (!BSE.QueueUI) throw new Error('Queue UI is unavailable');
+      const items = await BSE.QueueUI.enqueueWithLanguage({
+        urls,
+        sourceLanguage,
+        sendMessage: (message) => chrome.runtime.sendMessage(message)
+      });
 
       if (items.length) {
         toast(`已成功添加 ${items.length} 个任务到队列`);
@@ -2359,5 +2481,7 @@
 
   loadInitialState().catch((error) => toast(error.message, true));
   loadAndRenderTracker().catch(() => {});
+  initializeQueueLanguageControl().catch(() => populateQueueLanguageOptions('auto'));
+  loadNativeCapabilities(false).catch(() => {});
   loadAndRenderQueue().catch(() => {});
 })();

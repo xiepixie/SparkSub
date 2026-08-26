@@ -222,6 +222,19 @@ export interface BSEParsersNamespace {
   parseLegacyXml(text: string): Cue[];
 }
 
+export interface BSEMediaNamespace {
+  isBilibiliCdnHost(hostname: string): boolean;
+  normalizeBilibiliUrl(value: string): string;
+  normalizeBilibiliAudioStreams(audio: Array<Record<string, unknown>>): Array<{
+    bandwidth: number;
+    id?: number | string;
+    codecs: string;
+    url: string;
+    backupUrls: string[];
+  }>;
+  selectBilibiliAudio(audio: Array<Record<string, unknown>>): Extract<NativeHostSource, { kind: 'remote' }> | null;
+}
+
 export interface BSEFormattersNamespace {
   mergeParagraphs(cues: Cue[]): string;
   toTxt(cues: Cue[], withTimestamp?: boolean): string;
@@ -322,6 +335,9 @@ export interface QueueItemSubtitle {
   markdown: string;
   srt?: string;
   cues?: Cue[];
+  source?: 'platform' | 'native';
+  engine?: string;
+  captionKind?: 'manual' | 'auto' | 'translated' | 'transcript';
 }
 
 export interface QueueItem {
@@ -337,6 +353,10 @@ export interface QueueItem {
   progress: number;
   stageHint?: string;
   error?: string;
+  errorCode?: string;
+  errorHint?: string;
+  retriable?: boolean;
+  sourceLanguage?: string;
   addedAt: number;
   stageUpdatedAt?: number;
   startedAt?: number;
@@ -361,8 +381,19 @@ export interface QueueItem {
     metadataResolved?: boolean;
     captionTracks?: Array<Record<string, unknown>>;
     chosenCaption?: { lan?: string; lan_doc?: string };
+    captionTrackId?: string;
+    selectedCaption?: {
+      id: string;
+      language: string;
+      langDoc: string;
+      kind: number;
+      captionKind?: 'manual' | 'auto' | 'translated' | 'transcript';
+      isTranscriptFallback?: boolean;
+    };
+    isTranscriptFallback?: boolean;
     captionBody?: Cue[];
     captionText?: string;
+    cues?: Cue[];
   };
   captionTrackCache?: {
     tracks?: SubtitleTrack[];
@@ -381,12 +412,14 @@ export interface QueueSettings {
   autoDownload: boolean;
   preferredFormat: 'md' | 'txt' | 'srt';
   enableNotification: boolean;
+  sourceLanguage?: string;
 }
 
 export interface BSEQueueNamespace {
   getQueue(): Promise<QueueItem[]>;
+  saveQueue(items: QueueItem[]): Promise<QueueItem[]>;
   getItem(id: string): Promise<QueueItem | null>;
-  addToQueue(urlsOrIds: string | string[], options?: { title?: string; author?: string; cover?: string }): Promise<QueueItem[]>;
+  addToQueue(urlsOrIds: string | string[], options?: { title?: string; author?: string; cover?: string; sourceLanguage?: string }): Promise<QueueItem[]>;
   removeFromQueue(id: string): Promise<boolean>;
   clearCompleted(): Promise<number>;
   clearAll(): Promise<void>;
@@ -394,8 +427,100 @@ export interface BSEQueueNamespace {
   getSettings(): Promise<QueueSettings>;
   saveSettings(settings: Partial<QueueSettings>): Promise<QueueSettings>;
   recoverStaleJobs(): Promise<QueueItem[]>;
+  saveItem(item: QueueItem): Promise<boolean>;
+  processBilibiliItem(item: QueueItem, signal: AbortSignal): Promise<void>;
+  processYouTubeItem(item: QueueItem, signal: AbortSignal): Promise<void>;
+  processPendingJobs(): Promise<void>;
   exportQueueMergedMarkdown(itemIds?: string[]): Promise<string>;
   normalizeVideoUrl(rawUrl: string): { platform: Platform; targetId: string; page?: number; cleanUrl: string } | null;
+}
+
+export interface BSEQueueOrchestratorNamespace {
+  create(options: { drain: () => Promise<void> | void }): { wake(): Promise<void> };
+}
+
+export interface NativeHostError extends Error {
+  code: string;
+  hint: string;
+  retriable: boolean;
+}
+
+export interface NativeHostProgress {
+  type: 'progress';
+  requestId: string;
+  jobId: string;
+  stage: string;
+  percent: number;
+  hint: string;
+}
+
+export type NativeHostSource =
+  | { kind: 'youtube'; url: string }
+  | { kind: 'remote'; url: string; backupUrls?: string[]; headers?: Record<string, string> };
+
+export interface NativeHostTranscriptionRequest {
+  jobId: string;
+  sourceLanguage: string;
+  title?: string;
+  duration?: number;
+  platformLanguage?: string;
+  source: NativeHostSource;
+}
+
+export interface NativeHostYouTubeCaptionRequest {
+  jobId: string;
+  sourceLanguage: string;
+  source: Extract<NativeHostSource, { kind: 'youtube' }>;
+}
+
+export interface NativeHostYouTubeCaptionResult {
+  cues: Cue[];
+  language: string;
+  langDoc: string;
+  kind: 'manual' | 'auto' | 'translated';
+}
+
+export interface NativeHostNamespace {
+  HOST_NAME: 'com.sparksub.transcriber';
+  PROTOCOL_VERSION: 1;
+  getCapabilities(options?: { force?: boolean }): Promise<any>;
+  fetchYouTubeCaptions(payload: NativeHostYouTubeCaptionRequest, options?: {
+    onProgress?: (progress: NativeHostProgress) => void;
+    signal?: AbortSignal;
+  }): Promise<NativeHostYouTubeCaptionResult>;
+  transcribe(payload: NativeHostTranscriptionRequest, options?: {
+    onProgress?: (progress: NativeHostProgress) => void;
+    signal?: AbortSignal;
+  }): Promise<Cue[]>;
+  cancel(jobId: string): Promise<any>;
+  disconnect(): void;
+}
+
+export interface BSELanguageRoutingNamespace {
+  EUROPEAN_CODES: readonly string[];
+  SUPPORTED_SOURCE_LANGUAGES: readonly string[];
+  normalize(value: unknown): string;
+  isCantonese(value: unknown): boolean;
+  engineFor(sourceLanguage: string, platformLanguage?: string, sourceKind?: 'youtube' | 'remote'): 'parakeet' | 'cohere' | null;
+}
+
+export interface BSEQueueUINamespace {
+  SUPPORTED_SOURCE_LANGUAGES: readonly string[];
+  requiredI18nKeys(): string[];
+  nativeEngineFor(item: Partial<QueueItem> & { platformLanguage?: string }): 'parakeet' | 'cohere' | null;
+  sourceEngineLabel(item: Partial<QueueItem>): { key: string };
+  safeFailurePresentation(item: Partial<QueueItem>): { code: string; hint: string; retriable: boolean };
+  componentState(name: string, component?: { available?: boolean; detail?: string }): { key: string; detail: string };
+  capabilityState(capabilities?: any, error?: { code?: string }): { key: string };
+  enqueueWithLanguage(options: {
+    urls: string[];
+    sourceLanguage: string;
+    sendMessage(message: any): Promise<any>;
+  }): Promise<QueueItem[]>;
+  saveDefaultLanguage(sourceLanguage: string, saveSettings: (partial: Partial<QueueSettings>) => Promise<QueueSettings>): Promise<QueueSettings>;
+  loadDefaultLanguage(getSettings: () => Promise<QueueSettings>): Promise<string>;
+  renderCapabilityPanel(panel: HTMLElement, status: HTMLElement, details: HTMLElement, capabilities: any, error: any, t: (key: string) => string): void;
+  renderFailureCard(element: HTMLElement, item: Partial<QueueItem>, t: (key: string) => string): void;
 }
 
 export interface BSETrackerNamespace {
@@ -428,9 +553,14 @@ export interface BSENamespace {
   };
   Utils: BSEUtilsNamespace;
   Parsers: BSEParsersNamespace;
+  Media?: BSEMediaNamespace;
   Formatters: BSEFormattersNamespace;
   Tracker?: BSETrackerNamespace;
   Queue?: BSEQueueNamespace;
+  QueueOrchestrator?: BSEQueueOrchestratorNamespace;
+  NativeHost?: NativeHostNamespace;
+  LanguageRouting?: BSELanguageRoutingNamespace;
+  QueueUI?: BSEQueueUINamespace;
   YouTube: BSEPlatformNamespace;
   Bilibili: BSEPlatformNamespace;
   I18n?: BSEI18nNamespace;

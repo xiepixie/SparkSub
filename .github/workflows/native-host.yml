@@ -1,0 +1,25 @@
+name: Native host
+
+on:
+  pull_request:
+    paths:
+      - "native/SparkSubHost/**"
+      - ".github/workflows/native-host.yml"
+  push:
+    paths:
+      - "native/SparkSubHost/**"
+      - ".github/workflows/native-host.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  swift-test:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report Swift toolchain
+        run: swift --version
+      - name: Test native host
+        run: swift test --package-path native/SparkSubHost

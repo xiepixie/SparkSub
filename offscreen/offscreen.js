@@ -10,6 +10,30 @@
   let isRunning = false;
   const activeAbortControllers = new Map();
 
+  function normalizeLegacyCues(cues) {
+    if (!Array.isArray(cues) || !cues.length || !cues.every((cue) => (
+      cue
+      && Number.isFinite(Number(cue.from))
+      && Number.isFinite(Number(cue.to))
+      && Number(cue.to) > Number(cue.from)
+      && typeof cue.content === 'string'
+      && cue.content.trim()
+    ))) {
+      throw new Error('字幕内容为空或时间范围无效，不能完成任务');
+    }
+    const normalized = BSE.Parsers.normalize(cues);
+    if (!normalized.length || !normalized.every((cue) => (
+      Number.isFinite(cue.from)
+      && Number.isFinite(cue.to)
+      && cue.to > cue.from
+      && typeof cue.content === 'string'
+      && cue.content.trim()
+    ))) {
+      throw new Error('字幕内容为空或时间范围无效，不能完成任务');
+    }
+    return normalized;
+  }
+
   function formatTranscriptLocally(cues, title, author, url) {
     const normalizedCues = (cues || []).map((c) => ({
       from: Number(c.from || 0),
@@ -185,36 +209,7 @@
     const subtitles = playerJson?.data?.subtitle?.subtitles || [];
 
     if (!subtitles.length) {
-      // 尝试回退至音频探测
-      item.stage = 'fetching_audio';
-      item.progress = 60;
-      item.stageHint = '未发现字幕轨道，正在探测音频直链…';
-      await saveItemState(item);
-
-      const playUrlResp = await BSE.Utils.fetchWithTimeout(
-        `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${cid}&fnval=4048`,
-        { signal, credentials: 'include' },
-        6000
-      );
-      const playJson = await playUrlResp.json();
-      const audioUrl = playJson?.data?.dash?.audio?.[0]?.baseUrl || playJson?.data?.dash?.audio?.[0]?.base_url;
-      if (audioUrl) {
-        item.audioCache = { audioUrl, bandwidth: playJson?.data?.dash?.audio?.[0]?.bandwidth || 0 };
-        item.subtitle = {
-          language: 'audio_stream',
-          langDoc: '音频直链已就绪 (无内嵌字幕)',
-          cueCount: 0,
-          plainText: `该视频暂无内置字幕，已成功提取 DASH 音频直链 (${Math.round((item.audioCache.bandwidth || 0) / 1000)}kbps)，可用于后续 ASR 转录。`,
-          markdown: `> 提示：该视频暂无官方或 AI 字幕，已成功获取音频直链。`
-        };
-        item.stage = 'done';
-        item.progress = 100;
-        item.stageHint = '无字幕 · 已提取音频直链';
-        item.completedAt = Date.now();
-        await saveItemState(item);
-        return;
-      }
-      throw new Error('该视频暂无字幕轨道，且无法获取音频流');
+      throw new Error('平台字幕不可用；本地转录只能由 Service Worker 队列执行。');
     }
 
     const chosenSub = subtitles.find((s) => /zh|cn|中/i.test(s.lan || s.lan_doc || '')) || subtitles[0];
@@ -230,11 +225,11 @@
       throw new Error('字幕内容为空');
     }
 
-    const cues = rawBody.map((b) => ({
-      from: Number(b.from || 0),
-      to: Number(b.to || 0),
+    const cues = normalizeLegacyCues(rawBody.map((b) => ({
+      from: Number(b.from),
+      to: Number(b.to),
       content: String(b.content || '').trim()
-    }));
+    })));
 
     // === Stage 3: Postprocessing ===
     item.stage = 'postprocessing';
@@ -243,10 +238,15 @@
     await saveItemState(item);
 
     const processed = await postProcessOnWorker(cues, item.title, item.author, item.url);
+    if (!processed?.cueCount || !String(processed.plainText || '').trim()) {
+      throw new Error('字幕内容为空，不能完成任务');
+    }
 
     item.subtitle = {
       language: chosenSub.lan,
       langDoc: chosenSub.lan_doc || '中文',
+      source: 'platform',
+      engine: 'bilibili',
       cueCount: processed.cueCount,
       plainText: processed.plainText,
       markdown: processed.markdown,
@@ -363,6 +363,7 @@
     if (!cues.length) {
       throw new Error('无法解析 YouTube 字幕文本');
     }
+    cues = normalizeLegacyCues(cues);
 
     // === Stage 3: Postprocessing ===
     item.stage = 'postprocessing';
@@ -371,10 +372,15 @@
     await saveItemState(item);
 
     const processed = await postProcessOnWorker(cues, item.title, item.author, item.url);
+    if (!processed?.cueCount || !String(processed.plainText || '').trim()) {
+      throw new Error('字幕内容为空，不能完成任务');
+    }
 
     item.subtitle = {
       language: chosenTrack.languageCode || 'unknown',
       langDoc: chosenTrack.name?.simpleText || chosenTrack.languageCode || '字幕',
+      source: 'platform',
+      engine: 'youtube',
       cueCount: processed.cueCount,
       plainText: processed.plainText,
       markdown: processed.markdown,
@@ -418,41 +424,10 @@
     };
   }
 
-  /**
-   * 队列执行主循环（统一委托至 BSE.Queue.processPendingJobs）
-   */
-  async function runQueueLoop() {
-    if (isRunning) return;
-    isRunning = true;
-
-    try {
-      if (BSE.Queue?.processPendingJobs) {
-        await BSE.Queue.processPendingJobs();
-      }
-    } catch (err) {
-      console.warn('[SparkSub Offscreen] 队列执行异常:', err);
-    } finally {
-      isRunning = false;
-      // 队列执行完毕，通知 Service Worker 关闭 Offscreen Document
-      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-        chrome.runtime.sendMessage({ type: 'BSE_OFFSCREEN_QUEUE_IDLE' }).catch(() => {});
-      }
-    }
-  }
-
-  // 监听来自 Service Worker、侧边栏或前端推荐流的各种触发指令
+  // Offscreen remains available for legacy DOM-only compatibility work. Queue
+  // processing is exclusively owned by the Service Worker.
   if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if (
-        message?.type === 'BSE_OFFSCREEN_START' ||
-        message?.type === 'BSE_ORCHESTRATOR_NOTIFY' ||
-        message?.type === 'BSE_QUEUE_UPDATED' ||
-        message?.type === 'BSE_QUEUE_ENQUEUE'
-      ) {
-        runQueueLoop();
-        sendResponse({ ok: true });
-        return false;
-      }
       if (message?.type === 'BSE_OFFSCREEN_PING') {
         sendResponse({ ok: true, isRunning });
         return false;
@@ -461,18 +436,4 @@
     });
   }
 
-  // 监听本地存储变化，一旦检测到有待处理队列自动启动
-  if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
-    chrome.storage.onChanged.addListener((changes, areaName) => {
-      if (areaName === 'local') {
-        const hasQueueChanges = Object.keys(changes || {}).some((k) => k.startsWith('bse_transcription_queue_v1'));
-        if (hasQueueChanges) {
-          runQueueLoop();
-        }
-      }
-    });
-  }
-
-  // 启动时自动检查队列
-  runQueueLoop();
 })();

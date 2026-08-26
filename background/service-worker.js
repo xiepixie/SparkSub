@@ -6,8 +6,11 @@ try {
     '/core/utils.js',
     '/core/i18n.js',
     '/core/parsers.js',
+    '/core/media.js',
     '/core/formatters.js',
     '/core/tracker.js',
+    '/core/native-host.js',
+    '/core/queue-orchestrator.js',
     '/core/queue.js'
   );
 } catch (e) {
@@ -24,94 +27,12 @@ const BILIBILI_REQUEST_TIMEOUT_MS = 15000;
 
 const BILIBILI_REFERER_RULE_ID = 1001;
 const ALARM_SUBSCRIPTION_CHECK = 'BSE_SUBSCRIPTION_CHECK';
-const OFFSCREEN_DOCUMENT_PATH = 'offscreen/offscreen.html';
+const queueOrchestrator = BSE.QueueOrchestrator?.create({
+  drain: () => BSE.Queue?.processPendingJobs?.() || Promise.resolve()
+});
 
-async function hasOffscreenDocument() {
-  if (chrome.runtime?.getContexts) {
-    try {
-      const contexts = await chrome.runtime.getContexts({
-        contextTypes: ['OFFSCREEN_DOCUMENT']
-      });
-      if (contexts && contexts.length > 0) return true;
-    } catch {}
-  }
-  if (chrome.offscreen?.hasDocument) {
-    try {
-      return await chrome.offscreen.hasDocument();
-    } catch {}
-  }
-  return false;
-}
-
-let isCreatingOffscreen = false;
-
-async function ensureOffscreenDocument() {
-  if (!chrome.offscreen?.createDocument) return false;
-  try {
-    const exists = await hasOffscreenDocument();
-    if (exists) {
-      chrome.runtime.sendMessage({ type: 'BSE_OFFSCREEN_START' }).catch(() => {});
-      return true;
-    }
-  } catch {}
-
-  if (isCreatingOffscreen) return true;
-  isCreatingOffscreen = true;
-
-  try {
-    const reasons = [];
-    if (chrome.offscreen?.Reason?.DOM_PARSER) {
-      reasons.push(chrome.offscreen.Reason.DOM_PARSER);
-    } else {
-      reasons.push('DOM_PARSER');
-    }
-    if (chrome.offscreen?.Reason?.BLOBS) {
-      reasons.push(chrome.offscreen.Reason.BLOBS);
-    }
-    if (chrome.offscreen?.Reason?.WORKERS) {
-      reasons.push(chrome.offscreen.Reason.WORKERS);
-    }
-
-    await chrome.offscreen.createDocument({
-      url: chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH),
-      reasons,
-      justification: 'SparkSub background video subtitle parsing, worker transcription and queue scheduling'
-    });
-    // Creation-time broadcasts can be lost before the document listener is
-    // registered. Wake it only after createDocument has resolved.
-    await chrome.runtime.sendMessage({ type: 'BSE_OFFSCREEN_START' }).catch(() => {});
-    return true;
-  } catch (err) {
-    console.warn('[SparkSub Offscreen] 创建 Offscreen Document 异常:', err);
-    // A concurrent creator may have won. Only treat the failure as recoverable
-    // when an Offscreen Document can now be positively identified.
-    if (await hasOffscreenDocument()) {
-      await chrome.runtime.sendMessage({ type: 'BSE_OFFSCREEN_START' }).catch(() => {});
-      return true;
-    }
-    return false;
-  } finally {
-    isCreatingOffscreen = false;
-  }
-}
-
-async function startQueueExecutor() {
-  ensureOffscreenDocument().catch(() => {});
-  if (BSE.Queue?.processPendingJobs) {
-    await BSE.Queue.processPendingJobs().catch((err) => {
-      console.warn('[SparkSub ServiceWorker] 队列执行异常:', err);
-    });
-  }
-}
-
-async function closeOffscreenDocument() {
-  if (!chrome.offscreen?.closeDocument) return;
-  try {
-    const exists = await hasOffscreenDocument();
-    if (exists) {
-      await chrome.offscreen.closeDocument();
-    }
-  } catch {}
+function startQueueExecutor() {
+  return queueOrchestrator?.wake() || Promise.resolve();
 }
 
 function setupContextMenus() {
@@ -216,9 +137,20 @@ async function setupBilibiliNetRules() {
 
 if (typeof chrome !== 'undefined' && chrome.runtime) {
   chrome.runtime.onInstalled?.addListener(setupBilibiliNetRules);
-  chrome.runtime.onStartup?.addListener(setupBilibiliNetRules);
+  chrome.runtime.onStartup?.addListener(() => {
+    setupBilibiliNetRules();
+    startQueueExecutor().catch((err) => console.warn('[SparkSub ServiceWorker] 队列执行异常:', err));
+  });
 }
 setupBilibiliNetRules();
+
+if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local') return;
+    const hasQueueChange = Object.keys(changes || {}).some((key) => key === 'bse_transcription_queue_v1' || key.startsWith('bse_transcription_queue_v1:item:'));
+    if (hasQueueChange) startQueueExecutor().catch((err) => console.warn('[SparkSub ServiceWorker] 队列执行异常:', err));
+  });
+}
 
 function isBilibiliVideoPage(url = '') {
   try {
@@ -251,6 +183,58 @@ function isTrustedSender(sender, platform) {
   } catch {
     return false;
   }
+}
+
+function isTrustedExtensionPageSender(sender) {
+  const extensionRoot = chrome.runtime.getURL('');
+  return Boolean(sender
+    && sender.id === chrome.runtime.id
+    && !sender.tab
+    && sender.url
+    && sender.url.startsWith(extensionRoot));
+}
+
+/** @param {any} error */
+function stableNativeError(error, fallbackCode = 'NATIVE_HOST_ERROR') {
+  return {
+    code: typeof error?.code === 'string' && error.code ? error.code : fallbackCode,
+    message: typeof error?.message === 'string' && error.message ? error.message : 'Native host request failed.',
+    hint: typeof error?.hint === 'string' && error.hint ? error.hint : 'Retry the request after checking the native host.',
+    retriable: typeof error?.retriable === 'boolean' ? error.retriable : true
+  };
+}
+
+function nativeProxyFailure(code, message, hint, retriable = true) {
+  const error = /** @type {import('../types/bse').NativeHostError} */ (new Error(message));
+  error.code = code;
+  error.hint = hint;
+  error.retriable = retriable;
+  return error;
+}
+
+function proxyNativeRequest(method, argument, responseKey) {
+  return Promise.resolve().then(() => {
+    const nativeMethod = BSE.NativeHost?.[method];
+    if (typeof nativeMethod !== 'function') {
+      throw nativeProxyFailure(
+        'NATIVE_HOST_API_UNAVAILABLE',
+        'The native host API is unavailable.',
+        'Reload SparkSub and verify that the native host is installed.',
+        true
+      );
+    }
+    return nativeMethod.call(BSE.NativeHost, argument);
+  }).then((result) => {
+    if (result === undefined) {
+      throw nativeProxyFailure(
+        'NATIVE_HOST_EMPTY_RESPONSE',
+        'The native host returned no response.',
+        'Retry the request after checking the native host.',
+        true
+      );
+    }
+    return { ok: true, [responseKey]: result };
+  }).catch((error) => ({ ok: false, error: stableNativeError(error) }));
 }
 
 function isAllowedBilibiliResource(url) {
@@ -483,6 +467,7 @@ async function injectContentScripts(tabId, url = '') {
         'core/jszip.js',
         'core/i18n.js',
         'core/parsers.js',
+        'core/media.js',
         'core/formatters.js',
         'core/tracker.js',
         'core/queue.js',
@@ -851,17 +836,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // === Queue & Offscreen Orchestrator Messages ===
+  if (message.type === 'BSE_NATIVE_CAPABILITIES') {
+    if (!isTrustedExtensionPageSender(sender)) {
+      sendResponse({ ok: false, error: stableNativeError({ code: 'INVALID_SENDER', message: 'Native host requests are only available to extension pages.', hint: 'Open SparkSub from an extension page.', retriable: false }) });
+      return false;
+    }
+    proxyNativeRequest('getCapabilities', { force: Boolean(message.force) }, 'capabilities')
+      .then(sendResponse);
+    return true;
+  }
+
+  if (message.type === 'BSE_NATIVE_CANCEL') {
+    if (!isTrustedExtensionPageSender(sender)) {
+      sendResponse({ ok: false, error: stableNativeError({ code: 'INVALID_SENDER', message: 'Native host requests are only available to extension pages.', hint: 'Open SparkSub from an extension page.', retriable: false }) });
+      return false;
+    }
+    if (typeof message.jobId !== 'string' || !message.jobId.trim()) {
+      sendResponse({ ok: false, error: stableNativeError({ code: 'INVALID_REQUEST', message: 'A job ID is required.', hint: 'Retry from a queue item.', retriable: false }) });
+      return false;
+    }
+    proxyNativeRequest('cancel', message.jobId, 'result')
+      .then(sendResponse);
+    return true;
+  }
+
+  // === Queue Orchestrator Messages ===
   if (message.type === 'BSE_ORCHESTRATOR_NOTIFY') {
     (async () => {
       await startQueueExecutor();
       return { ok: true };
     })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
-    return true;
-  }
-
-  if (message.type === 'BSE_OFFSCREEN_QUEUE_IDLE') {
-    closeOffscreenDocument().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
     return true;
   }
 

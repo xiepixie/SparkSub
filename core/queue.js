@@ -1,7 +1,8 @@
 (() => {
   'use strict';
 
-  const BSE = globalThis.BSE = globalThis.BSE || {};
+  /** @type {import('../types/bse').BSENamespace} */
+  const BSE = globalThis.BSE = globalThis.BSE || /** @type {any} */ ({});
 
   const STORAGE_KEY_QUEUE = 'bse_transcription_queue_v1';
   const STORAGE_KEY_ITEM_PREFIX = `${STORAGE_KEY_QUEUE}:item:`;
@@ -9,13 +10,38 @@
   const LEASE_DURATION_MS = 5 * 60 * 1000;
   const EXECUTION_LEASE_MS = LEASE_DURATION_MS;
   const EXECUTOR_ID = `queue-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  let nativeJobSequence = 0;
 
   const DEFAULT_SETTINGS = {
     maxConcurrency: 2,
     autoDownload: false,
     preferredFormat: 'md',
-    enableNotification: true
+    enableNotification: true,
+    sourceLanguage: 'auto'
   };
+  const EPHEMERAL_MEDIA_KEYS = new Set([
+    'audiocache', 'audiourl', 'backupurls', 'backupurl', 'backup_url',
+    'mediaurl', 'streamurl', 'dashurl', 'dashaudio', 'mediadescriptor',
+    'mediasource', 'remotesource', 'transientmedia', 'nativesource'
+  ]);
+  const CURATED_ERRORS = Object.freeze({
+    ASR_LANGUAGE_UNSUPPORTED: { message: '本机模型不支持粤语。', hint: '请使用平台提供的粤语字幕，或选择受支持的语言。', retriable: false },
+    RESULT_INCOMPLETE: { message: '本机转录结果不完整。', hint: '请重试此任务。', retriable: true },
+    NATIVE_HOST_NOT_INSTALLED: { message: '未检测到 SparkSub 本机转录服务。', hint: '请安装本机转录服务后重试。', retriable: false },
+    NATIVE_HOST_DISCONNECTED: { message: '本机转录服务已断开。', hint: '请重新连接本机服务后重试。', retriable: true },
+    NATIVE_HOST_TIMEOUT: { message: '本机转录服务响应超时。', hint: '请确认本机服务仍在运行后重试。', retriable: true },
+    PROTOCOL_MISMATCH: { message: '本机转录服务协议不兼容。', hint: '请更新 SparkSub 扩展和本机服务。', retriable: false },
+    PROTOCOL_MESSAGE_TOO_LARGE: { message: '本机转录服务返回的数据过大。', hint: '请重试；如持续发生请更新本机服务。', retriable: true },
+    YTDLP_NOT_INSTALLED: { message: '未安装 YouTube 下载组件。', hint: '请完成本机服务安装后重试。', retriable: false },
+    YTDLP_CHECKSUM_FAILED: { message: 'YouTube 下载组件校验失败。', hint: '请重新安装本机服务。', retriable: false },
+    MEDIA_AUTH_REQUIRED: { message: '该媒体需要登录或访问权限。', hint: '目前仅支持公开可访问的视频。', retriable: false },
+    MEDIA_DOWNLOAD_FAILED: { message: '媒体下载失败。', hint: '请确认视频公开可访问后重试。', retriable: true },
+    MODEL_NOT_FOUND: { message: '未找到本机转录模型。', hint: '请安装受支持的本机模型后重试。', retriable: false },
+    MODEL_LAYOUT_INCOMPATIBLE: { message: '本机转录模型布局不兼容。', hint: '请检查模型版本或重新安装模型。', retriable: false },
+    ASR_FAILED: { message: '本地转录失败。', hint: '请检查本机转录服务后重试。', retriable: true },
+    CANCELLED: { message: '转录已取消。', hint: '可在准备好后重新开始任务。', retriable: false },
+    INVALID_REQUEST: { message: '本机转录请求无效。', hint: '请检查视频和转录设置后重试。', retriable: false }
+  });
 
   /**
    * 规范化视频 URL 与 ID
@@ -302,18 +328,30 @@
   async function readQueueFromStorage() {
     const storage = getStorageArea();
     if (!storage) {
-      return Object.values(globalThis.__BSE_MEMORY_QUEUE_ITEMS__ || {});
+      const items = Object.values(globalThis.__BSE_MEMORY_QUEUE_ITEMS__ || {});
+      const sanitized = items.map(sanitizeQueueItemForPersistence);
+      globalThis.__BSE_MEMORY_QUEUE_ITEMS__ = Object.fromEntries(sanitized.map((item) => [item.id, item]));
+      return sanitized;
     }
     try {
       const res = await storage.get(null);
-      const items = Object.entries(res || {})
+      const entries = Object.entries(res || {})
         .filter(([key, value]) => key.startsWith(STORAGE_KEY_ITEM_PREFIX) && value?.id)
-        .map(([, value]) => value);
+      const items = entries.map(([, value]) => value);
       // Read old installations without making the legacy array the source of truth.
-      if (!items.length && Array.isArray(res?.[STORAGE_KEY_QUEUE])) {
-        return res[STORAGE_KEY_QUEUE];
+      const isLegacyArray = !items.length && Array.isArray(res?.[STORAGE_KEY_QUEUE]);
+      const sourceItems = isLegacyArray ? res[STORAGE_KEY_QUEUE] : items;
+      const sanitizedItems = sourceItems.map(sanitizeQueueItemForPersistence);
+      const changed = isLegacyArray || sourceItems.some((item, index) => (
+        JSON.stringify(item) !== JSON.stringify(sanitizedItems[index])
+      ));
+      if (changed) {
+        const values = {};
+        sanitizedItems.forEach((item) => { values[itemStorageKey(item.id)] = item; });
+        if (Object.keys(values).length) await storage.set(values);
+        if (isLegacyArray && storage.remove) await storage.remove(STORAGE_KEY_QUEUE);
       }
-      return items;
+      return sanitizedItems;
     } catch {
       return [];
     }
@@ -334,7 +372,7 @@
   }
 
   async function writeItems(items, replace = false) {
-    const snapshots = (items || []).map(safeClone);
+    const snapshots = (items || []).map(sanitizeQueueItemForPersistence);
     const storage = getStorageArea();
     if (!storage) {
       const next = replace ? {} : { ...(globalThis.__BSE_MEMORY_QUEUE_ITEMS__ || {}) };
@@ -387,7 +425,7 @@
         // A stale executor must never overwrite the state (or lease) of the
         // executor which currently owns this item.
         const current = queue[index];
-        if (itemSnapshot.leaseOwner && current.leaseOwner && current.leaseOwner !== itemSnapshot.leaseOwner) return false;
+        if (itemSnapshot.leaseOwner && current.leaseOwner !== itemSnapshot.leaseOwner) return false;
         if (itemSnapshot.leaseOwner && itemSnapshot.stage !== 'done' && itemSnapshot.stage !== 'failed') {
           itemSnapshot.leaseExpiresAt = Date.now() + LEASE_DURATION_MS;
         } else if (itemSnapshot.stage === 'done' || itemSnapshot.stage === 'failed') {
@@ -417,6 +455,348 @@
       expiresAt: now + EXECUTION_LEASE_MS
     };
     await saveItem(item);
+  }
+
+  function safeUserHint(value, fallback) {
+    const text = typeof value === 'string' ? value.trim() : '';
+    return text && !/(?:https?:\/\/|(?:upsig|sign|token|deadline|wssecret|wstime|auth_key)\s*(?:=|%3d))/i.test(text)
+      ? text.slice(0, 240)
+      : fallback;
+  }
+
+  function isRemoteMediaDescriptor(value) {
+    return value && typeof value === 'object' && value.kind === 'remote'
+      && typeof value.url === 'string';
+  }
+
+  function isBilibiliMediaUrl(value) {
+    return typeof value === 'string'
+      && /https?:\/\/[^\s]*(?:bilivideo\.com|bilivideo\.cn|hdslb\.com|hdslb\.net|biliapi\.net)/i.test(value);
+  }
+
+  function hasSigningFragment(value) {
+    return typeof value === 'string' && /(?:upsig|sign|token|deadline|wssecret|wstime|auth_key)\s*(?:=|%3d)/i.test(value);
+  }
+
+  function isCaptionContentPath(path) {
+    return path.some((key) => /^(?:captiontext|captionbody|cues|subtitle)$/i.test(key));
+  }
+
+  function isAllowedCaptionOrCanonicalUrl(path, key) {
+    return (path.length === 1 && (key === 'url' || key === 'cover'))
+      || path.some((part) => /^captiontracks$/i.test(part));
+  }
+
+  function isRemoteMediaShape(value) {
+    return value && typeof value === 'object'
+      && typeof value.url === 'string'
+      && isBilibiliMediaUrl(value.url)
+      && (Array.isArray(value.backupUrls) || value.headers && typeof value.headers === 'object');
+  }
+
+  function sanitizePersistedValue(value, parentKey = '', path = []) {
+    if (Array.isArray(value)) return value.map((item) => sanitizePersistedValue(item, parentKey, path));
+    if (typeof value === 'string') {
+      const allowed = isCaptionContentPath(path) || isAllowedCaptionOrCanonicalUrl(path, parentKey);
+      return !allowed && (isBilibiliMediaUrl(value) || hasSigningFragment(value))
+        ? ''
+        : value;
+    }
+    if (!value || typeof value !== 'object') return value;
+    if (isRemoteMediaDescriptor(value) || isRemoteMediaShape(value)) return undefined;
+    const result = {};
+    for (const [key, child] of Object.entries(value)) {
+      const normalizedKey = key.toLowerCase();
+      if (EPHEMERAL_MEDIA_KEYS.has(normalizedKey)) continue;
+      if (isRemoteMediaDescriptor(child) || isRemoteMediaShape(child)) continue;
+      if (normalizedKey === 'source' && child?.kind === 'remote') continue;
+      if (normalizedKey === 'baseurl' && /(?:audio|dash|stream|media)/i.test(parentKey)) continue;
+      const sanitizedChild = sanitizePersistedValue(child, key, [...path, key]);
+      if (sanitizedChild !== undefined) result[key] = sanitizedChild;
+    }
+    return result;
+  }
+
+  function sanitizeQueueItemForPersistence(item) {
+    const sanitized = sanitizePersistedValue(safeClone(item));
+    const fallback = CURATED_ERRORS[sanitized.errorCode] || CURATED_ERRORS.ASR_FAILED;
+    sanitized.stageHint = safeUserHint(sanitized.stageHint, sanitized.stage === 'failed' ? `失败：${fallback.message}` : '正在处理任务…');
+    if (sanitized.stage === 'failed') {
+      sanitized.error = fallback.message;
+      sanitized.errorHint = fallback.hint;
+      sanitized.retriable = fallback.retriable;
+    }
+    return sanitized;
+  }
+
+  function resetForRetry(item, stageHint = '重新排队中…') {
+    item.stage = 'queued';
+    item.progress = 0;
+    item.stageHint = stageHint;
+    for (const key of [
+      'error', 'errorCode', 'errorHint', 'retriable', 'subtitle', 'completedAt',
+      'startedAt', 'stageUpdatedAt', 'leaseOwner', 'leaseExpiresAt', 'executionLease',
+      'audioCache', 'transientMedia', 'mediaDescriptor', 'mediaSource', 'nativeSource'
+    ]) delete item[key];
+    item.stageArtifacts = {};
+    item.metaCache = {};
+    return item;
+  }
+
+  function classifyCaptionTrack(track) {
+    const text = [track?.lan, track?.languageCode, track?.lan_doc, track?.name?.simpleText, track?.id, track?.vssId, track?.kind]
+      .filter(Boolean).join(' ').toLowerCase();
+    if (track?.isTranslated || track?.translated || track?.translationLanguage || /(?:translated|translation|翻译|tlang=)/i.test(`${text} ${track?.baseUrl || ''}`)) return 2;
+    if (track?.isAuto || track?.is_auto || track?.isASR || /^a\./i.test(track?.vssId || '') || /(?:auto-generated|automatic|自动生成|自动字幕|ai字幕|\basr\b|^ai-)/i.test(text)) return 1;
+    return 0;
+  }
+
+  function captionLanguageRank(track, sourceLanguage) {
+    const code = String(track?.lan || track?.languageCode || '').trim().toLowerCase().replace(/_/g, '-');
+    const label = String(track?.lan_doc || track?.name?.simpleText || '').trim().toLowerCase();
+    const requested = String(sourceLanguage || 'auto').trim().toLowerCase().replace(/_/g, '-');
+    if (requested !== 'auto') {
+      if (isCantoneseLanguage(requested)) {
+        if (isCantoneseLanguage(code) || /(?:cantonese|粤|粵)/i.test(label)) return 0;
+      } else if (code === requested || code.startsWith(`${requested}-`)) {
+        return 0;
+      }
+    }
+    if (/^(?:zh|yue)(?:-|$)/.test(code) || /(?:chinese|中文|粤|粵)/i.test(label)) return 1;
+    if (/^en(?:-|$)/.test(code) || /\benglish\b/i.test(label)) return 2;
+    return 3;
+  }
+
+  function rankCaptionTracks(tracks, sourceLanguage) {
+    return (tracks || []).map((track, index) => ({ track, index, kind: classifyCaptionTrack(track) }))
+      .sort((left, right) => (
+        left.kind - right.kind
+        || captionLanguageRank(left.track, sourceLanguage) - captionLanguageRank(right.track, sourceLanguage)
+        || left.index - right.index
+      ))
+      .map(({ track }) => track);
+  }
+
+  const YOUTUBE_TRANSCRIPT_FALLBACK_ID = 'youtube-native-transcript';
+
+  function isTranscriptFallbackTrack(track) {
+    return track?.isTranscriptFallback === true;
+  }
+
+  function createTranscriptFallbackTrack() {
+    return {
+      id: YOUTUBE_TRANSCRIPT_FALLBACK_ID,
+      languageCode: 'auto',
+      name: { simpleText: 'YouTube 原生 Transcript' },
+      isTranscriptFallback: true
+    };
+  }
+
+  function captionTrackIdentity(track) {
+    if (isTranscriptFallbackTrack(track)) return YOUTUBE_TRANSCRIPT_FALLBACK_ID;
+    const language = String(track?.lan || track?.languageCode || '').toLowerCase();
+    const label = String(track?.lan_doc || track?.name?.simpleText || '').trim().toLowerCase();
+    const stableId = track?.id_str || track?.id || track?.vssId || `${language}:${classifyCaptionTrack(track)}:${label}`;
+    return String(stableId);
+  }
+
+  function captionTrackMetadata(track) {
+    if (isTranscriptFallbackTrack(track)) {
+      return {
+        id: YOUTUBE_TRANSCRIPT_FALLBACK_ID,
+        language: 'auto',
+        langDoc: 'YouTube 原生 Transcript',
+        kind: 3,
+        captionKind: 'transcript',
+        isTranscriptFallback: true
+      };
+    }
+    const kind = classifyCaptionTrack(track);
+    return {
+      id: captionTrackIdentity(track),
+      language: track?.lan || track?.languageCode || 'auto',
+      langDoc: track?.lan_doc || track?.name?.simpleText || track?.lan || track?.languageCode || '平台字幕',
+      kind,
+      captionKind: track?.captionKind || ['manual', 'auto', 'translated'][kind] || 'manual'
+    };
+  }
+
+  function isCompleteCue(cue) {
+    return cue
+      && Number.isFinite(Number(cue.from))
+      && Number.isFinite(Number(cue.to))
+      && Number(cue.to) > Number(cue.from)
+      && typeof cue.content === 'string'
+      && cue.content.trim().length > 0;
+  }
+
+  function normalizeCompleteCues(cues) {
+    if (!Array.isArray(cues) || !cues.length || !cues.every(isCompleteCue)) return [];
+    const normalized = BSE.Parsers.normalize(cues);
+    if (!normalized.length || !normalized.every(isCompleteCue)) return [];
+    return normalized.map((cue) => ({
+      from: Number(cue.from),
+      to: Number(cue.to),
+      content: cue.content.trim()
+    }));
+  }
+
+  function isCantoneseLanguage(language) {
+    const normalized = String(language || '').trim().toLowerCase().replace(/_/g, '-');
+    return ['yue', 'zh-hk', 'zh-yue', 'zh-hant-hk'].includes(normalized) || normalized.startsWith('yue-');
+  }
+
+  function nativeError(code, message, hint, retriable = true) {
+    const error = /** @type {import('../types/bse').NativeHostError} */ (new Error(message));
+    error.code = code;
+    error.hint = safeUserHint(hint, '请重试此任务。');
+    error.retriable = retriable;
+    return error;
+  }
+
+  function nextNativeJobId(item, operation) {
+    nativeJobSequence += 1;
+    return `${item.id}:${operation}:${EXECUTOR_ID}:${nativeJobSequence}`;
+  }
+
+  function setCompletedSubtitle(item, cues, details) {
+    const completeCues = normalizeCompleteCues(cues);
+    if (!completeCues.length) {
+      throw nativeError('RESULT_INCOMPLETE', '字幕结果不完整。', '未收到有效且非空的字幕内容。');
+    }
+    const processed = formatCuesToStructured(completeCues, item.title, item.author, item.url);
+    if (!processed.cueCount || !processed.plainText.trim()) {
+      throw nativeError('RESULT_INCOMPLETE', '字幕结果不完整。', '未收到有效且非空的字幕内容。');
+    }
+    item.subtitle = {
+      language: details.language || 'auto',
+      langDoc: details.langDoc || details.language || '自动识别',
+      source: details.source,
+      engine: details.engine,
+      ...(details.captionKind ? { captionKind: details.captionKind } : {}),
+      cueCount: processed.cueCount,
+      plainText: processed.plainText,
+      markdown: processed.markdown,
+      srt: processed.srt,
+      cues: processed.cues
+    };
+    delete item.error;
+    delete item.errorCode;
+    delete item.errorHint;
+    delete item.retriable;
+  }
+
+  async function transcribeWithNativeHost(item, source, signal) {
+    if (isCantoneseLanguage(item.sourceLanguage)) {
+      throw nativeError('ASR_LANGUAGE_UNSUPPORTED', '本机模型不支持粤语。', '请使用平台提供的粤语字幕，或选择受支持的语言。', false);
+    }
+    if (!BSE.NativeHost?.transcribe) {
+      throw nativeError('NATIVE_HOST_NOT_INSTALLED', '未检测到 SparkSub 本机转录服务。', '请安装本机转录服务后重试。', false);
+    }
+
+    let writeTail = Promise.resolve();
+    let lastPersisted = { stage: '', progress: -1, at: 0 };
+    const onProgress = (event) => {
+      const nativeStage = String(event?.stage || '').toLowerCase();
+      const stage = /fetch|download|audio/.test(nativeStage) ? 'fetching_audio' : 'transcribing';
+      const minimum = stage === 'fetching_audio' ? 50 : 70;
+      const maximum = stage === 'fetching_audio' ? 70 : 95;
+      const value = Number(event?.percent);
+      const progress = Math.max(minimum, Math.min(maximum, Number.isFinite(value) ? value : minimum));
+      const now = Date.now();
+      item.stage = stage;
+      item.progress = progress;
+      item.stageHint = safeUserHint(event?.hint, stage === 'fetching_audio' ? '正在准备音频…' : '正在本地转录…');
+      item.stageUpdatedAt = now;
+      item.leaseExpiresAt = now + LEASE_DURATION_MS;
+      item.executionLease = {
+        owner: item.executionLease?.owner || EXECUTOR_ID,
+        acquiredAt: item.executionLease?.acquiredAt || now,
+        expiresAt: now + EXECUTION_LEASE_MS
+      };
+      const meaningful = lastPersisted.stage !== stage || now - lastPersisted.at >= 1000;
+      if (!meaningful) return writeTail;
+      lastPersisted = { stage, progress, at: now };
+      const snapshot = safeClone(item);
+      writeTail = writeTail.then(() => saveItem(snapshot));
+      return writeTail;
+    };
+
+    let result;
+    try {
+      result = await BSE.NativeHost.transcribe({
+        jobId: nextNativeJobId(item, 'asr'),
+        sourceLanguage: item.sourceLanguage || 'auto',
+        title: item.title,
+        ...(Number.isFinite(Number(item.duration)) ? { duration: Number(item.duration) } : {}),
+        source
+      }, { onProgress, signal });
+    } finally {
+      await writeTail;
+    }
+    const cues = normalizeCompleteCues(result);
+    if (!cues.length) {
+      throw nativeError('RESULT_INCOMPLETE', '本机转录结果不完整。', '本机服务没有返回有效的字幕内容。');
+    }
+    return cues;
+  }
+
+  async function fetchYouTubeCaptionsWithNativeHost(item, source, signal) {
+    if (!BSE.NativeHost?.fetchYouTubeCaptions) return null;
+
+    let writeTail = Promise.resolve();
+    let lastPersistedAt = 0;
+    const onProgress = (event) => {
+      const now = Date.now();
+      item.stage = 'fetching_caption';
+      item.progress = Math.max(45, Math.min(70, Number.isFinite(Number(event?.percent)) ? Number(event.percent) : 55));
+      item.stageHint = safeUserHint(event?.hint, '正在通过本机服务读取 YouTube 原生字幕…');
+      item.stageUpdatedAt = now;
+      item.leaseExpiresAt = now + LEASE_DURATION_MS;
+      item.executionLease = {
+        owner: item.executionLease?.owner || EXECUTOR_ID,
+        acquiredAt: item.executionLease?.acquiredAt || now,
+        expiresAt: now + EXECUTION_LEASE_MS
+      };
+      if (now - lastPersistedAt < 1000) return writeTail;
+      lastPersistedAt = now;
+      const snapshot = safeClone(item);
+      writeTail = writeTail.then(() => saveItem(snapshot));
+      return writeTail;
+    };
+
+    let result;
+    try {
+      result = await BSE.NativeHost.fetchYouTubeCaptions({
+        jobId: nextNativeJobId(item, 'youtube-captions'),
+        sourceLanguage: item.sourceLanguage || 'auto',
+        source
+      }, { onProgress, signal });
+    } catch (error) {
+      if (error?.code === 'CAPTIONS_NOT_FOUND') return null;
+      throw error;
+    } finally {
+      await writeTail;
+    }
+
+    const cues = normalizeCompleteCues(result?.cues);
+    if (!cues.length
+      || typeof result?.language !== 'string' || !result.language.trim()
+      || typeof result?.langDoc !== 'string' || !result.langDoc.trim()
+      || !['manual', 'auto', 'translated'].includes(result?.kind)) {
+      throw nativeError('RESULT_INCOMPLETE', '本机字幕结果不完整。', '本机服务没有返回有效的 YouTube 字幕。');
+    }
+    return {
+      cues,
+      track: {
+        id: `native-youtube:${result.kind}:${result.language}`,
+        languageCode: result.language,
+        name: { simpleText: result.langDoc },
+        ...(result.kind === 'auto' ? { isAuto: true, vssId: `a.${result.language}` } : {}),
+        ...(result.kind === 'translated' ? { isTranslated: true } : {}),
+        captionKind: result.kind
+      }
+    };
   }
 
   function finishExecution(item) {
@@ -496,6 +876,7 @@
   async function addToQueue(urlsOrIds, options = {}) {
     const rawList = Array.isArray(urlsOrIds) ? urlsOrIds : [urlsOrIds];
     const addedItems = [];
+    const settings = await getSettings();
     await serializeQueueMutation(async (queue) => {
       for (const raw of rawList) {
         const rawString = typeof raw === 'object' && raw ? (raw.url || raw.targetId || raw.cleanUrl || '') : String(raw || '');
@@ -512,10 +893,10 @@
           const existing = queue[existingIndex];
           // 若已完成，返回已有项；若失败，重置为排队重试
           if (existing.stage === 'failed') {
-            existing.stage = 'queued';
-            existing.error = undefined;
-            existing.progress = 0;
-            existing.stageHint = '重新排队中';
+            resetForRetry(existing);
+            if (typeof opt.sourceLanguage === 'string' && opt.sourceLanguage.trim()) {
+              existing.sourceLanguage = opt.sourceLanguage.trim();
+            }
             addedItems.push(existing);
           } else {
             addedItems.push(existing);
@@ -535,6 +916,9 @@
           stage: 'queued',
           progress: 0,
           stageHint: '排队中…',
+          sourceLanguage: typeof opt.sourceLanguage === 'string' && opt.sourceLanguage.trim()
+            ? opt.sourceLanguage.trim()
+            : (settings.sourceLanguage || 'auto'),
           addedAt: Date.now(),
           metaCache: {
             title: opt.title,
@@ -557,6 +941,7 @@
   }
 
   async function removeFromQueue(id) {
+    cancelInFlight(id);
     const removed = await serializeQueueMutation(async (queue) => {
       if (!queue.some((item) => item.id === id)) return false;
       await writeItems(queue.filter((item) => item.id !== id), true);
@@ -583,33 +968,23 @@
   }
 
   async function clearAll() {
+    cancelAllInFlight();
     await saveQueue([]);
     broadcastQueueUpdate();
   }
 
   async function retryItem(id) {
+    cancelInFlight(id);
     const item = await serializeQueueMutation(async (queue) => {
       const target = queue.find((i) => i.id === id);
       if (!target) return null;
-      target.stage = 'queued';
-      target.error = undefined;
-      target.progress = 0;
-      target.stageHint = '重新排队中…';
-      delete target.leaseOwner;
-      delete target.leaseExpiresAt;
-      delete target.executionLease;
-      delete target.startedAt;
-      delete target.stageUpdatedAt;
-      delete target.completedAt;
-      target.stageArtifacts = {};
-      target.metaCache = {};
+      resetForRetry(target);
       await writeItems([target]);
       return target;
     });
     if (!item) return null;
     broadcastQueueUpdate();
     notifyOrchestrator();
-    processPendingJobs().catch(() => {});
     return item;
   }
 
@@ -683,6 +1058,19 @@
   const inFlightControllers = new Map();
   let isProcessingJobs = false;
 
+  function cancelInFlight(id) {
+    const controller = inFlightControllers.get(id);
+    if (!controller || controller.signal.aborted) return false;
+    controller.abort();
+    return true;
+  }
+
+  function cancelAllInFlight() {
+    for (const controller of inFlightControllers.values()) {
+      if (!controller.signal.aborted) controller.abort();
+    }
+  }
+
   async function fetchBilibiliNavKeys(signal) {
     try {
       const resp = await BSE.Utils.fetchWithTimeout(
@@ -749,7 +1137,7 @@
     // === Stage 2: Fetching Caption ===
     let subtitles = item.stageArtifacts?.captionTracks || [];
     let captionBody = item.stageArtifacts?.captionBody || null;
-    if (!captionBody && !subtitles.length) {
+    if (!subtitles.length) {
       await enterStage(item, 'fetching_caption', 40, '正在提取官方/AI字幕…');
       const { imgKey, subKey } = await fetchBilibiliNavKeys(signal);
       const signed = calculateWbiSign({ bvid, cid }, imgKey, subKey);
@@ -764,83 +1152,79 @@
       await saveItem(item);
     }
 
-    if (!subtitles.length && !captionBody) {
-      // 尝试回退至音频探测
-      await enterStage(item, 'fetching_audio', 60, '未发现字幕轨道，正在探测音频直链…');
+    const captionCandidates = rankCaptionTracks(subtitles, item.sourceLanguage);
+    const cachedCaptionTrackId = item.stageArtifacts?.captionTrackId || '';
+    const cachedCues = normalizeCompleteCues(captionBody);
+    let chosenSub = null;
+    let cues = [];
+    for (const candidate of captionCandidates) {
+      const candidateTrackId = captionTrackIdentity(candidate);
+      if (cachedCues.length && cachedCaptionTrackId === candidateTrackId) {
+        cues = cachedCues;
+        chosenSub = candidate;
+        break;
+      }
+      if (!cues.length) {
+        let subUrl = candidate?.subtitle_url || candidate?.url || '';
+        if (subUrl.startsWith('//')) subUrl = `https:${subUrl}`;
+        else if (subUrl.startsWith('http://')) subUrl = subUrl.replace(/^http:\/\//i, 'https://');
+        if (!subUrl) continue;
+        await enterStage(item, 'fetching_caption', 50, `正在下载《${candidate?.lan_doc || candidate?.lan || '默认'}》字幕…`);
+        try {
+          const subContentResp = await BSE.Utils.fetchWithTimeout(subUrl, { signal, credentials: 'include' }, 7000);
+          const subContentJson = await subContentResp.json();
+          const candidateCues = normalizeCompleteCues(subContentJson?.body || []);
+          if (!candidateCues.length) continue;
+          captionBody = subContentJson.body;
+          cues = candidateCues;
+          chosenSub = candidate;
+          item.stageArtifacts = {
+            ...(item.stageArtifacts || {}),
+            captionBody,
+            captionTrackId: candidateTrackId,
+            selectedCaption: captionTrackMetadata(candidate)
+          };
+          await saveItem(item);
+          break;
+        } catch (error) {
+          if (error?.name === 'AbortError') throw error;
+        }
+      }
+    }
 
+    if (!cues.length) {
+      await enterStage(item, 'fetching_audio', 60, '平台字幕不可用，正在准备本地转录…');
       const playUrlResp = await BSE.Utils.fetchWithTimeout(
         `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${cid}&fnval=4048`,
         { signal, credentials: 'include' },
         6000
       );
       const playJson = await playUrlResp.json();
-      const audioUrl = playJson?.data?.dash?.audio?.[0]?.baseUrl || playJson?.data?.dash?.audio?.[0]?.base_url;
-      if (audioUrl) {
-        item.audioCache = { audioUrl, bandwidth: playJson?.data?.dash?.audio?.[0]?.bandwidth || 0 };
-        item.subtitle = {
-          language: 'audio_stream',
-          langDoc: '音频直链已就绪 (无内嵌字幕)',
-          cueCount: 0,
-          plainText: `该视频暂无内置字幕，已成功提取 DASH 音频直链 (${Math.round((item.audioCache.bandwidth || 0) / 1000)}kbps)，可用于后续 ASR 转录。`,
-          markdown: `> 提示：该视频暂无官方或 AI 字幕，已成功获取音频直链。`
-        };
-        item.stage = 'done';
-        item.progress = 100;
-        item.stageHint = '无字幕 · 已提取音频直链';
-        item.completedAt = Date.now();
-        finishExecution(item);
-        await saveItem(item);
-        return;
+      const source = BSE.Media?.selectBilibiliAudio(playJson?.data?.dash?.audio || []);
+      if (!source) {
+        throw nativeError('MEDIA_DOWNLOAD_FAILED', '无法获取可用的 Bilibili 音频流。', '请确认视频公开可访问后重试。');
       }
-      throw new Error('该视频暂无字幕轨道，且无法获取音频流');
+      cues = await transcribeWithNativeHost(item, source, signal);
+      await enterStage(item, 'postprocessing', 95, '正在整理本地转录结果…');
+      setCompletedSubtitle(item, cues, {
+        language: item.sourceLanguage || 'auto',
+        langDoc: '本地自动转录',
+        source: 'native',
+        engine: 'local-asr'
+      });
+    } else {
+      await enterStage(item, 'postprocessing', 85, '正在进行自然段落切分与 Markdown 格式化…');
+      setCompletedSubtitle(item, cues, {
+        language: chosenSub?.lan || 'auto',
+        langDoc: chosenSub?.lan_doc || chosenSub?.lan || '平台字幕',
+        source: 'platform',
+        engine: 'bilibili'
+      });
     }
 
-    const chosenSub = subtitles.find((s) => /zh|cn|中/i.test(s.lan || s.lan_doc || ''))
-      || subtitles[0]
-      || item.stageArtifacts?.chosenCaption;
-    let subUrl = chosenSub?.subtitle_url || chosenSub?.url || '';
-    if (subUrl.startsWith('//')) subUrl = `https:${subUrl}`;
-    else if (subUrl.startsWith('http://')) subUrl = subUrl.replace(/^http:\/\//i, 'https://');
-
-    if (!captionBody) {
-      await enterStage(item, 'fetching_caption', 50, `正在下载《${chosenSub?.lan_doc || chosenSub?.lan || '默认'}》字幕…`);
-      const subContentResp = await BSE.Utils.fetchWithTimeout(subUrl, { signal, credentials: 'include' }, 7000);
-      const subContentJson = await subContentResp.json();
-      captionBody = subContentJson?.body || [];
-      item.stageArtifacts = { ...(item.stageArtifacts || {}), captionBody, chosenCaption: { lan: chosenSub?.lan, lan_doc: chosenSub?.lan_doc } };
-      await saveItem(item);
-    }
-    const rawBody = captionBody;
-
-    if (!rawBody.length) {
-      throw new Error('字幕内容为空');
-    }
-
-    const cues = rawBody.map((b) => ({
-      from: Number(b.from || 0),
-      to: Number(b.to || 0),
-      content: String(b.content || '').trim()
-    }));
-
-    // === Stage 3: Postprocessing ===
-    await enterStage(item, 'postprocessing', 85, '正在进行自然段落切分与 Markdown 格式化…');
-
-    const processed = formatCuesToStructured(cues, item.title, item.author, item.url);
-
-    item.subtitle = {
-      language: chosenSub?.lan,
-      langDoc: chosenSub?.lan_doc || '中文',
-      cueCount: processed.cueCount,
-      plainText: processed.plainText,
-      markdown: processed.markdown,
-      srt: processed.srt,
-      cues: processed.cues
-    };
-
-    // === Stage 4: Done ===
     item.stage = 'done';
     item.progress = 100;
-    item.stageHint = `完成 · 共 ${processed.cueCount} 句字幕`;
+    item.stageHint = `完成 · 共 ${item.subtitle.cueCount} 句字幕`;
     item.completedAt = Date.now();
     finishExecution(item);
     await saveItem(item);
@@ -1032,7 +1416,14 @@
       };
       item.stageArtifacts = { ...(item.stageArtifacts || {}), metadataResolved: true };
       if (directRawText) {
+        const matchedDirectTrack = directChosenTrack && captionTracks.find((track) => (
+          captionTrackIdentity(track) === captionTrackIdentity(directChosenTrack)
+        ));
+        const directArtifactTrack = matchedDirectTrack || createTranscriptFallbackTrack();
         item.stageArtifacts.captionText = directRawText;
+        item.stageArtifacts.captionTrackId = captionTrackIdentity(directArtifactTrack);
+        item.stageArtifacts.selectedCaption = captionTrackMetadata(directArtifactTrack);
+        item.stageArtifacts.isTranscriptFallback = isTranscriptFallbackTrack(directArtifactTrack);
       }
       await saveItem(item);
     } else {
@@ -1041,25 +1432,35 @@
       item.cover = item.metaCache.cover || item.cover;
     }
 
-    if (!captionTracks || !captionTracks.length) {
-      throw new Error('该 YouTube 视频未提供字幕轨道');
-    }
-
-    const chosenTrack = directChosenTrack
-      || captionTracks.find((t) => /zh|cn|chinese|中/i.test(t.languageCode || t.name?.simpleText || ''))
-      || captionTracks.find((t) => /en|english/i.test(t.languageCode || t.name?.simpleText || ''))
-      || captionTracks[0];
+    const rankedCaptionTracks = rankCaptionTracks(captionTracks, item.sourceLanguage);
+    const chosenTrack = rankedCaptionTracks[0] || null;
 
     // Download Caption with Multi-format Resilience (JSON3 / XML / TTML / VTT) and Fallback Tracks
-    let rawCaptionText = item.stageArtifacts?.captionText || directRawText || '';
-    let cues = item.stageArtifacts?.cues || (rawCaptionText ? BSE.Parsers.parse(rawCaptionText) : []);
-    let actualTrack = chosenTrack;
+    const cachedCaptionText = item.stageArtifacts?.captionText || '';
+    const cachedCaptionCues = normalizeCompleteCues(item.stageArtifacts?.cues || (cachedCaptionText ? BSE.Parsers.parse(cachedCaptionText) : []));
+    const cachedCaptionTrackId = item.stageArtifacts?.captionTrackId || '';
+    const cachedTranscriptFallback = item.stageArtifacts?.isTranscriptFallback === true
+      || item.stageArtifacts?.selectedCaption?.isTranscriptFallback === true;
+    const directTranscriptFallback = cachedTranscriptFallback && cachedCaptionTrackId === YOUTUBE_TRANSCRIPT_FALLBACK_ID
+      ? createTranscriptFallbackTrack()
+      : null;
+    let rawCaptionText = '';
+    let cues = [];
+    let actualTrack = null;
 
-    if (!cues.length) {
-      await enterStage(item, 'fetching_caption', 50, `正在下载《${chosenTrack.name?.simpleText || chosenTrack.languageCode || '默认'}》字幕…`);
+    if (chosenTrack || directTranscriptFallback) {
+      const displayTrack = chosenTrack || directTranscriptFallback;
+      await enterStage(item, 'fetching_caption', 50, `正在下载《${displayTrack.name?.simpleText || displayTrack.languageCode || '默认'}》字幕…`);
 
-      const candidateTracks = [chosenTrack, ...captionTracks.filter((t) => t !== chosenTrack)];
+      const candidateTracks = rankedCaptionTracks;
       for (const track of candidateTracks) {
+        const candidateTrackId = captionTrackIdentity(track);
+        if (cachedCaptionCues.length && cachedCaptionTrackId === candidateTrackId) {
+          cues = cachedCaptionCues;
+          rawCaptionText = cachedCaptionText;
+          actualTrack = track;
+          break;
+        }
         if (!track?.baseUrl) continue;
         const candidateUrls = [
           track.baseUrl.includes('fmt=') ? track.baseUrl : `${track.baseUrl}&fmt=json3`,
@@ -1077,8 +1478,9 @@
             const text = await resp.text();
             if (text && !text.includes('<!DOCTYPE html>')) {
               const parsed = BSE.Parsers.parse(text);
-              if (parsed && parsed.length > 0) {
-                cues = parsed;
+              const completeCues = normalizeCompleteCues(parsed);
+              if (completeCues.length) {
+                cues = completeCues;
                 rawCaptionText = text;
                 actualTrack = track;
                 break;
@@ -1089,35 +1491,71 @@
         if (cues.length > 0) break;
       }
 
+      if (!cues.length && directTranscriptFallback && cachedCaptionCues.length) {
+        cues = cachedCaptionCues;
+        rawCaptionText = cachedCaptionText;
+        actualTrack = directTranscriptFallback;
+      }
+
       if (rawCaptionText && cues.length > 0) {
-        item.stageArtifacts = { ...(item.stageArtifacts || {}), captionText: rawCaptionText, cues };
+        item.stageArtifacts = {
+          ...(item.stageArtifacts || {}),
+          captionText: rawCaptionText,
+          cues,
+          captionTrackId: captionTrackIdentity(actualTrack),
+          selectedCaption: captionTrackMetadata(actualTrack),
+          isTranscriptFallback: isTranscriptFallbackTrack(actualTrack)
+        };
         await saveItem(item);
       }
     }
 
-    if (!cues || !cues.length) {
-      throw new Error('YouTube 字幕数据为空或无法解析');
+    if (!cues.length) {
+      await enterStage(item, 'fetching_caption', 55, '扩展字幕链路不可用，正在通过本机服务读取 YouTube 原生字幕…');
+      const nativeCaption = await fetchYouTubeCaptionsWithNativeHost(
+        item,
+        { kind: 'youtube', url: `https://www.youtube.com/watch?v=${videoId}` },
+        signal
+      );
+      if (nativeCaption?.cues?.length) {
+        cues = nativeCaption.cues;
+        actualTrack = nativeCaption.track;
+        item.stageArtifacts = {
+          ...(item.stageArtifacts || {}),
+          cues,
+          captionTrackId: captionTrackIdentity(actualTrack),
+          selectedCaption: captionTrackMetadata(actualTrack),
+          isTranscriptFallback: false
+        };
+        await saveItem(item);
+      }
     }
 
-    // === Stage 2: Postprocessing ===
-    await enterStage(item, 'postprocessing', 85, '正在整理结构化段落与 SRT…');
+    if (!cues.length) {
+      await enterStage(item, 'fetching_audio', 60, '平台字幕不可用，正在准备本地转录…');
+      const source = { kind: 'youtube', url: `https://www.youtube.com/watch?v=${videoId}` };
+      cues = await transcribeWithNativeHost(item, source, signal);
+      await enterStage(item, 'postprocessing', 95, '正在整理本地转录结果…');
+      setCompletedSubtitle(item, cues, {
+        language: item.sourceLanguage || 'auto',
+        langDoc: '本地自动转录',
+        source: 'native',
+        engine: 'local-asr'
+      });
+    } else {
+      await enterStage(item, 'postprocessing', 85, '正在整理结构化段落与 SRT…');
+      setCompletedSubtitle(item, cues, {
+        language: actualTrack?.languageCode || 'auto',
+        langDoc: actualTrack?.name?.simpleText || actualTrack?.languageCode || '平台字幕',
+        source: 'platform',
+        engine: 'youtube',
+        captionKind: captionTrackMetadata(actualTrack).captionKind
+      });
+    }
 
-    const processed = formatCuesToStructured(cues, item.title, item.author, item.url);
-
-    item.subtitle = {
-      language: actualTrack.languageCode,
-      langDoc: actualTrack.name?.simpleText || actualTrack.languageCode,
-      cueCount: processed.cueCount,
-      plainText: processed.plainText,
-      markdown: processed.markdown,
-      srt: processed.srt,
-      cues: processed.cues
-    };
-
-    // === Stage 3: Done ===
     item.stage = 'done';
     item.progress = 100;
-    item.stageHint = `完成 · 共 ${processed.cueCount} 句字幕`;
+    item.stageHint = `完成 · 共 ${item.subtitle.cueCount} 句字幕`;
     item.completedAt = Date.now();
     finishExecution(item);
     await saveItem(item);
@@ -1176,30 +1614,37 @@
           batch.map(async (item) => {
             const controller = new AbortController();
             inFlightControllers.set(item.id, controller);
-            item.startedAt = Date.now();
-            item.stageUpdatedAt = item.startedAt;
-            item.executionLease = {
-              owner: EXECUTOR_ID,
-              acquiredAt: item.startedAt,
-              expiresAt: item.startedAt + EXECUTION_LEASE_MS
-            };
-            await saveItem(item);
             try {
+              item.startedAt = Date.now();
+              item.stageUpdatedAt = item.startedAt;
+              item.executionLease = {
+                owner: EXECUTOR_ID,
+                acquiredAt: item.startedAt,
+                expiresAt: item.startedAt + EXECUTION_LEASE_MS
+              };
+              const stillOwned = await saveItem(item);
+              if (!stillOwned || controller.signal.aborted) return;
               if (item.platform === 'bilibili') {
                 await processBilibiliItem(item, controller.signal);
               } else if (item.platform === 'youtube') {
                 await processYouTubeItem(item, controller.signal);
               }
             } catch (err) {
-              if (err?.name === 'AbortError') return;
+              if (controller.signal.aborted || err?.name === 'AbortError') return;
               item.stage = 'failed';
               item.progress = 0;
-              item.error = err.message || '转录处理异常';
-              item.stageHint = `失败：${item.error}`;
+              item.errorCode = err?.code || 'ASR_FAILED';
+              const presentation = CURATED_ERRORS[item.errorCode] || CURATED_ERRORS.ASR_FAILED;
+              item.error = presentation.message;
+              item.errorHint = presentation.hint;
+              item.retriable = presentation.retriable;
+              item.stageHint = `失败：${presentation.message}`;
               finishExecution(item);
               await saveItem(item);
             } finally {
-              inFlightControllers.delete(item.id);
+              if (inFlightControllers.get(item.id) === controller) {
+                inFlightControllers.delete(item.id);
+              }
             }
           })
         );

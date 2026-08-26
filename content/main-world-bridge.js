@@ -220,7 +220,14 @@
         rawText,
         cues,
         captionTracks,
-        chosenTrack: { languageCode: 'zh-Hans', name: { simpleText: '原生转录字幕' } }
+        // get_transcript does not expose a reliable caption-track identity.
+        // Keep this separate from listed tracks so the queue can try them first.
+        chosenTrack: {
+          id: 'youtube-native-transcript',
+          languageCode: 'auto',
+          name: { simpleText: 'YouTube 原生 Transcript' },
+          isTranscriptFallback: true
+        }
       };
     }
 
