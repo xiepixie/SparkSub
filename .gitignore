@@ -2,6 +2,14 @@
 .DS_Store
 Thumbs.db
 
+# Swift & SPM Build Artifacts
+.build/
+.swiftpm/
+Packages/
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+
 # Logs
 *.log
 npm-debug.log*

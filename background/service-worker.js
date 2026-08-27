@@ -8,6 +8,7 @@ try {
     '/core/parsers.js',
     '/core/media.js',
     '/core/formatters.js',
+    '/core/asr-polisher.js',
     '/core/tracker.js',
     '/core/native-host.js',
     '/core/queue-orchestrator.js',
@@ -26,6 +27,7 @@ const MAX_PROXY_BODY_BYTES = 5 * 1024 * 1024;
 const BILIBILI_REQUEST_TIMEOUT_MS = 15000;
 
 const BILIBILI_REFERER_RULE_ID = 1001;
+const OLLAMA_ORIGIN_RULE_ID = 1002;
 const ALARM_SUBSCRIPTION_CHECK = 'BSE_SUBSCRIPTION_CHECK';
 const queueOrchestrator = BSE.QueueOrchestrator?.create({
   drain: () => BSE.Queue?.processPendingJobs?.() || Promise.resolve()
@@ -110,7 +112,7 @@ async function setupBilibiliNetRules() {
   if (!chrome.declarativeNetRequest) return;
   try {
     await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: [BILIBILI_REFERER_RULE_ID],
+      removeRuleIds: [BILIBILI_REFERER_RULE_ID, OLLAMA_ORIGIN_RULE_ID],
       addRules: [
         {
           id: BILIBILI_REFERER_RULE_ID,
@@ -126,6 +128,20 @@ async function setupBilibiliNetRules() {
           condition: {
             urlFilter: '*bilivideo.*',
             resourceTypes: ['xmlhttprequest', 'media', 'other', 'main_frame', 'sub_frame']
+          }
+        },
+        {
+          id: OLLAMA_ORIGIN_RULE_ID,
+          priority: 2,
+          action: {
+            type: 'modifyHeaders',
+            requestHeaders: [
+              { header: 'Origin', operation: 'set', value: 'http://127.0.0.1:11434' }
+            ]
+          },
+          condition: {
+            urlFilter: '*11434*',
+            resourceTypes: ['xmlhttprequest', 'other']
           }
         }
       ]
@@ -169,13 +185,12 @@ function isBilibiliVideoPage(url = '') {
 function isTrustedSender(sender, platform) {
   if (!sender || sender.id !== chrome.runtime.id) return false;
 
-  // Extension-owned pages (for example the side panel) do not have a tab.
-  if (!sender.tab) {
-    const extensionRoot = chrome.runtime.getURL('');
-    return Boolean(sender.url && sender.url.startsWith(extensionRoot));
+  const extensionRoot = chrome.runtime.getURL('');
+  if (sender.url && sender.url.startsWith(extensionRoot)) {
+    return true;
   }
 
-  const pageUrl = sender.tab.url || sender.url || '';
+  const pageUrl = sender.tab?.url || sender.url || '';
   if (platform === 'bilibili') return isBilibiliVideoPage(pageUrl);
   try {
     const host = new URL(pageUrl).hostname.toLowerCase();
@@ -189,7 +204,6 @@ function isTrustedExtensionPageSender(sender) {
   const extensionRoot = chrome.runtime.getURL('');
   return Boolean(sender
     && sender.id === chrome.runtime.id
-    && !sender.tab
     && sender.url
     && sender.url.startsWith(extensionRoot));
 }
@@ -710,6 +724,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'BSE_FETCH_LOCAL_LLM') {
+    const url = message.url;
+    const body = message.body;
+    const timeoutMs = Math.max(60000, Number(message.timeoutMs) || 90000);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const options = {
+      method: body ? 'POST' : 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      ...(body ? { body: typeof body === 'string' ? body : JSON.stringify(body) } : {}),
+      signal: controller.signal
+    };
+    fetch(url, options)
+      .then(async (resp) => {
+        clearTimeout(timer);
+        const text = await resp.text();
+        sendResponse({ success: resp.ok, status: resp.status, text });
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        sendResponse({ success: false, error: err.message });
+      });
+    return true;
+  }
+
   if (message.type === 'BSE_DOWNLOAD_MEDIA_FILE') {
     (async () => {
       const { url, filename } = message;
@@ -775,7 +814,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'BSE_OPEN_SIDE_PANEL' && sender.tab?.id != null) {
     chrome.sidePanel.open({ tabId: sender.tab.id })
-      .then(() => sendResponse({ ok: true }))
+      .then(() => {
+        if (message.tab) {
+          setTimeout(() => {
+            chrome.runtime.sendMessage({
+              type: 'BSE_SWITCH_SIDE_PANEL_TAB',
+              tab: message.tab
+            }).catch(() => {});
+          }, 150);
+        }
+        sendResponse({ ok: true });
+      })
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }

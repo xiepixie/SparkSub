@@ -8,106 +8,91 @@
 
 ---
 
-## 🌟 核心特性
+## ⚡ 1 分钟极速上手（浏览器扩展安装）
 
-- **📺 播放器旁伴随滚动面板 (Rolling Panel)**
-  - 自动吸附在播放器右侧，随播放进度实时平滑滚动并高亮当前句。
-  - 自由切换 **智能多行换行** 与 **单行纯文本** 模式，支持字号与行高微调。
-  - 支持关键词秒级检索与点击任意台词跳转播放进度。
-  - 全屏沉浸模式与剧场模式自适应。
+本扩展**完全开箱即用，无需任何编译**，下载后直接导入 Chrome 即可使用：
 
-- **📑 Chrome 独立侧边栏 (Sidepanel)**
-  - 时间戳视图、纯文本视图与 AI 提示词视图无缝切换。
-  - 毫秒级多语言与双语轨道切换。
-  - 针对无字幕视频的精准状态侦测与空状态提示。
+1. **下载或克隆项目**：
+   * **方式 A（小白用户）**：点击 GitHub 页面绿色的 **`Code` ➔ `Download ZIP`**，下载并解压到电脑任意文件夹（例如 `Downloads/SparkSub`）；
+   * **方式 B（开发者）**：运行命令 `git clone https://github.com/xiepixie/SparkSub.git`。
 
-- **⚡ B 站合集/多P 一键批量收割 (Batch Harvest)**
-  - 一键扫描整个分P列表、电视剧/番剧季、UP 主自选合集与系列。
-  - 智能多线程并行抓取，支持勾选/反选与选择性导出。
-  - **Merged Markdown**：自动合并全集为带层级目录与自然段落分段的完整知识库文档。
-  - 打包生成标准 ZIP，内含 TXT、SRT、VTT、JSON 及合集总览。
-  - **DASH 纯音频提取**：直接获取官方纯音频流直链，方便导入 Whisper / 播客剪辑。
+2. **在浏览器中加载**：
+   1. 打开 Chrome 或任何 Chromium 内核浏览器（Edge、Arc、Brave、360 等）；
+   2. 在地址栏输入并回车访问：
+      ```text
+      chrome://extensions
+      ```
+   3. 打开页面右上角的 **「开发者模式」** 开关；
+   4. 点击左上角的 **「加载已解压的扩展程序」**；
+   5. 选择刚才解压的 **`SparkSub` 文件夹**（即包含 `manifest.json` 的主目录）。
 
-- **🔔 UP 主与课程合集订阅追踪中心 (Tracker & Unattended Harvest)**
-  - **智能订阅感知**：在任意播放页一键关注 UP 主或订阅专属专题合集 / 多 P 连载。
-  - **后台无人值守自动巡检**：基于 `chrome.alarms` 定时巡检，内置纯 JS MD5 + WBI 签名加密与 YouTube 官方 RSS 解析。
-  - **新视频字幕自动秒级抓取**：巡检发现新发布视频后，后台自动拉取官方字幕并转换为排版整洁的 Markdown 文档缓存于本地。
-  - **极速生产力交互**：更新卡片支持 **「📋 复制 MD」**（一键复制完整字幕）、**「👁️ 预览」**（卡片内原位展开阅读）与 **「📋 合并复制未读」**（多篇长文一并打包复制）。
-  - **更新触达与角标**：扩展图标未读角标提示 + 系统桌面弹窗提醒。
-  - **配置导入与导出**：一键导出为标准 JSON 备份或跨浏览器快速迁移。
-
-- **📥 无需播放的后台转录队列**
-  - 加入队列后由 MV3 Service Worker 独占调度；视频标签页可以关闭，任务仍按“平台字幕优先、本机 ASR 兜底”完成整条视频。
-  - 关闭标签页后，YouTube 公共视频由固定版本的 `yt-dlp_macos` 先盘点，并按人工字幕、自动 CC、翻译字幕逐轨尝试（每次只下载一轨）；全部不可用时才获取 M4A/MP4 音频。Bilibili 复用受限 DASH 音频描述符，不把带签名地址写入持久存储。
-  - 普通话路由到本地 Cohere，英语及受支持的欧洲语言路由到 Parakeet。粤语只使用 YouTube/Bilibili 平台字幕；平台无字幕时会明确失败，不会误用普通话模型。
-  - 队列保存字幕语言与 `manual / auto / translated` 轨道类型；卡片显示真实来源（平台字幕、Parakeet 或 Cohere）、稳定错误码、脱敏建议和是否可重试。
-
-- **🤖 AI 生产力工作流无缝对接**
-  - 内置 4 套开箱即用的专业 AI 提示词模板（长文精读速览、分点核心提炼、行动清单生成、双语逐句对照）。
-  - 一键复制格式化 Markdown 文本，直接粘贴至 ChatGPT、Claude、DeepSeek、Gemini 或 Notion。
-
-- **🛡️ 极致鲁棒的状态机与零脏数据架构**
-  - WBI 官方权威接口优先校验，彻底消除旧接口对无字幕视频的脏数据污染。
-  - 智能会话快照（`SessionSnapshotManager`）实现秒开恢复与原子化生命周期管理。
-  - 全流程诊断面板，一键复制错误阶段与调试日志。
+3. **立即开始使用**：
+   * 打开或刷新任意 [Bilibili (bilibili.com)](https://www.bilibili.com) 或 [YouTube (youtube.com)](https://www.youtube.com) 视频；
+   * 视频播放器右侧将自动出现**实时伴随滚动面板**，点击浏览器工具栏图标即可展开**独立侧边栏**！
 
 ---
 
-## 🚀 快速安装
+## 🌟 核心功能一览
 
-1. 克隆或下载本仓库代码：
+### 1. 📺 播放器旁伴随滚动面板 (Rolling Panel)
+- **智能伴随高亮**：自动吸附在播放器右侧，随播放进度实时平滑滚动并精准高亮当前句。
+- **排版微调**：自由切换智能多行换行与单行模式，支持字号与行高自定义。
+- **点击跳转与秒级检索**：点击任意台词瞬间跳转播放进度，支持关键词实时高亮检索。
+- **全屏沉浸适配**：支持全屏与剧场模式自适应布局。
+
+### 2. 📑 Chrome 独立侧边栏 (Sidepanel)
+- **多维度视图一键切换**：
+  - **`时间戳`**：逐句时间戳对齐，支持点击即跳与快速定位；
+  - **`纯文本`**：自然段落流式排版，适合全文速读；
+  - **`AI 总结`**：内置多套专业级学习提示词模板；
+  - **`追踪更新`**：关注的 UP 主与合集更新看板；
+  - **`离线转录`**：后台静默转录任务管理中心。
+- **多语言与多音轨即时切换**：毫秒级多语言与双语轨道切换。
+
+### 3. ⚡ B 站合集 / 多 P 一键批量收割 (Batch Harvest)
+- **全集一键扫描**：自动解析分 P 列表、电视剧/番剧季、UP 主自选合集与系列。
+- **Merged Markdown**：自动合并全集为带层级目录与自然段落分段的完整知识库文档。
+- **多格式打包**：一键生成标准 ZIP，内含 TXT、SRT、VTT、JSON 及合集总览。
+- **DASH 纯音频直链提取**：直接获取官方纯音频流直链，方便导入剪辑或专业工具。
+
+### 4. 🔔 UP 主与课程合集订阅追踪中心 (Tracker)
+- **一键订阅感知**：在任意播放页一键关注 UP 主或订阅专属连载合集。
+- **后台无人值守自动巡检**：基于 `chrome.alarms` 定时巡检，内置纯 JS MD5 + WBI 签名加密与 YouTube RSS 解析。
+- **新视频字幕静默抓取**：巡检发现新发布视频后，后台自动拉取官方字幕并转换为排版整洁的 Markdown 文档缓存于本地。
+- **极速生产力交互**：更新卡片支持一键复制 MD、原位展开预览与多篇未读合并复制。
+
+### 5. 🎙️ 本地端侧 ASR 离线转录与大模型语义纠错
+- **无字幕视频自动兜底**：当视频无官方字幕时，支持一键调用本地端侧模型（CoreML / Parakeet / Cohere）进行纯离线语音识别。
+- **端侧大模型 ASR 吞音与术语纠错**：
+  - 自动对接本地端侧大模型（如 Ollama Gemma / Qwen）；
+  - **核心准则**：`原声保真 > ASR 纠错 > 可读性 > 语法规范`；
+  - 精准修复连读吞音、轻读弱读与领域技术专有名词（如 PyTorch, Qwen, LoRA, Codex, GPU 等），保留 1:1 毫秒级时间戳，绝不破坏说话人原本的口吻和交谈感！
+
+---
+
+## 🛠️ 可选：macOS 本机离线转录服务配置
+
+> **说明**：普通在线官方字幕提取与阅读**无需**安装此组件。本机服务仅用于“视频本身完全没有字幕时，通过 Mac 本地 CoreML 跑离线语音识别”。
+
+### 环境要求
+* **macOS 14+**
+* **Apple Silicon 芯片 (M1 / M2 / M3 / M4 等)**
+
+### 安装步骤
+1. 打开 `chrome://extensions`，在 SparkSub 卡片中复制 32 位扩展 ID；
+2. 终端进入项目目录，执行安装脚本：
    ```bash
-   git clone https://github.com/xiepixie/SparkSub.git
+   ./native/scripts/install-host.sh --extension-id <你的扩展ID> --chrome
    ```
-2. 打开 Chrome 或 Chromium 内核浏览器（Edge / Brave / Arc / 360 等），在地址栏访问：
-   ```text
-   chrome://extensions
-   ```
-3. 打开右上角的 **“开发者模式”** 开关。
-4. 点击 **“加载已解压的扩展程序”**，选择项目根目录（包含 `manifest.json` 的目录）。
-5. 打开或刷新任意 [YouTube](https://www.youtube.com) 或 [Bilibili](https://www.bilibili.com) 视频即可即刻体验！
-
-### 可选：安装 macOS 本机转录服务
-
-要求 **macOS 14+、Apple Silicon**。本机服务用于“关闭 YouTube 标签页后继续读取公共字幕”以及“平台无字幕时继续离线转录”；打开的 YouTube 页面和 Bilibili 平台字幕链路仍可独立工作。
-
-1. 在 `chrome://extensions` 的 SparkSub 卡片中复制 32 位扩展 ID。
-2. 先检查安装计划（不构建、不联网、不写文件）：
-
-   ```bash
-   ./native/scripts/install-host.sh --extension-id <扩展ID> --chrome --dry-run
-   ```
-
-3. 确认后安装：
-
-   ```bash
-   ./native/scripts/install-host.sh --extension-id <扩展ID> --chrome
-   ```
-
-   Chromium 用户将 `--chrome` 改为 `--chromium`。安装器以 release 模式构建 Swift host，并仅在官方校验清单和固定 SHA-256 均通过后安装 `yt-dlp_macos` 2026.08.19。若只处理 Bilibili，可添加 `--skip-ytdlp`。
-
-4. 诊断本机组件：
-
+   *(非 Chrome 浏览器用户可将 `--chrome` 替换为 `--chromium`)*
+3. 检查诊断服务就绪状态：
    ```bash
    "$HOME/Library/Application Support/SparkSub/SparkSubHost" --diagnose
    ```
 
-卸载可同时清理 Chrome 与 Chromium 注册信息；用户模型与 `SparkSub/Models` 兼容别名会保留：
-
-```bash
-./native/scripts/uninstall-host.sh --extension-id <扩展ID> --chrome --chromium
-```
-
-### 本地模型发现边界
-
-- Parakeet：`~/Library/Application Support/parakeet-tdt-0.6b-v3/`。需要四个完整 `.mlmodelc` 目录和有效的 `parakeet_vocab.json` 或 `parakeet_v3_vocab.json`。
-- Cohere：搜索 `~/Library/Application Support/FluidAudio/Cohere`、`FluidAudio/Models/Cohere`、`Cohere`，以及 `~/Library/Caches/FluidAudio/CompiledCohereModels`、`~/Library/Caches/cohere-transcribe-03-2026-CoreML-6bit` 下一级目录。仅文件存在不代表兼容：必须有有效词表，且解码器输入包含 `k_cache_0`。
-- 用户模型目录只读；SparkSub 只在 `~/Library/Application Support/SparkSub/Models/` 建立兼容符号链接。`~/Library/Caches` 可能被系统或清理工具回收，丢失后界面会显示“部分就绪/模型不兼容”。
-- FluidAudio 被固定为 0.15.6，并在进程启动时强制离线模式；本机 host 不下载模型、不读取浏览器 Cookie，只支持公开可访问的视频。
-
 ---
 
-## 🛠️ 项目结构
+## 📁 项目结构
 
 ```text
 SparkSub/
@@ -117,52 +102,38 @@ SparkSub/
 │   ├── app.js            # 核心状态机与数据流调度器
 │   ├── rolling-panel.js  # 独立 Shadow DOM 伴随面板组件
 │   └── main-world-bridge.js
-├── core/                 # 核心模块（解析器、格式化器、多语言、JSZip、订阅追踪引擎）
+├── core/                 # 核心模块（解析器、格式化器、多语言、JSZip、语义纠错）
 │   ├── formatters.js     # SRT, VTT, TXT, JSON, Merged Markdown
 │   ├── parsers.js        # B站 XML, JSON, YouTube TimedText
-│   ├── tracker.js        # 纯 JS MD5, WBI 签名, YouTube RSS, 环形缓冲, 自动字幕拉取
+│   ├── asr-polisher.js   # 本地端侧大模型语义纠错与时间戳 1:1 回填
+│   ├── tracker.js        # 纯 JS MD5, WBI 签名, YouTube RSS, 自动字幕拉取
 │   ├── queue.js          # 持久队列、租约恢复、字幕优先与本机 ASR 回退
-│   ├── native-host.js    # Native Messaging 协议、心跳看门狗与分块结果组装
+│   ├── native-host.js    # Native Messaging 协议与心跳看门狗
 │   ├── jszip.js          # 无依赖轻量级 ZIP 打包引擎
-│   ├── utils.js          # 会话快照、DOM 工具、防抖
-│   └── i18n.js           # 国际化文案
-├── platform/             # 平台适配器
-│   ├── youtube.js        # YouTube 轨道发现与解密
-│   └── bilibili.js       # B站 WBI 鉴权、多P与合集爬取、DASH 提取
+│   ├── utils.js          # 会话快照、DOM 工具、防抖与安全下载
+│   └── i18n.js           # 国际化文案体系
+├── platform/             # 平台适配器（B站 WBI 鉴权、DASH 音频提取、YouTube 轨道解析）
 ├── sidepanel/            # 独立侧边栏 UI 与追踪中心
 │   ├── sidepanel.html
 │   ├── sidepanel.css
 │   └── sidepanel.js
-├── native/               # macOS Swift/CoreML host 与安全安装脚本
-│   ├── SparkSubHost/
-│   └── scripts/
-├── types/                # 渐进式 TypeScript 类型定义
-│   ├── bse.d.ts          # 完整领域模型与状态协议声明
-│   └── chrome.d.ts       # Chrome MV3 API 类型补齐
-├── docs/                 # 架构与用户场景文档
-│   ├── 架构与消息协议.md
-│   └── 用户场景与交互设计.md
-├── tests/                # 自动化单元测试套件
-│   └── run-tests.mjs
+├── native/               # macOS Swift/CoreML host 源码与安装脚本
+├── types/                # TypeScript 类型定义与 Chrome API 声明
 └── manifest.json         # Chrome MV3 清单文件
 ```
 
 ---
 
-## 🧪 测试与质量验证
+## 🧪 自动化测试验证
 
-项目内置了完整的单体与集成测试套件，无需额外依赖即可直接运行：
+项目内置了完整的单元测试与端到端断言，无需任何三方 npm 依赖：
 
 ```bash
 node tests/run-tests.mjs
-node tests/orchestrator-tests.mjs
-bash tests/install-host-tests.sh
 ```
-
-当前 Linux 开发环境没有 Swift/CoreML，因此不能声称 Swift 编译、XCTest、真实模型加载或真实媒体解码已在本机通过。对应门禁由 `.github/workflows/native-host.yml` 的 macOS runner，以及安装后的 Mac 实机诊断/冒烟测试完成。
 
 ---
 
 ## 📄 开源许可
 
-本项目基于 [MIT License](LICENSE) 开源。
+本项目基于 [MIT License](LICENSE) 协议开源。

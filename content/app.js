@@ -525,6 +525,41 @@
           sendResponse({ ok: true });
           return false;
         }
+        if (message?.type === 'BSE_APPLY_EXTERNAL_SUBTITLE') {
+          const cues = Array.isArray(message.cues) ? message.cues : [];
+          const track = message.track || {
+            id: 'native-asr',
+            name: `🎙️ 端侧本地转录 (${cues.length} 句)`,
+            language: 'zh',
+            langDoc: '本地自动转录',
+            isAi: true,
+            source: 'native',
+            engine: 'local-asr'
+          };
+          const existingIdx = state.tracks.findIndex((t) => String(t.id) === String(track.id));
+          if (existingIdx >= 0) {
+            state.tracks[existingIdx] = track;
+          } else {
+            state.tracks.unshift(track);
+          }
+          state.selectedTrackId = track.id;
+          state.cues = cues;
+          state.status = cues.length ? 'ready' : 'empty';
+          state.message = cues.length ? `已加载端侧转录字幕 · 共 ${cues.length} 条` : '端侧转录未识别到字幕';
+          state.cueRevision = (state.cueRevision || 0) + 1;
+          state.revision = (state.revision || 0) + 1;
+          diagnostic('端侧字幕加载', `成功载入端侧转录字幕 · 共 ${cues.length} 条`);
+          panel?.render(publicState());
+          panel?.syncLayout();
+          publish(true);
+          sendResponse({ ok: true });
+          return false;
+        }
+        if (message?.type === 'BSE_DIAGNOSTIC_APPEND') {
+          diagnostic(message.stage || '端侧大模型', message.message || '');
+          sendResponse({ ok: true });
+          return false;
+        }
         if (message?.type === 'BSE_GET_STATE') {
           sendResponse(publicState());
           return false;

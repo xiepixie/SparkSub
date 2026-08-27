@@ -130,18 +130,16 @@ enum CueBuilder {
             guard let first = group.first, let last = group.last else { continue }
             let content = normalizedTokenText(group.map(\.token).joined())
             guard !content.isEmpty else { continue }
-            let isShortTail = index == groups.count - 1 && last.endTime - first.startTime < 2
-            let cueStart = isShortTail ? max(0, last.endTime - 2) : first.startTime
+            let cueStart = first.startTime
             let nextStart = index + 1 < groups.count ? groups[index + 1].first?.startTime : nil
             let maximumEnd = min(duration, nextStart ?? duration)
-            let desiredEnd = max(last.endTime, cueStart + 2)
-            let end = min(maximumEnd, min(cueStart + 8, desiredEnd))
-            guard end > cueStart else { continue }
-            cues.append(Cue(from: cueStart, to: end, content: content))
+            let desiredEnd = max(last.endTime, cueStart + 0.3)
+            let end = max(cueStart + 0.3, min(maximumEnd, min(cueStart + 8, desiredEnd)))
+            let cue = Cue(from: cueStart, to: end, content: content)
+            if cue.isValid { cues.append(cue) }
         }
-        guard !cues.isEmpty,
-              cues.allSatisfy({ $0.isValid && $0.to - $0.from >= 2 && $0.to - $0.from <= 8 }) else {
-            return try fallback(text: transcript, duration: duration)
+        guard !cues.isEmpty else {
+            return (try? fallback(text: transcript, duration: duration)) ?? []
         }
         return cues
     }
@@ -161,7 +159,7 @@ enum CueBuilder {
             let windowStart = Double(window.startSample) / Double(sampleRate)
             let windowEnd = Double(window.endSample) / Double(sampleRate)
             let duration = windowEnd - windowStart
-            guard duration >= 2 else { continue }
+            guard duration > 0 else { continue }
             let characters = Array(content)
             let desiredCount = max(1, Int(ceil(duration / 8)))
             let segmentCount = min(desiredCount, characters.count)
@@ -176,23 +174,18 @@ enum CueBuilder {
                 characterIndex += length
                 guard !segmentText.isEmpty else { continue }
                 let start = windowStart + Double(index) * stride
-                let end = min(windowEnd, start + min(8, max(2, stride)))
+                let end = min(windowEnd, start + min(8, max(0.5, stride)))
                 let cue = Cue(from: start, to: end, content: segmentText)
                 if cue.isValid { cues.append(cue) }
             }
-        }
-        guard !cues.isEmpty,
-              cues.allSatisfy({ $0.isValid && $0.to - $0.from >= 2 && $0.to - $0.from <= 8 }),
-              zip(cues, cues.dropFirst()).allSatisfy({ pair in pair.0.to <= pair.1.from }) else {
-            throw AppError.asrFailed
         }
         return cues
     }
 
     private static func fallback(text: String?, duration: TimeInterval) throws -> [Cue] {
         let content = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !content.isEmpty, duration.isFinite, duration >= 2 else { throw AppError.asrFailed }
-        return [Cue(from: 0, to: min(8, duration), content: content)]
+        guard !content.isEmpty, duration.isFinite, duration > 0 else { return [] }
+        return [Cue(from: 0, to: min(8, max(0.5, duration)), content: content)]
     }
 
     private static func normalizedTokenText(_ value: String) -> String {

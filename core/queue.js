@@ -17,7 +17,10 @@
     autoDownload: false,
     preferredFormat: 'md',
     enableNotification: true,
-    sourceLanguage: 'auto'
+    sourceLanguage: 'auto',
+    enableLlmPolish: true,
+    llmEndpoint: 'http://127.0.0.1:11434',
+    llmModel: ''
   };
   const EPHEMERAL_MEDIA_KEYS = new Set([
     'audiocache', 'audiourl', 'backupurls', 'backupurl', 'backup_url',
@@ -741,6 +744,40 @@
     return cues;
   }
 
+  async function polishCuesIfEnabled(item, cues, signal) {
+    if (!Array.isArray(cues) || !cues.length) return cues;
+    const settings = await getSettings();
+    if (settings.enableLlmPolish === false || !BSE.AsrPolisher?.polishCues) {
+      return cues;
+    }
+    const endpoint = settings.llmEndpoint || BSE.AsrPolisher.DEFAULT_ENDPOINT;
+    const originalEngine = cues.engine || 'parakeet';
+    try {
+      const polishResult = await BSE.AsrPolisher.polishCues(cues, {
+        title: item.title,
+        endpoint,
+        model: settings.llmModel || '',
+        onDiagnostic: (stage, message) => {
+          item.stageHint = message;
+          if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+            chrome.runtime.sendMessage({
+              type: 'BSE_DIAGNOSTIC_APPEND',
+              stage,
+              message
+            }).catch(() => {});
+          }
+        },
+        signal
+      });
+      if (Array.isArray(polishResult.cues) && polishResult.cues.length) {
+        const outCues = polishResult.cues;
+        outCues.engine = polishResult.modelUsed ? `${originalEngine} + ${polishResult.modelUsed}` : originalEngine;
+        return outCues;
+      }
+    } catch {}
+    return cues;
+  }
+
   async function fetchYouTubeCaptionsWithNativeHost(item, source, signal) {
     if (!BSE.NativeHost?.fetchYouTubeCaptions) return null;
 
@@ -1205,12 +1242,13 @@
         throw nativeError('MEDIA_DOWNLOAD_FAILED', '无法获取可用的 Bilibili 音频流。', '请确认视频公开可访问后重试。');
       }
       cues = await transcribeWithNativeHost(item, source, signal);
-      await enterStage(item, 'postprocessing', 95, '正在整理本地转录结果…');
+      await enterStage(item, 'postprocessing', 95, '正在进行端侧大模型语义纠错与时间轴整理…');
+      cues = await polishCuesIfEnabled(item, cues, signal);
       setCompletedSubtitle(item, cues, {
         language: item.sourceLanguage || 'auto',
         langDoc: '本地自动转录',
         source: 'native',
-        engine: 'local-asr'
+        engine: cues.engine || 'parakeet'
       });
     } else {
       await enterStage(item, 'postprocessing', 85, '正在进行自然段落切分与 Markdown 格式化…');
@@ -1535,12 +1573,13 @@
       await enterStage(item, 'fetching_audio', 60, '平台字幕不可用，正在准备本地转录…');
       const source = { kind: 'youtube', url: `https://www.youtube.com/watch?v=${videoId}` };
       cues = await transcribeWithNativeHost(item, source, signal);
-      await enterStage(item, 'postprocessing', 95, '正在整理本地转录结果…');
+      await enterStage(item, 'postprocessing', 95, '正在进行端侧大模型语义纠错与时间轴整理…');
+      cues = await polishCuesIfEnabled(item, cues, signal);
       setCompletedSubtitle(item, cues, {
         language: item.sourceLanguage || 'auto',
         langDoc: '本地自动转录',
         source: 'native',
-        engine: 'local-asr'
+        engine: cues.engine || 'parakeet'
       });
     } else {
       await enterStage(item, 'postprocessing', 85, '正在整理结构化段落与 SRT…');
@@ -1559,6 +1598,30 @@
     item.completedAt = Date.now();
     finishExecution(item);
     await saveItem(item);
+
+    // Auto-apply transcribed cues to active matching tabs
+    try {
+      if (typeof chrome !== 'undefined' && chrome.tabs?.query && Array.isArray(cues) && cues.length) {
+        const tabs = await chrome.tabs.query({});
+        for (const tab of tabs) {
+          if (tab.id != null && tab.url && (tab.url.includes(item.id) || (item.url && tab.url === item.url))) {
+            await chrome.tabs.sendMessage(tab.id, {
+              type: 'BSE_APPLY_EXTERNAL_SUBTITLE',
+              track: {
+                id: `transcribed-${item.id}`,
+                name: `🎙️ 端侧本地转录 (${item.subtitle.cueCount} 句)`,
+                language: item.subtitle.language || 'zh',
+                langDoc: item.subtitle.langDoc || '本地端侧转录',
+                isAi: true,
+                source: 'native',
+                engine: item.subtitle.engine || 'local-asr'
+              },
+              cues
+            }).catch(() => {});
+          }
+        }
+      }
+    } catch {}
   }
 
   async function processPendingJobs() {

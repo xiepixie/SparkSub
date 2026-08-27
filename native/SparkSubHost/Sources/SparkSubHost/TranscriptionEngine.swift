@@ -38,19 +38,28 @@ enum TranscriptionRouter {
         "sr": "sr", "el": "el",
     ]
 
-    static func route(sourceLanguage: String, platformLanguage: String?, sourceKind: SourceKind) throws -> EngineRoute {
+    static func route(
+        sourceLanguage: String,
+        platformLanguage: String?,
+        sourceKind: SourceKind,
+        cohereAvailable: Bool = false
+    ) throws -> EngineRoute {
         let requested = normalized(sourceLanguage)
         if isCantonese(requested) { throw AppError.languageUnsupported }
-        if mandarinAliases.contains(requested) { return .cohereMandarin }
         if let language = europeanLanguage(requested) { return .parakeet(languageCode: language) }
+        if mandarinAliases.contains(requested) {
+            return cohereAvailable ? .cohereMandarin : .parakeet(languageCode: nil)
+        }
         guard requested == "auto" else { throw AppError.languageUnsupported }
 
         if let hint = platformLanguage.map(normalized) {
             if isCantonese(hint) { throw AppError.languageUnsupported }
-            if mandarinAliases.contains(hint) { return .cohereMandarin }
             if let language = europeanLanguage(hint) { return .parakeet(languageCode: language) }
+            if mandarinAliases.contains(hint) {
+                return cohereAvailable ? .cohereMandarin : .parakeet(languageCode: nil)
+            }
         }
-        return sourceKind == .remote ? .cohereMandarin : .parakeet(languageCode: nil)
+        return cohereAvailable && sourceKind == .remote ? .cohereMandarin : .parakeet(languageCode: nil)
     }
 
     private static func normalized(_ value: String) -> String {
@@ -107,10 +116,12 @@ actor TranscriptionEngine: Transcribing {
         cancellation: CancellationToken,
         onProgress: @escaping @Sendable (Double) -> Void
     ) async throws -> TranscriptionOutput {
+        let cohereReady = modelLocator.capabilities().cohere.available
         let route = try TranscriptionRouter.route(
             sourceLanguage: sourceLanguage,
             platformLanguage: platformLanguage,
-            sourceKind: sourceKind
+            sourceKind: sourceKind,
+            cohereAvailable: cohereReady
         )
         try cancellation.checkCancellation()
         switch route {
@@ -122,11 +133,20 @@ actor TranscriptionEngine: Transcribing {
                 onProgress: onProgress
             )
         case .cohereMandarin:
-            return try await transcribeCohere(
-                mediaURL: mediaURL,
-                cancellation: cancellation,
-                onProgress: onProgress
-            )
+            do {
+                return try await transcribeCohere(
+                    mediaURL: mediaURL,
+                    cancellation: cancellation,
+                    onProgress: onProgress
+                )
+            } catch {
+                return try await transcribeParakeet(
+                    mediaURL: mediaURL,
+                    languageCode: nil,
+                    cancellation: cancellation,
+                    onProgress: onProgress
+                )
+            }
         }
     }
 
@@ -148,7 +168,8 @@ actor TranscriptionEngine: Transcribing {
                     from: layout.compatibilityURL,
                     configuration: AsrModels.defaultConfiguration(),
                     version: .v3,
-                    encoderPrecision: .int8
+                    encoderPrecision: .int8,
+                    encoderComputeUnits: .cpuAndGPU
                 )
             } catch {
                 throw FluidModelLoadingError.normalize(error)
@@ -164,8 +185,20 @@ actor TranscriptionEngine: Transcribing {
             manager = loadedManager
         }
 
-        onProgress(0.1)
         try cancellation.checkCancellation()
+        let progressStream = await manager.transcriptionProgressStream
+        let progressTask = Task {
+            do {
+                for try await progress in progressStream {
+                    if Task.isCancelled { break }
+                    onProgress(progress)
+                }
+            } catch {
+                // Ignore stream cancellation / completion
+            }
+        }
+        defer { progressTask.cancel() }
+
         let layerCount = await manager.decoderLayerCount
         var decoderState = TdtDecoderState.make(decoderLayers: layerCount)
         let result = try await manager.transcribe(
@@ -213,7 +246,7 @@ actor TranscriptionEngine: Transcribing {
                         decoderDir: layout.decoderDirectoryURL,
                         vocabDir: layout.vocabDirectoryURL,
                         decoderVariant: .v1,
-                        computeUnits: .all
+                        computeUnits: .cpuAndGPU
                     )
                 case .v2:
                     loaded = try await CoherePipeline.loadModels(
@@ -221,7 +254,7 @@ actor TranscriptionEngine: Transcribing {
                         decoderDir: layout.decoderDirectoryURL,
                         vocabDir: layout.vocabDirectoryURL,
                         decoderVariant: .v2,
-                        computeUnits: .all
+                        computeUnits: .cpuAndGPU
                     )
                 }
             } catch {

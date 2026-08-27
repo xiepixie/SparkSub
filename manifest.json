@@ -27,7 +27,9 @@
     "https://*.bilivideo.com/*",
     "https://*.bilivideo.cn/*",
     "http://*.hdslb.com/*",
-    "http://*.bilibili.com/*"
+    "http://*.bilibili.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
   ],
   "background": {
     "service_worker": "background/service-worker.js"
@@ -69,6 +71,7 @@
         "core/parsers.js",
         "core/media.js",
         "core/formatters.js",
+        "core/asr-polisher.js",
         "core/tracker.js",
         "core/queue.js",
         "platform/youtube.js",

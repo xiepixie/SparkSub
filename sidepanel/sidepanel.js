@@ -62,6 +62,8 @@
     aiCardQuestions: document.querySelector('#ai-card-questions'),
     empty: document.querySelector('#empty-state'),
     emptyMessage: document.querySelector('#empty-message'),
+    emptyActions: document.querySelector('#empty-actions'),
+    emptyTranscribe: document.querySelector('#empty-transcribe-btn'),
     diagnosticsPanel: document.querySelector('#diagnostics'),
     diagTitle: document.querySelector('#diag-title'),
     diagnosticSummary: document.querySelector('#diagnostic-summary'),
@@ -175,6 +177,25 @@
     elements.toast.className = `toast show ${isError ? 'error' : (isSuccess ? 'success' : 'info')}`;
     clearTimeout(sidepanelToastTimer);
     sidepanelToastTimer = setTimeout(() => elements.toast.classList.remove('show'), 2200);
+  }
+
+  let sidepanelDiagnostics = [];
+  function appendDiagnostic(stage, msg) {
+    const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    const line = `[${timestamp}] ${stage}：${msg}`;
+    if (!sidepanelDiagnostics.includes(line)) {
+      sidepanelDiagnostics.push(line);
+      if (sidepanelDiagnostics.length > 500) {
+        sidepanelDiagnostics.splice(0, sidepanelDiagnostics.length - 500);
+      }
+    }
+    if (elements.diagnostics) elements.diagnostics.textContent = sidepanelDiagnostics.join('\n');
+    if (elements.diagnosticSummary) {
+      const fault = state?.lastError;
+      elements.diagnosticSummary.textContent = fault
+        ? `${fault.stage} · ${fault.code}`
+        : `${sidepanelDiagnostics.length} 条记录`;
+    }
   }
 
   async function command(commandName, payload = {}) {
@@ -760,14 +781,18 @@
     elements.queueCapabilityPanel.dataset.state = 'checking';
     if (elements.queueCapabilityStatus) elements.queueCapabilityStatus.textContent = t('queue_capability_checking');
     if (elements.queueCapabilityRefresh) elements.queueCapabilityRefresh.disabled = true;
+    appendDiagnostic('本机服务', `正在探测端侧模型与服务状态 (force=${force})…`);
     try {
       const response = await chrome.runtime.sendMessage({ type: 'BSE_NATIVE_CAPABILITIES', force });
       if (!response?.ok || !response.capabilities) {
         nativeCapabilitiesCache = null;
         nativeCapabilitiesError = response?.error || { code: 'NATIVE_HOST_DISCONNECTED' };
+        appendDiagnostic('本机服务', `探测返回错误：${nativeCapabilitiesError.code || 'UNKNOWN'} · ${nativeCapabilitiesError.message || ''} (提示: ${nativeCapabilitiesError.hint || '无'})`);
       } else {
         nativeCapabilitiesCache = response.capabilities;
         nativeCapabilitiesError = null;
+        const caps = response.capabilities;
+        appendDiagnostic('本机服务', `探测成功：hostReady=${caps.hostReady} · ytDLP=${caps.ytDLP?.available} (${caps.ytDLP?.detail || ''}) · Parakeet=${caps.models?.parakeet?.available} (${caps.models?.parakeet?.detail || ''}) · Cohere=${caps.models?.cohere?.available} (${caps.models?.cohere?.detail || ''})`);
       }
     } catch (error) {
       nativeCapabilitiesCache = null;
@@ -775,18 +800,29 @@
         code: error?.code || 'NATIVE_HOST_DISCONNECTED',
         message: error?.message || ''
       };
+      appendDiagnostic('本机服务', `通信异常：${error?.code || 'ERROR'} · ${error?.message || error}`);
     } finally {
       renderNativeCapabilities();
       if (elements.queueCapabilityRefresh) elements.queueCapabilityRefresh.disabled = false;
     }
   }
 
+  const lastLoggedQueueStates = new Map();
   async function loadAndRenderQueue() {
     if (!BSE.Queue) return;
     try {
       queueCache = await BSE.Queue.getQueue();
       renderQueueList();
       updateQueueBadge();
+      for (const item of queueCache) {
+        const last = lastLoggedQueueStates.get(item.id);
+        const currentSig = `${item.stage}:${Math.floor(item.progress || 0)}:${item.stageHint || ''}`;
+        if (last !== currentSig) {
+          lastLoggedQueueStates.set(item.id, currentSig);
+          const stageName = item.stage === 'fetching_audio' ? '音频准备' : (item.stage === 'transcribing' ? '端侧 ASR' : (item.stage === 'done' ? '转录完成' : (item.stage === 'failed' ? '转录失败' : item.stage)));
+          appendDiagnostic('转录队列', `[${item.title || item.id}] ${stageName} (${Math.floor(item.progress || 0)}%)：${item.stageHint || '执行中'}`);
+        }
+      }
       const hasPending = queueCache.some((i) => !['done', 'failed'].includes(i.stage));
       if (hasPending) {
         if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
@@ -795,6 +831,7 @@
       }
     } catch (err) {
       console.warn('[SparkSub Queue] 读取队列异常:', err);
+      appendDiagnostic('转录队列', `读取队列异常: ${err?.message || err}`);
     }
   }
 
@@ -863,11 +900,15 @@
       let actionButtonsHtml = '';
       if (item.stage === 'done') {
         actionButtonsHtml = `
+          <button type="button" class="queue-act-btn primary btn-apply" data-id="${safeId}" title="将此字幕载入到当前播放器与字幕全文">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            <span>载入字幕</span>
+          </button>
           <button type="button" class="queue-act-btn btn-preview ${isExpanded ? 'active' : ''}" data-id="${safeId}" title="展开/收起内联字幕预览">
             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
             <span>预览</span>
           </button>
-          <button type="button" class="queue-act-btn primary btn-copy" data-id="${safeId}" title="复制 Markdown 字幕全文">
+          <button type="button" class="queue-act-btn btn-copy" data-id="${safeId}" title="复制 Markdown 字幕全文">
             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             <span>复制</span>
           </button>
@@ -900,19 +941,24 @@
               ${BSE.Utils.escapeHtml(item.title)}
             </a>
             <div class="queue-card-meta-line">
-              <span class="queue-meta-author" title="作者">👤 ${BSE.Utils.escapeHtml(item.author || (isBili ? 'UP主' : '频道'))}</span>
+              <span class="queue-meta-author" title="作者">
+                <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                <span>${BSE.Utils.escapeHtml(item.author || (isBili ? 'UP主' : '频道'))}</span>
+              </span>
               ${sourceLabel ? `<span class="queue-source-engine">${BSE.Utils.escapeHtml(sourceLabel)}</span>` : ''}
             </div>
-            <div class="queue-card-bottom-row">
+            <div class="queue-card-status-line">
               <span class="queue-status-badge stage-${item.stage}" title="${BSE.Utils.escapeHtml(displayHint)}">
                 ${BSE.Utils.escapeHtml(displayHint)}
               </span>
-              <div class="queue-actions-cluster">
-                ${actionButtonsHtml}
-              </div>
             </div>
           </div>
         </div>
+        ${actionButtonsHtml ? `
+          <div class="queue-card-actions-bar">
+            ${actionButtonsHtml}
+          </div>
+        ` : ''}
         ${item.stage !== 'done' && item.stage !== 'failed' ? `
           <div class="queue-card-progress">
             <div class="queue-card-progress-fill" style="width: ${progressPercent}%"></div>
@@ -929,7 +975,10 @@
           <div class="queue-preview-drawer ${isExpanded ? 'open' : ''}">
             <div class="queue-preview-toolbar">
               <span class="queue-preview-stats">共 ${item.subtitle.cueCount || 0} 行字幕 · ${item.subtitle.langDoc || item.subtitle.language || '中文'}</span>
-              <button type="button" class="queue-preview-copy-btn btn-quick-copy" title="复制预览内容">📋 复制全文</button>
+              <button type="button" class="queue-preview-copy-btn btn-quick-copy" title="复制预览内容">
+                <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <span>复制全文</span>
+              </button>
             </div>
             <div class="queue-preview-body">${BSE.Utils.escapeHtml(item.subtitle.plainText)}</div>
           </div>
@@ -945,6 +994,35 @@
 
       card.querySelector('.queue-thumb-wrap')?.addEventListener('click', openVideo);
       card.querySelector('.queue-card-title')?.addEventListener('click', openVideo);
+
+      card.querySelector('.btn-apply')?.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          const cues = item.subtitle?.cues;
+          if (tab?.id != null && Array.isArray(cues) && cues.length) {
+            await chrome.tabs.sendMessage(tab.id, {
+              type: 'BSE_APPLY_EXTERNAL_SUBTITLE',
+              track: {
+                id: `transcribed-${item.id}`,
+                name: `🎙️ 端侧本地转录 (${item.subtitle?.cueCount || cues.length} 句)`,
+                language: item.subtitle?.language || 'zh',
+                langDoc: item.subtitle?.langDoc || '本地端侧转录',
+                isAi: true,
+                source: 'native',
+                engine: item.subtitle?.engine || 'local-asr'
+              },
+              cues
+            }).catch(() => {});
+            switchTab('timestamp');
+            toast(`✓ 已载入 ${cues.length} 句字幕到播放器与侧边栏`);
+          } else {
+            toast('当前标签页不可用或该任务无字幕数据', true);
+          }
+        } catch (err) {
+          toast(`载入失败：${err.message}`, true);
+        }
+      });
 
       card.querySelector('.btn-preview')?.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -962,31 +1040,55 @@
 
       card.querySelector('.btn-quick-copy')?.addEventListener('click', async (e) => {
         e.stopPropagation();
-        if (item.subtitle?.markdown || item.subtitle?.plainText) {
-          await navigator.clipboard.writeText(item.subtitle.markdown || item.subtitle.plainText);
-          toast(`✓ 已复制《${item.title}》字幕`);
+        const text = item.subtitle?.markdown || item.subtitle?.plainText || (Array.isArray(item.subtitle?.cues) ? BSE.Formatters?.toTxt(item.subtitle.cues, false) : '');
+        if (text) {
+          try {
+            await navigator.clipboard.writeText(text);
+            toast(`✓ 已复制《${item.title || '当前视频'}》字幕全文`);
+          } catch {
+            toast('复制失败，请重试', true);
+          }
+        } else {
+          toast('暂无可复制的字幕内容', true);
         }
       });
 
       card.querySelector('.btn-copy')?.addEventListener('click', async (e) => {
         e.stopPropagation();
-        if (item.subtitle?.markdown || item.subtitle?.plainText) {
-          await navigator.clipboard.writeText(item.subtitle.markdown || item.subtitle.plainText);
-          toast(`✓ 已复制《${item.title}》Markdown 字幕`);
+        const md = item.subtitle?.markdown || (Array.isArray(item.subtitle?.cues) ? BSE.Formatters?.toMd(item.subtitle.cues, metadata()) : '') || item.subtitle?.plainText || '';
+        if (md) {
+          try {
+            await navigator.clipboard.writeText(md);
+            toast(`✓ 已复制《${item.title || '当前视频'}》Markdown 字幕`);
+          } catch {
+            toast('复制失败，请重试', true);
+          }
+        } else {
+          toast('暂无可复制的字幕内容', true);
         }
       });
 
       card.querySelector('.btn-download-txt')?.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (item.subtitle?.plainText) {
-          BSE.Utils.downloadTextFile(`${item.title || item.id}.txt`, item.subtitle.plainText);
+        const text = item.subtitle?.plainText || (Array.isArray(item.subtitle?.cues) ? BSE.Formatters?.toTxt(item.subtitle.cues, false) : '');
+        if (text) {
+          const filename = `${item.title || item.id || 'transcript'}.txt`;
+          BSE.Utils.downloadText(text, filename, 'text/plain;charset=utf-8');
+          toast(`✓ 已开始下载纯文本字幕：${filename}`);
+        } else {
+          toast('暂无可下载的纯文本字幕', true);
         }
       });
 
       card.querySelector('.btn-download-srt')?.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (item.subtitle?.srt) {
-          BSE.Utils.downloadTextFile(`${item.title || item.id}.srt`, item.subtitle.srt);
+        const srt = item.subtitle?.srt || (Array.isArray(item.subtitle?.cues) ? BSE.Formatters?.toSrt(item.subtitle.cues) : '');
+        if (srt) {
+          const filename = `${item.title || item.id || 'transcript'}.srt`;
+          BSE.Utils.downloadText(srt, filename, 'application/x-subrip;charset=utf-8');
+          toast(`✓ 已开始下载 SRT 字幕：${filename}`);
+        } else {
+          toast('暂无可下载的 SRT 字幕', true);
         }
       });
 
@@ -1034,14 +1136,21 @@
       let message = defaultEmpty;
       if (state?.status === 'error') {
         message = `${state.message}\n\n${state.lastError?.hint || BSE.I18n?.t('diagnostic_hint') || ''}`;
+        if (elements.emptyActions) elements.emptyActions.hidden = true;
       } else if (state?.status === 'empty') {
         message = state.message || (BSE.I18n?.t('no_subtitles') || '当前视频没有可用字幕轨道');
+        if (elements.emptyActions) elements.emptyActions.hidden = false;
       } else if (state?.status === 'loading') {
         message = state.message || (BSE.I18n?.t('status_loading') || '正在解析字幕…');
+        if (elements.emptyActions) elements.emptyActions.hidden = true;
+      } else {
+        if (elements.emptyActions) elements.emptyActions.hidden = true;
       }
       elements.empty.querySelector('p').textContent = message;
       return;
     }
+
+    if (elements.emptyActions) elements.emptyActions.hidden = true;
 
     // cueRevision changes only when a new subtitle body is committed. Using the
     // general state revision here would rebuild a large transcript for status or
@@ -1127,16 +1236,23 @@
     // Diagnostic info rendering
     const fault = state?.lastError;
     if (elements.diagAlert) elements.diagAlert.hidden = !fault;
+    if (Array.isArray(state?.diagnostics)) {
+      for (const line of state.diagnostics) {
+        if (!sidepanelDiagnostics.includes(line)) {
+          sidepanelDiagnostics.push(line);
+        }
+      }
+    }
     if (elements.diagnosticSummary) {
       elements.diagnosticSummary.textContent = fault
         ? `${fault.stage} · ${fault.code}`
-        : (state?.diagnostics?.length ? `${state.diagnostics.length} 条记录` : (BSE.I18n?.t('status_ready') || '就绪'));
+        : (sidepanelDiagnostics.length ? `${sidepanelDiagnostics.length} 条记录` : (BSE.I18n?.t('status_ready') || '就绪'));
     }
     if (elements.diagnosticCode) elements.diagnosticCode.textContent = fault ? `${fault.stage} / ${fault.code}` : (BSE.I18n?.t('no_error') || '尚无错误');
     if (elements.diagnosticHint) elements.diagnosticHint.textContent = fault?.hint || (BSE.I18n?.t('diagnostic_hint') || '提取过程会在这里显示每个请求阶段。');
     if (elements.diagnostics) {
-      elements.diagnostics.textContent = state?.diagnostics?.length
-        ? state.diagnostics.join('\n')
+      elements.diagnostics.textContent = sidepanelDiagnostics.length
+        ? sidepanelDiagnostics.join('\n')
         : (BSE.I18n?.t('no_error') || '暂无诊断信息');
     }
     if (state?.status === 'error' && elements.diagnosticsPanel) elements.diagnosticsPanel.open = true;
@@ -1261,6 +1377,8 @@
       updatePlayback(message.activeIndex);
     } else if (message?.type === 'BSE_QUEUE_UPDATED') {
       loadAndRenderQueue();
+    } else if (message?.type === 'BSE_DIAGNOSTIC_APPEND') {
+      appendDiagnostic(message.stage || '端侧大模型', message.message || '');
     }
   });
 
@@ -1311,7 +1429,7 @@
     }
 
     const t = (k, p) => BSE.I18n?.t(k, p) || k;
-    if (elements.settingsTitle) elements.settingsTitle.textContent = `⚙️ ${t('settings_title')}`;
+    if (elements.settingsTitle) elements.settingsTitle.textContent = t('settings_title');
     if (elements.settingsToggle) elements.settingsToggle.title = t('settings_title');
     if (elements.labelTheme) elements.labelTheme.textContent = t('theme_label');
     if (elements.labelLang) elements.labelLang.textContent = t('lang_label');
@@ -1336,9 +1454,9 @@
     if (elements.tabAi) elements.tabAi.textContent = t('tab_ai');
     if (elements.tabTrackerText) elements.tabTrackerText.textContent = t('tab_tracker');
     if (elements.tabQueueText) elements.tabQueueText.textContent = t('tab_queue');
-    if (elements.queueBtnShowAdd?.querySelector('span')) elements.queueBtnShowAdd.querySelector('span').textContent = `➕ ${t('queue_btn_add_batch')}`;
-    if (elements.queueBtnCopyMerged?.querySelector('span')) elements.queueBtnCopyMerged.querySelector('span').textContent = `📋 ${t('queue_btn_copy_merged')}`;
-    if (elements.queueBtnClearDone?.querySelector('span')) elements.queueBtnClearDone.querySelector('span').textContent = `🗑️ ${t('queue_btn_clear_done')}`;
+    if (elements.queueBtnShowAdd?.querySelector('span')) elements.queueBtnShowAdd.querySelector('span').textContent = t('queue_btn_add_batch');
+    if (elements.queueBtnCopyMerged?.querySelector('span')) elements.queueBtnCopyMerged.querySelector('span').textContent = t('queue_btn_copy_merged');
+    if (elements.queueBtnClearDone?.querySelector('span')) elements.queueBtnClearDone.querySelector('span').textContent = t('queue_btn_clear_done');
     if (elements.queueBatchSubmit) elements.queueBatchSubmit.textContent = t('queue_btn_submit_batch');
     if (elements.queueBatchCancel) elements.queueBatchCancel.textContent = t('batch_btn_cancel');
     if (elements.queueSourceLanguageLabel) elements.queueSourceLanguageLabel.textContent = t('queue_source_language_label');
@@ -1350,7 +1468,7 @@
     if (elements.queueEmptyTitle) elements.queueEmptyTitle.textContent = t('queue_empty_title');
     if (elements.queueEmptyDesc) elements.queueEmptyDesc.textContent = t('queue_empty_desc');
     if (elements.batchBtnText) elements.batchBtnText.textContent = t('btn_batch_export');
-    if (elements.aiTitle) elements.aiTitle.textContent = `🤖 ${t('ai_summary_title')}`;
+    if (elements.aiTitle) elements.aiTitle.textContent = t('ai_summary_title');
     if (elements.aiCardSummary) elements.aiCardSummary.textContent = t('ai_prompt_summary');
     if (elements.aiCardKeypoints) elements.aiCardKeypoints.textContent = t('ai_prompt_keypoints');
     if (elements.aiCardNotes) elements.aiCardNotes.textContent = t('ai_prompt_notes');
@@ -1437,6 +1555,29 @@
       (partial) => BSE.Queue.saveSettings(partial)
     );
     elements.queueSourceLanguage.value = saved.sourceLanguage || 'auto';
+  });
+
+  elements.emptyTranscribe?.addEventListener('click', async () => {
+    try {
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+      const targetUrl = activeTab?.url || (state?.mediaKey ? (state.mediaKey.startsWith('bili:') ? `https://www.bilibili.com/video/${state.mediaKey.split(':')[1]}` : (state.mediaKey.startsWith('yt:') ? `https://www.youtube.com/watch?v=${state.mediaKey.split(':')[1]}` : null)) : null);
+      if (!targetUrl) {
+        toast('未定位到有效视频链接', true);
+        return;
+      }
+      const response = await chrome.runtime.sendMessage({
+        type: 'BSE_QUEUE_ENQUEUE',
+        urls: [targetUrl],
+        options: { sourceLanguage: elements.queueSourceLanguage?.value || 'auto' }
+      });
+      if (!response?.ok) throw new Error(response?.error || '无法加入队列');
+      chrome.runtime.sendMessage({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
+      switchTab('queue');
+      toast('已加入离线转录队列，正在进行端侧语音识别…');
+      await loadAndRenderQueue();
+    } catch (err) {
+      toast(`发起转录失败：${err.message || String(err)}`, true);
+    }
   });
 
   elements.queueCapabilityRefresh?.addEventListener('click', () => {
@@ -1846,7 +1987,7 @@
         return;
       }
       const promptId = card.dataset.prompt;
-      const text = BSE.Formatters.generateAiPrompt(promptId, state.cues, false);
+      const text = BSE.Formatters.generateAiPrompt(promptId, state.cues, false, { title: state.title });
       await navigator.clipboard.writeText(text);
       toast(BSE.I18n?.t('ai_copied_toast') || '✓ 已复制 AI 提示词与文稿');
     });
@@ -2005,7 +2146,7 @@
       `错误：${fault ? `${fault.stage} / ${fault.code} / ${fault.message}` : '无'}`,
       `建议：${fault?.hint || '无'}`
     ].join('\n');
-    await navigator.clipboard.writeText(`${header}\n\n${state?.diagnostics?.join('\n') || '暂无诊断信息'}`);
+    await navigator.clipboard.writeText(`${header}\n\n${sidepanelDiagnostics.join('\n') || '暂无诊断信息'}`);
     toast(BSE.I18n?.t('copied_diagnostics') || '已复制诊断信息');
   });
 
@@ -2210,14 +2351,7 @@
       elements.batchCancelBtn.hidden = true;
 
       toast('正在分析合集与分P架构…');
-      const diagLogger = (stage, msg) => {
-        if (!state) return;
-        if (!state.diagnostics) state.diagnostics = [];
-        const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-        state.diagnostics.push(`[${timestamp}] ${stage}：${msg}`);
-        if (elements.diagnostics) elements.diagnostics.textContent = state.diagnostics.join('\n');
-        if (elements.diagnosticSummary) elements.diagnosticSummary.textContent = `${state.diagnostics.length} 条记录`;
-      };
+      const diagLogger = (stage, msg) => appendDiagnostic(stage, msg);
 
       currentTree = await BSE.Bilibili.fetchMediaTree(bvid, { diagnostic: diagLogger });
 
@@ -2397,14 +2531,7 @@
     elements.batchCancelBtn.hidden = false;
     elements.batchProgressBox.hidden = false;
 
-    const diagLogger = (stage, msg) => {
-      if (!state) return;
-      if (!state.diagnostics) state.diagnostics = [];
-      const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-      state.diagnostics.push(`[${timestamp}] ${stage}：${msg}`);
-      if (elements.diagnostics) elements.diagnostics.textContent = state.diagnostics.join('\n');
-      if (elements.diagnosticSummary) elements.diagnosticSummary.textContent = `${state.diagnostics.length} 条记录`;
-    };
+    const diagLogger = (stage, msg) => appendDiagnostic(stage, msg);
 
     try {
       const exportResult = await BSE.Bilibili.runBatchExport(currentTree, config, (stats, currentItem, phase, task) => {
@@ -2476,6 +2603,12 @@
         elements.search.focus();
         elements.search.select();
       }
+    }
+  });
+
+  chrome.runtime.onMessage?.addListener((msg) => {
+    if (msg?.type === 'BSE_SWITCH_SIDE_PANEL_TAB' && msg.tab) {
+      switchTab(msg.tab);
     }
   });
 

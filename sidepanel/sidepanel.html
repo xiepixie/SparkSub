@@ -91,15 +91,15 @@
 
     <!-- Tabs: View Mode Selection (Pinned right below header) -->
     <nav class="tabs-bar">
-      <button class="tab-btn active" data-tab="timestamp" id="tab-timestamp">带时间戳</button>
+      <button class="tab-btn active" data-tab="timestamp" id="tab-timestamp">时间戳</button>
       <button class="tab-btn" data-tab="plain" id="tab-plain">纯文本</button>
       <button class="tab-btn" data-tab="ai" id="tab-ai">AI 总结</button>
       <button class="tab-btn tab-tracker" data-tab="tracker" id="tab-tracker">
-        <span id="tab-tracker-text">🔔 追踪中心</span>
+        <span id="tab-tracker-text">追踪更新</span>
         <span class="tracker-badge" id="tracker-unread-badge" hidden>0</span>
       </button>
       <button class="tab-btn tab-queue" data-tab="queue" id="tab-queue">
-        <span id="tab-queue-text">📥 离线转录</span>
+        <span id="tab-queue-text">离线转录</span>
         <span class="tracker-badge" id="queue-running-badge" hidden>0</span>
       </button>
     </nav>
@@ -153,34 +153,36 @@
     <!-- AI Prompts View -->
     <section class="ai-section" id="ai-section" hidden>
       <div class="ai-header">
-        <span class="ai-title" id="ai-title">🤖 AI 总结与学习助手</span>
+        <span class="ai-title" id="ai-title">AI 总结与学习助手</span>
         <span class="ai-tip">点击一键复制提示词与文稿，直接粘贴至 AI</span>
       </div>
       <div class="ai-prompts-grid">
+        <button class="ai-prompt-card" data-prompt="polish">
+          <div class="ai-card-top">
+            <strong class="ai-card-title" id="ai-card-polish">吞音纠错与口语润色</strong>
+          </div>
+          <p class="ai-card-desc">结合视频标题修正缩读吞音与专有名词（如 PyTorch、Qwen 等）</p>
+        </button>
         <button class="ai-prompt-card" data-prompt="notes">
           <div class="ai-card-top">
-            <span class="ai-card-icon">🎯</span>
             <strong class="ai-card-title" id="ai-card-notes">结构化深度讲义</strong>
           </div>
           <p class="ai-card-desc">去噪纠错、定理脉络、推导动机与避坑边界</p>
         </button>
         <button class="ai-prompt-card" data-prompt="summary">
           <div class="ai-card-top">
-            <span class="ai-card-icon">📝</span>
             <strong class="ai-card-title" id="ai-card-summary">核心主旨与脉络</strong>
           </div>
           <p class="ai-card-desc">精准概括主线脉络、核心结论与关键注意点</p>
         </button>
         <button class="ai-prompt-card" data-prompt="keypoints">
           <div class="ai-card-top">
-            <span class="ai-card-icon">📋</span>
             <strong class="ai-card-title" id="ai-card-keypoints">关键要点与清单</strong>
           </div>
           <p class="ai-card-desc">提炼高密度要点、适用边界与实战动作清单</p>
         </button>
         <button class="ai-prompt-card" data-prompt="questions">
           <div class="ai-card-top">
-            <span class="ai-card-icon">❓</span>
             <strong class="ai-card-title" id="ai-card-questions">深度复盘与辨析题</strong>
           </div>
           <p class="ai-card-desc">生成概念辨析、推导动机与易错边界思考题</p>
@@ -286,14 +288,16 @@
         </div>
       </div>
 
-      <section class="queue-capability-panel" id="queue-capability-panel" aria-live="polite" hidden>
-        <div class="queue-capability-head">
-          <strong id="queue-capability-title">本机转录服务</strong>
-          <span class="queue-capability-state" id="queue-capability-status">正在检查…</span>
+      <details class="queue-capability-panel" id="queue-capability-panel" aria-live="polite" hidden>
+        <summary class="queue-capability-head">
+          <span class="queue-capability-title-group">
+            <strong id="queue-capability-title">本机转录服务</strong>
+            <span class="queue-capability-state" id="queue-capability-status">正在检查…</span>
+          </span>
           <button type="button" class="queue-capability-refresh" id="queue-capability-refresh" title="重新检查本机转录服务">↻</button>
-        </div>
+        </summary>
         <pre class="queue-capability-details" id="queue-capability-details"></pre>
-      </section>
+      </details>
 
       <div class="queue-status-bar" id="queue-status-bar">
         <span id="queue-status-text">队列就绪</span>
@@ -318,6 +322,12 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="9" y1="10" x2="15" y2="10"/></svg>
         </div>
         <p id="empty-message">打开 YouTube 或哔哩哔哩视频后，字幕将自动同步出现在这里。</p>
+        <div class="empty-actions" id="empty-actions" hidden>
+          <button class="empty-btn empty-btn-transcribe" id="empty-transcribe-btn" type="button">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+            <span>发起端侧转录</span>
+          </button>
+        </div>
       </div>
     </section>
 
@@ -484,6 +494,7 @@
   <script src="../core/parsers.js"></script>
   <script src="../core/media.js"></script>
   <script src="../core/formatters.js"></script>
+  <script src="../core/asr-polisher.js"></script>
   <script src="../platform/bilibili.js"></script>
   <script src="../platform/youtube.js"></script>
   <script src="../core/tracker.js"></script>

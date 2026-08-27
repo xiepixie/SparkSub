@@ -243,6 +243,60 @@ final class ModelLocatorTests: XCTestCase {
         try Data("2026.08.19\n".utf8).write(to: binaryDirectory.appendingPathComponent("yt-dlp_macos.version"))
         XCTAssertTrue(locator.capabilities().ytDLP.available)
     }
+
+    func testRealParakeetInference() async throws {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let locator = ModelLocator(
+            userApplicationSupportURL: appSupport,
+            userCachesURL: caches,
+            sparkSubApplicationSupportURL: appSupport.appendingPathComponent("SparkSub")
+        )
+        let engine = TranscriptionEngine(modelLocator: locator)
+        let token = CancellationToken()
+        let output = try await engine.transcribe(
+            mediaURL: URL(fileURLWithPath: "/tmp/test_speech.wav"),
+            sourceLanguage: "en",
+            platformLanguage: nil,
+            sourceKind: .remote,
+            cancellation: token,
+            onProgress: { fraction in
+                print("PROGRESS FRACTION:", fraction)
+            }
+        )
+        print("REAL TRANSCRIPTION OUTPUT ENGINE:", output.engine, "CUES:", output.cues.count)
+        for cue in output.cues {
+            print("CUE [\(cue.from) -> \(cue.to)]: \(cue.content)")
+        }
+        XCTAssertFalse(output.cues.isEmpty)
+    }
+
+    func testRealCohereInference() async throws {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let locator = ModelLocator(
+            userApplicationSupportURL: appSupport,
+            userCachesURL: caches,
+            sparkSubApplicationSupportURL: appSupport.appendingPathComponent("SparkSub")
+        )
+        let engine = TranscriptionEngine(modelLocator: locator)
+        let token = CancellationToken()
+        let output = try await engine.transcribe(
+            mediaURL: URL(fileURLWithPath: "/tmp/test_speech.wav"),
+            sourceLanguage: "zh",
+            platformLanguage: "zh",
+            sourceKind: .remote,
+            cancellation: token,
+            onProgress: { fraction in
+                print("COHERE PROGRESS FRACTION:", fraction)
+            }
+        )
+        print("REAL COHERE TRANSCRIPTION OUTPUT ENGINE:", output.engine, "CUES:", output.cues.count)
+        for cue in output.cues {
+            print("COHERE CUE [\(cue.from) -> \(cue.to)]: \(cue.content)")
+        }
+        XCTAssertFalse(output.cues.isEmpty)
+    }
 }
 
 private final class ModelFixture {

@@ -4,7 +4,8 @@ import XCTest
 
 final class YouTubeCaptionFetcherTests: XCTestCase {
     func testCatalogRanksManualThenOriginalAutomaticThenTranslated() throws {
-        let data = Data(#"{
+        let data = Data(#"""
+        {
           "subtitles": {
             "en": [{"ext":"json3","name":"English","url":"https://www.youtube.com/api/timedtext?lang=en"}]
           },
@@ -12,7 +13,8 @@ final class YouTubeCaptionFetcherTests: XCTestCase {
             "yue": [{"ext":"json3","name":"粵語（自動產生）","url":"https://www.youtube.com/api/timedtext?kind=asr&lang=yue"}],
             "zh-HK": [{"ext":"json3","name":"中文（香港）","url":"https://www.youtube.com/api/timedtext?kind=asr&lang=en&tlang=zh-HK"}]
           }
-        }"#.utf8)
+        }
+        """#.utf8)
 
         let ranked = try YouTubeCaptionCatalog.decode(data).rankedCandidates(sourceLanguage: "yue")
         XCTAssertEqual(ranked.map(\.language), ["en", "yue", "zh-HK"])
@@ -20,13 +22,15 @@ final class YouTubeCaptionFetcherTests: XCTestCase {
     }
 
     func testCatalogUsesCantoneseAliasesWithinTheSameCaptionClass() throws {
-        let data = Data(#"{
+        let data = Data(#"""
+        {
           "subtitles": {
             "en": [{"ext":"json3","name":"English","url":"https://www.youtube.com/api/timedtext?lang=en"}],
             "zh-HK": [{"ext":"json3","name":"粵語","url":"https://www.youtube.com/api/timedtext?lang=zh-HK"}]
           },
           "automatic_captions": {}
-        }"#.utf8)
+        }
+        """#.utf8)
 
         let ranked = try YouTubeCaptionCatalog.decode(data).rankedCandidates(sourceLanguage: "yue")
         XCTAssertEqual(ranked.first?.language, "zh-HK")
@@ -34,7 +38,8 @@ final class YouTubeCaptionFetcherTests: XCTestCase {
     }
 
     func testCatalogIgnoresLiveChatAndFormatsTheHostCannotParse() throws {
-        let data = Data(#"{
+        let data = Data(#"""
+        {
           "subtitles": {
             "live_chat": [{"ext":"json","name":"Live chat","url":"https://www.youtube.com/live_chat_replay"}],
             "fr": [{"ext":"srv3","name":"French","url":"https://www.youtube.com/api/timedtext?lang=fr"}]
@@ -42,7 +47,8 @@ final class YouTubeCaptionFetcherTests: XCTestCase {
           "automatic_captions": {
             "yue": [{"ext":"json3","name":"粵語（自動產生）","url":"https://www.youtube.com/api/timedtext?kind=asr&lang=yue"}]
           }
-        }"#.utf8)
+        }
+        """#.utf8)
 
         let ranked = try YouTubeCaptionCatalog.decode(data).rankedCandidates(sourceLanguage: "yue")
         XCTAssertEqual(ranked, [
@@ -87,10 +93,12 @@ final class YouTubeCaptionFetcherTests: XCTestCase {
     }
 
     func testJSON3AndWebVTTParsersReturnCompleteCues() throws {
-        let json = Data(#"{"events":[
+        let json = Data(#"""
+        {"events":[
           {"tStartMs":0,"dDurationMs":1200,"segs":[{"utf8":"第一句"}]},
           {"tStartMs":1500,"dDurationMs":1000,"segs":[{"utf8":"第二句"}]}
-        ]}"#.utf8)
+        ]}
+        """#.utf8)
         XCTAssertEqual(try YouTubeCaptionTextParser.parse(json, fileExtension: "json3"), [
             Cue(from: 0, to: 1.2, content: "第一句"),
             Cue(from: 1.5, to: 2.5, content: "第二句"),
@@ -192,12 +200,14 @@ private actor SuccessfulCaptionCommandExecutor: YTDLPCommandExecuting {
     func execute(invocation: YTDLPCommandInvocation, cancellation: CancellationToken) async throws -> YTDLPCommandOutput {
         arguments.append(invocation.arguments)
         if invocation.arguments.contains("--dump-single-json") {
-            return YTDLPCommandOutput(stdout: Data(#"{
+            return YTDLPCommandOutput(stdout: Data(#"""
+            {
               "subtitles": {},
               "automatic_captions": {
-                "yue": [{"ext":"json3","name":"粵語（自動產生）","url":"https://www.youtube.com/api/timedtext?kind=asr&lang=yue"}]
+                "yue": [{"ext":"json3","name":"粵语（自動產生）","url":"https://www.youtube.com/api/timedtext?kind=asr&lang=yue"}]
               }
-            }"#.utf8))
+            }
+            """#.utf8))
         }
         try Data(#"{"events":[{"tStartMs":0,"dDurationMs":1500,"segs":[{"utf8":"完整粵語字幕"}]}]}"#.utf8)
             .write(to: invocation.workspaceURL.appendingPathComponent("caption.yue.json3"))
@@ -213,14 +223,16 @@ private actor BrokenManualThenAutomaticCaptionExecutor: YTDLPCommandExecuting {
     func execute(invocation: YTDLPCommandInvocation, cancellation: CancellationToken) async throws -> YTDLPCommandOutput {
         arguments.append(invocation.arguments)
         if invocation.arguments.contains("--dump-single-json") {
-            return YTDLPCommandOutput(stdout: Data(#"{
+            return YTDLPCommandOutput(stdout: Data(#"""
+            {
               "subtitles": {
                 "en": [{"ext":"json3","name":"Manual English","url":"https://www.youtube.com/api/timedtext?lang=en"}]
               },
               "automatic_captions": {
                 "yue": [{"ext":"json3","name":"粵語（自動產生）","url":"https://www.youtube.com/api/timedtext?kind=asr&lang=yue"}]
               }
-            }"#.utf8))
+            }
+            """#.utf8))
         }
 
         downloadAttempt += 1
@@ -232,7 +244,9 @@ private actor BrokenManualThenAutomaticCaptionExecutor: YTDLPCommandExecuting {
 
         let names = try FileManager.default.contentsOfDirectory(atPath: invocation.workspaceURL.path)
         staleOutputWasRemoved = !names.contains(where: { $0.hasPrefix("caption.") })
-        try Data(#"{"events":[{"tStartMs":1000,"dDurationMs":1500,"segs":[{"utf8":"後續粵語自動字幕"}]}]}"#.utf8)
+        try Data(#"""
+        {"events":[{"tStartMs":1000,"dDurationMs":1500,"segs":[{"utf8":"後續粵語自動字幕"}]}]}
+        """#.utf8)
             .write(to: invocation.workspaceURL.appendingPathComponent("caption.yue.json3"))
         return YTDLPCommandOutput()
     }

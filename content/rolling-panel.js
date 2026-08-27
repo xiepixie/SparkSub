@@ -413,19 +413,32 @@
             font-size:11px; color:var(--dim); line-height:1.5; max-width:240px; margin-bottom:12px;
           }
           .empty-actions {
-            display:flex; align-items:center; justify-content:center; gap:8px; margin-top:4px;
+            display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; margin-top:10px; width:100%;
+          }
+          .empty-sub-actions {
+            display:inline-flex; align-items:center; justify-content:center; gap:6px;
           }
           .empty-btn {
             height:28px; padding:0 12px; font-size:11.5px; font-weight:550;
             border-radius:6px; border:1px solid var(--border);
             background:var(--card); color:var(--text);
-            cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:4px;
+            cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:5px;
             transition:all .16s ease; outline:none; box-sizing:border-box;
           }
+          .empty-btn svg { width:12px; height:12px; flex-shrink:0; }
           .empty-btn:hover {
             border-color:var(--border-focus); background:var(--surface-2); color:var(--text); transform:translateY(-1px);
           }
           .empty-btn:active { transform:translateY(0); }
+          .empty-btn.btn-transcribe-asr {
+            height:32px; padding:0 18px; font-size:12.5px; font-weight:600;
+            background:linear-gradient(135deg,var(--primary),#ff6b64); color:#ffffff;
+            border:none; border-radius:8px; box-shadow:0 3px 12px rgba(255,85,77,0.35);
+          }
+          .empty-btn.btn-transcribe-asr svg { width:14px; height:14px; }
+          .empty-btn.btn-transcribe-asr:hover {
+            filter:brightness(1.08); transform:translateY(-1px); box-shadow:0 5px 16px rgba(255,85,77,0.45);
+          }
           .empty-btn.btn-retry {
             background:var(--active-bg); color:var(--primary); border-color:var(--active-border);
           }
@@ -2119,14 +2132,60 @@
           </div>
           <div class="empty-title">${BSE.Utils.escapeHtml(title)}</div>
           <div class="empty-desc">${BSE.Utils.escapeHtml(hint)}</div>
-          ${(isError || isEmpty) ? `
+          ${isEmpty ? `
             <div class="empty-actions">
-              <button class="empty-btn btn-retry">↻ ${retryText}</button>
-              <button class="empty-btn btn-diag">${diagText}</button>
+              <button class="empty-btn btn-transcribe-asr" type="button">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+                <span>发起端侧转录</span>
+              </button>
+              <div class="empty-sub-actions">
+                <button class="empty-btn btn-retry" type="button">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                  <span>重新获取</span>
+                </button>
+                <button class="empty-btn btn-diag" type="button">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                  <span>诊断信息</span>
+                </button>
+              </div>
             </div>
-          ` : ''}
+          ` : (isError ? `
+            <div class="empty-actions">
+              <div class="empty-sub-actions">
+                <button class="empty-btn btn-retry" type="button">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                  <span>重新获取</span>
+                </button>
+                <button class="empty-btn btn-diag" type="button">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                  <span>诊断信息</span>
+                </button>
+              </div>
+            </div>
+          ` : '')}
         `;
-        if (isError || isEmpty) {
+        if (isEmpty) {
+          this.empty.querySelector('.btn-transcribe-asr')?.addEventListener('click', async () => {
+            try {
+              const res = await chrome.runtime.sendMessage({
+                type: 'BSE_QUEUE_ENQUEUE',
+                urls: [window.location.href],
+                options: { sourceLanguage: 'auto' }
+              });
+              if (res?.ok) {
+                chrome.runtime.sendMessage({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
+                chrome.runtime.sendMessage({ type: 'BSE_OPEN_SIDE_PANEL', tab: 'queue' }).catch(() => {});
+                this.showToast('已加入离线转录队列，已在侧边栏开启转录！');
+              } else {
+                this.showToast('加入转录队列失败：' + (res?.error || '未知错误'));
+              }
+            } catch (err) {
+              this.showToast('加入转录队列异常：' + (err?.message || err));
+            }
+          });
+          this.empty.querySelector('.btn-retry')?.addEventListener('click', () => this.actions.refresh?.());
+          this.empty.querySelector('.btn-diag')?.addEventListener('click', () => this.actions.openSidePanel?.());
+        } else if (isError) {
           this.empty.querySelector('.btn-retry')?.addEventListener('click', () => this.actions.refresh?.());
           this.empty.querySelector('.btn-diag')?.addEventListener('click', () => this.actions.openSidePanel?.());
         }

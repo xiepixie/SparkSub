@@ -42,11 +42,6 @@ if Array(CommandLine.arguments.dropFirst()) == ["--diagnose"] {
     exit(0)
 }
 
-guard CommandLine.arguments.count == 1 else {
-    logError("SparkSub native host accepts only --diagnose outside Native Messaging mode")
-    exit(2)
-}
-
 let writer = NativeMessageWriter(output: .standardOutput)
 let downloader = MediaDownloader(ytDLPExecutableURL: ytDLPURL)
 let youtubeCaptionFetcher = YouTubeCaptionFetcher(ytDLPExecutableURL: ytDLPURL)

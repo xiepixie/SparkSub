@@ -234,7 +234,7 @@ struct URLSessionRemoteDownloader: RemoteDownloading {
         request.timeoutInterval = 120
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
 
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let delegate = RestrictedRedirectDelegate(headers: headers)
             let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
             let task = session.downloadTask(with: request) { temporaryURL, response, error in

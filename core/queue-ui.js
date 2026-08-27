@@ -82,6 +82,9 @@
     panel.hidden = false;
     panel.dataset.state = state.key;
     statusElement.textContent = t(state.key);
+    if (panel.tagName === 'DETAILS') {
+      panel.open = state.key !== 'queue_capability_ready';
+    }
     const parts = capabilities ? [
       ['queue_capability_ytdlp', capabilities.ytDLP],
       ['queue_capability_parakeet', capabilities.models?.parakeet],

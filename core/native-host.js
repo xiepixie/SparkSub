@@ -314,7 +314,7 @@
           kind: message.captionKind
         };
       }
-      pending.result = { totalChunks, chunks: new Map(), metadata };
+      pending.result = { totalChunks, chunks: new Map(), metadata, engine: message.engine };
       armRequestTimeout(message.requestId, pending);
       return;
     }
@@ -356,6 +356,9 @@
       if (cues.length !== message.cueCount || !cues.every(isValidCue) || !cues.some((cue) => cue.content.trim().length > 0)) {
         settleRequest(message.requestId, 'reject', makeError(null, 'RESULT_INCOMPLETE'));
         return;
+      }
+      if (result.engine && pending.resultMode !== 'youtubeCaptions') {
+        cues.engine = result.engine;
       }
       settleRequest(message.requestId, 'resolve', pending.resultMode === 'youtubeCaptions'
         ? { cues, ...result.metadata }

@@ -47,8 +47,8 @@ struct CohereLayout: Equatable, Sendable {
     let decoderVariant: CohereDecoderVariant
 }
 
-struct ModelLocator: CapabilityProviding, @unchecked Sendable {
-    static let parakeetCompatibilityFolder = "parakeet-tdt-0.6b-v3-coreml"
+final class ModelLocator: CapabilityProviding, @unchecked Sendable {
+    static let parakeetCompatibilityFolder = "parakeet-tdt-0.6b-v3"
     static let parakeetRequiredNames = [
         "Preprocessor.mlmodelc",
         "Encoder.mlmodelc",
@@ -106,12 +106,28 @@ struct ModelLocator: CapabilityProviding, @unchecked Sendable {
         let decoderName = candidate.variant == .v2
             ? "cohere_decoder_cache_external_v2.mlmodelc"
             : "cohere_decoder_cache_external.mlmodelc"
-        let assets = [
+        var assets = [
             "cohere_encoder.mlmodelc": candidate.encoder,
             decoderName: candidate.decoder,
-            "vocab.json": candidate.vocab,
         ]
-        try stageAliases(assets, in: compatibility)
+        if candidate.vocab.lastPathComponent == "vocab.json" {
+            assets["vocab.json"] = candidate.vocab
+            try stageAliases(assets, in: compatibility)
+        } else {
+            try stageAliases(assets, in: compatibility)
+            if let data = try? Data(contentsOf: candidate.vocab),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let tokens = json["id_to_token"] as? [String] {
+                var dict: [String: String] = [:]
+                dict.reserveCapacity(tokens.count)
+                for (idx, tok) in tokens.enumerated() {
+                    dict[String(idx)] = tok
+                }
+                if let outData = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]) {
+                    try outData.write(to: compatibility.appendingPathComponent("vocab.json"))
+                }
+            }
+        }
         return CohereLayout(
             sourceURL: candidate.root,
             compatibilityURL: compatibility,
@@ -182,14 +198,20 @@ struct ModelLocator: CapabilityProviding, @unchecked Sendable {
         var sawIncompatibleDecoder = false
         for root in expandedCohereRoots() {
             guard let encoder = cohereEncoderCandidate(in: root) else { continue }
-            let vocab = root.appendingPathComponent("vocab.json")
             let decoderCandidates = cohereDecoderCandidates(in: root)
             guard !decoderCandidates.isEmpty else { continue }
-            guard existsWithoutFollowingUserMutation(vocab) else {
+            let vocabCandidates = [
+                root.appendingPathComponent("vocab.json"),
+                root.appendingPathComponent("coreml_manifest.json"),
+                root.deletingLastPathComponent().appendingPathComponent("vocab.json"),
+                root.deletingLastPathComponent().appendingPathComponent("coreml_manifest.json"),
+                userApplicationSupportURL.appendingPathComponent("FluidAudio/Cohere/vocab.json")
+            ]
+            guard let vocab = vocabCandidates.first(where: { existsWithoutFollowingUserMutation($0) && isNonemptyJSONVocabulary(at: $0) }) else {
                 sawAssetsWithoutVocabulary = true
                 continue
             }
-            guard isCompleteCompiledModel(at: encoder), isNonemptyJSONVocabulary(at: vocab) else {
+            guard isCompleteCompiledModel(at: encoder) else {
                 sawIncompatibleDecoder = true
                 continue
             }
@@ -199,7 +221,7 @@ struct ModelLocator: CapabilityProviding, @unchecked Sendable {
                     continue
                 }
                 let inputs = (try? decoderInputInspector(decoder)) ?? []
-                guard inputs.contains("k_cache_0") else {
+                guard inputs.contains("k_cache_0") || inputs.contains("cache_k") else {
                     sawIncompatibleDecoder = true
                     continue
                 }
@@ -300,11 +322,14 @@ struct ModelLocator: CapabilityProviding, @unchecked Sendable {
             return false
         }
         if let array = object as? [Any] { return !array.isEmpty }
-        if let dictionary = object as? [String: Any] { return !dictionary.isEmpty }
+        if let dictionary = object as? [String: Any] {
+            if let idToToken = dictionary["id_to_token"] as? [Any] { return !idToToken.isEmpty }
+            return !dictionary.isEmpty
+        }
         return false
     }
 
-    private static func inspectDecoderInputs(_ compiledDecoder: URL) throws -> [String] {
+    @Sendable private static func inspectDecoderInputs(_ compiledDecoder: URL) throws -> [String] {
         let model = try MLModel(contentsOf: compiledDecoder)
         return Array(model.modelDescription.inputDescriptionsByName.keys).sorted()
     }

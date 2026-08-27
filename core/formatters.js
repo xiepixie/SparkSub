@@ -61,6 +61,30 @@
 
   const AI_PROMPTS = [
     {
+      id: 'polish',
+      icon: '✨',
+      text: 'ASR 吞音与术语纠错',
+      desc: '原声保真 > ASR 纠错 > 语法规范。保留自然口吻与交谈感，精准修正同音、吞音与专有名词',
+      prompt: (meta = {}) => `你是一个专业的视频字幕校对与 ASR 纠错专家。当前视频标题为：《${meta?.title || '视频原片'}》。
+
+【核心标准与优先级】：
+原声保真 > ASR 纠错 > 可读性 > 语法规范。
+
+字幕应当让观众产生：
+“屏幕上的文字就是我刚刚听到的话”，而不是“有人把这段话重新写了一遍”。
+
+【校对与纠错五大原则】：
+1. 【同音/近音/吞音纠错】：精准修正明确的同音、近音、连读、弱读导致的识别错误（如 "starp" ➔ "startup"、"tra ined" ➔ "trained"、"to of results" ➔ "turn to the results" 等）；
+2. 【专有名词与技术术语】：结合视频标题与上下文，准确识别并规范专有名词、人名、产品名与技术术语（如 Qwen, PyTorch, Codex, LoRA, Claude, GPT-5, BERT, Jacob Devlin 等）；
+3. 【大小写与文本规范】：修正明显错误的英文大小写、术语拼写、不合理的词中空格与基础标点规范化；
+4. 【仅在证据确凿时补词】：只有在现有上下文和发音证据足以表明 ASR 确实漏识别/吞掉词时（如失落的代词、介词或时态词尾 -ed/-s），才适度恢复漏掉的词，坚决不做主观扩写或脑补；
+5. 【严格保留口语原声风味】：保留说话人的自然语气、措辞习惯、交谈感和实际语法，绝不将其粗暴重写或书面化阉割，确保字幕与原声视听高度吻合；
+6. 【输出要求】：直接输出校对后的清晰自然字幕文本。
+
+---
+以下为原始字幕文本：`
+    },
+    {
       id: 'notes',
       icon: '🎯',
       text: '生成结构化深度讲义',
@@ -166,9 +190,14 @@
     }
   ];
 
-  function generateAiPrompt(promptIdOrText, cues, withTimestamp = false) {
+  function generateAiPrompt(promptIdOrText, cues, withTimestamp = false, metadata = {}) {
     const preset = AI_PROMPTS.find(p => p.id === promptIdOrText);
-    const promptHeader = preset ? preset.prompt : (promptIdOrText || AI_PROMPTS[0].prompt);
+    let promptHeader;
+    if (preset) {
+      promptHeader = typeof preset.prompt === 'function' ? preset.prompt(metadata) : preset.prompt;
+    } else {
+      promptHeader = promptIdOrText || (typeof AI_PROMPTS[0].prompt === 'function' ? AI_PROMPTS[0].prompt(metadata) : AI_PROMPTS[0].prompt);
+    }
     const text = withTimestamp ? toTxt(cues, true) : mergeParagraphs(cues);
     return `${promptHeader}\n\n${text}`.trim();
   }

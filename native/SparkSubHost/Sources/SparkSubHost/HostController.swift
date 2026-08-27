@@ -46,13 +46,24 @@ private final class TaskHeartbeatLease: HeartbeatLease, @unchecked Sendable {
 private final class TranscriptionProgressState: @unchecked Sendable {
     private let lock = NSLock()
     private var percent = 70
-    private var hint = "Loading the local transcription model"
+    private var hint = "正在加载端侧 CoreML 识别模型…"
+    private var maxRawProgress = 0
 
-    func update(percent: Int, hint: String) {
+    func updateProgress(fraction: Double) -> (percent: Int, hint: String) {
         lock.lock()
-        self.percent = percent
-        self.hint = hint
-        lock.unlock()
+        defer { lock.unlock() }
+        let currentRaw = Int(min(1.0, max(0.0, fraction)) * 100)
+        self.maxRawProgress = max(self.maxRawProgress, currentRaw)
+        let computedPercent = 70 + Int(Double(self.maxRawProgress) * 0.25)
+        self.percent = max(self.percent, computedPercent)
+        self.hint = self.percent >= 95 ? "正在进行时间轴对齐与标点切分…" : "正在进行端侧语音识别 (\(self.maxRawProgress)%)…"
+        return (self.percent, self.hint)
+    }
+
+    func tick() -> (percent: Int, hint: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (percent, hint)
     }
 
     func snapshot() -> (percent: Int, hint: String) {
@@ -222,7 +233,7 @@ final class HostController: @unchecked Sendable {
                     jobId: jobId,
                     stage: "fetching_audio",
                     percent: 50,
-                    hint: "Preparing media download"
+                    hint: "正在准备下载高清音频流…"
                 )
                 let mediaURL = try await mediaDownloader.acquire(
                     source: source,
@@ -235,7 +246,7 @@ final class HostController: @unchecked Sendable {
                             jobId: jobId,
                             stage: "fetching_audio",
                             percent: 50 + Int(min(1, max(0, fraction)) * 20),
-                            hint: "Downloading media"
+                            hint: "正在下载媒体音频 (\(Int(fraction * 100))%)…"
                         )
                     }
                 )
@@ -245,12 +256,12 @@ final class HostController: @unchecked Sendable {
                     jobId: jobId,
                     stage: "transcribing",
                     percent: 70,
-                    hint: "Loading the local transcription model"
+                    hint: "正在加载端侧 CoreML 识别模型…"
                 )
                 let progressState = TranscriptionProgressState()
                 let heartbeat = heartbeatScheduler.schedule { [weak self] in
                     guard !token.isCancelled else { return }
-                    let progress = progressState.snapshot()
+                    let progress = progressState.tick()
                     self?.writeProgress(
                         requestId: request.requestId,
                         jobId: jobId,
@@ -268,9 +279,7 @@ final class HostController: @unchecked Sendable {
                     cancellation: token,
                     onProgress: { [weak self] fraction in
                         guard !token.isCancelled else { return }
-                        let percent = 70 + Int(min(1, max(0, fraction)) * 25)
-                        let hint = "Recognizing audio"
-                        progressState.update(percent: percent, hint: hint)
+                        let (percent, hint) = progressState.updateProgress(fraction: fraction)
                         self?.writeProgress(
                             requestId: request.requestId,
                             jobId: jobId,

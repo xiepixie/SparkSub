@@ -196,6 +196,7 @@ for (const file of [
   'core/i18n.js',
   'core/parsers.js',
   'core/formatters.js',
+  'core/asr-polisher.js',
   'core/tracker.js',
   'core/media.js',
   'core/queue.js',
@@ -636,14 +637,14 @@ resetNativeHost();
 assert.equal(BSE.I18n.t('follow'), '跟随');
 BSE.I18n.setLocale('en');
 assert.equal(BSE.I18n.t('follow'), 'Follow');
-assert.equal(BSE.I18n.t('ai_prompt_summary'), '📝 Core Essence & Logic');
-assert.equal(BSE.I18n.t('tab_tracker'), '🔔 Tracker Center');
+assert.equal(BSE.I18n.t('ai_prompt_summary'), 'Core Essence & Logic');
+assert.equal(BSE.I18n.t('tab_tracker'), 'Tracker Center');
 assert.equal(BSE.I18n.t('tracker_filter_all', { n: 4 }), 'All (4)');
 BSE.I18n.setLocale('zh-TW');
-assert.equal(BSE.I18n.t('tab_tracker'), '🔔 追蹤中心');
+assert.equal(BSE.I18n.t('tab_tracker'), '追蹤更新');
 assert.equal(BSE.I18n.t('tracker_filter_all', { n: 4 }), '全部 (4)');
 BSE.I18n.setLocale('zh-CN');
-assert.equal(BSE.I18n.t('tab_tracker'), '🔔 追踪中心');
+assert.equal(BSE.I18n.t('tab_tracker'), '追踪更新');
 assert.equal(BSE.I18n.formatTimeSpan(159), '2分39秒');
 
 // 1.1 Symmetrical Dictionary Key Verification
@@ -1622,7 +1623,7 @@ assert.equal(nativeCalls.length, 1, 'captionless Bilibili must call the native h
 assert.deepEqual(structuredClone(nativeCalls[0].source), structuredClone(selectedDescriptor), 'Bilibili fallback must submit the shared best DASH descriptor');
 assert.equal(fallbackItem.stage, 'done', 'a valid native transcription must complete the queue item');
 assert.equal(fallbackItem.subtitle?.source, 'native', 'native output must persist its subtitle source');
-assert.equal(fallbackItem.subtitle?.engine, 'local-asr', 'native output must persist its subtitle engine');
+assert.ok(['local-asr', 'parakeet', 'cohere'].includes(fallbackItem.subtitle?.engine), 'native output must persist its subtitle engine');
 assert.ok(fallbackItem.subtitle?.cueCount > 0 && fallbackItem.subtitle?.plainText, 'done requires non-empty cues and plain text');
 assert.equal(JSON.stringify(storageWriteHistory).includes('secret-primary'), false, 'a Bilibili signed primary URL must never be persisted');
 assert.equal(JSON.stringify(storageWriteHistory).includes('secret-backup'), false, 'a Bilibili signed backup URL must never be persisted');
@@ -2389,5 +2390,23 @@ assert.ok(
 assert.match(taskFiveSidepanelSource, /queue-source-engine/, 'completed cards must render their platform or native engine source');
 assert.match(taskFiveSidepanelSource, /queue-failure-detail/, 'failed cards must render stable safe failure details');
 
+// AsrPolisher unit tests
+assert.ok(BSE.AsrPolisher, 'AsrPolisher module must exist');
+const testCues = [{ from: 0, to: 2, content: 'We use Quen and yTch' }, { from: 2, to: 4, content: 'and codecs tool.' }];
+const testPrompt = BSE.AsrPolisher.buildPolishingPrompt('Hugging Face Journal Club', testCues);
+assert.match(testPrompt, /Hugging Face Journal Club/);
+assert.match(testPrompt, /\[1\] We use Quen and yTch/);
+
+const aligned = BSE.AsrPolisher.alignPolishedCues(
+  testCues,
+  '[1] We use Qwen and PyTorch\n[2] and Codex tool.'
+);
+assert.equal(aligned.length, 2);
+assert.equal(aligned[0].content, 'We use Qwen and PyTorch');
+assert.equal(aligned[1].content, 'and Codex tool.');
+
+const dynamicAiPrompt = BSE.Formatters.generateAiPrompt('polish', [{ from: 0, to: 1, content: 'test' }], false, { title: 'AI 论文研读' });
+assert.match(dynamicAiPrompt, /AI 论文研读/);
+
 BSE.NativeHost = originalNativeHost;
-console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)、后台无人值守字幕抓取与一键 Markdown 字幕、本地 ASR 回退、受限媒体描述符与进度租约。');
+console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)、后台无人值守字幕抓取与一键 Markdown 字幕、本地 ASR 回退、受限媒体描述符与进度租约、端侧大模型 ASR 吞音语义纠错与时间轴回填。');

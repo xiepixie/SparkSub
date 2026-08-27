@@ -383,6 +383,7 @@
     sanitizeFilename,
     findActiveCueIndex,
     downloadText,
+    downloadTextFile: downloadText,
     downloadBlob,
     translateCues,
     SessionSnapshotManager
