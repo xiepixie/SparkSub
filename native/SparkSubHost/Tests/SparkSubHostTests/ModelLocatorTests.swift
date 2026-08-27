@@ -21,7 +21,7 @@ final class ModelLocatorTests: XCTestCase {
 
         let layout = try locator.locateParakeet()
         XCTAssertTrue(locator.capabilities().parakeet.available)
-        XCTAssertEqual(layout.compatibilityURL.lastPathComponent, "parakeet-tdt-0.6b-v3-coreml")
+        XCTAssertEqual(layout.compatibilityURL.lastPathComponent, ModelLocator.parakeetCompatibilityFolder)
         XCTAssertEqual(try Set(FileManager.default.contentsOfDirectory(atPath: source.path)), before)
         XCTAssertFalse(FileManager.default.fileExists(atPath: source.appendingPathComponent("parakeet_vocab.json").path))
         for name in ModelLocator.parakeetRequiredNames {
@@ -142,13 +142,13 @@ final class ModelLocatorTests: XCTestCase {
             userCachesURL: fixture.userCaches,
             sparkSubApplicationSupportURL: fixture.sparkSupport,
             decoderInputInspector: { url in
-                url == compatibleDecoder ? ["input_ids", "k_cache_0"] : ["input_ids"]
+                url.lastPathComponent == compatibleDecoder.lastPathComponent ? ["input_ids", "k_cache_0"] : ["input_ids"]
             }
         )
 
         let layout = try locator.locateCohere()
         XCTAssertEqual(layout.decoderVariant, .v2)
-        XCTAssertEqual(layout.sourceURL, candidate)
+        XCTAssertEqual(layout.sourceURL.resolvingSymlinksInPath(), candidate.resolvingSymlinksInPath())
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: layout.compatibilityURL.appendingPathComponent("cohere_encoder.mlmodelc").path
         ))

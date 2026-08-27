@@ -125,12 +125,12 @@ final class MediaDownloaderTests: XCTestCase {
         try FileManager.default.removeItem(at: webM)
         let m4a = workspace.appendingPathComponent("audio.m4a")
         try Data("decodable".utf8).write(to: m4a)
-        XCTAssertEqual(try YTDLPProcessExecutor.validatedOutput(in: workspace), m4a)
+        XCTAssertEqual(try YTDLPProcessExecutor.validatedOutput(in: workspace).resolvingSymlinksInPath(), m4a.resolvingSymlinksInPath())
 
         try FileManager.default.removeItem(at: m4a)
         let mp4 = workspace.appendingPathComponent("audio.mp4")
         try Data("decodable".utf8).write(to: mp4)
-        XCTAssertEqual(try YTDLPProcessExecutor.validatedOutput(in: workspace), mp4)
+        XCTAssertEqual(try YTDLPProcessExecutor.validatedOutput(in: workspace).resolvingSymlinksInPath(), mp4.resolvingSymlinksInPath())
     }
 
     func testYouTubeDownloadRefusesExecutableWithoutPinnedVerificationSidecar() async throws {
@@ -219,7 +219,7 @@ final class MediaDownloaderTests: XCTestCase {
         }
         await executor.waitUntilStarted()
         let taskDirectories = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
-            .filter { $0 != sibling }
+            .filter { $0.resolvingSymlinksInPath() != sibling.resolvingSymlinksInPath() }
         XCTAssertEqual(taskDirectories.count, 1)
         cancellation.cancel()
         do {

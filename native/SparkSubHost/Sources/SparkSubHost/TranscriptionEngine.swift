@@ -42,7 +42,7 @@ enum TranscriptionRouter {
         sourceLanguage: String,
         platformLanguage: String?,
         sourceKind: SourceKind,
-        cohereAvailable: Bool = false
+        cohereAvailable: Bool = true
     ) throws -> EngineRoute {
         let requested = normalized(sourceLanguage)
         if isCantonese(requested) { throw AppError.languageUnsupported }

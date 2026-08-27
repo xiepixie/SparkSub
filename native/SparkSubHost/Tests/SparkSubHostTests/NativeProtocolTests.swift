@@ -211,7 +211,7 @@ final class NativeProtocolTests: XCTestCase {
         let transcriptionCount = await engine.transcriptionCount
         XCTAssertEqual(transcriptionCount, 0)
         let remainingFiles = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
-        XCTAssertEqual(remainingFiles, [sibling])
+        XCTAssertEqual(remainingFiles.map { $0.resolvingSymlinksInPath().standardizedFileURL }, [sibling.resolvingSymlinksInPath().standardizedFileURL])
         XCTAssertTrue(FileManager.default.fileExists(atPath: sibling.path))
     }
 

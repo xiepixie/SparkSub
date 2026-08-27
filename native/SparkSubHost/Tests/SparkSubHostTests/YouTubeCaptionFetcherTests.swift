@@ -204,7 +204,7 @@ private actor SuccessfulCaptionCommandExecutor: YTDLPCommandExecuting {
             {
               "subtitles": {},
               "automatic_captions": {
-                "yue": [{"ext":"json3","name":"粵语（自動產生）","url":"https://www.youtube.com/api/timedtext?kind=asr&lang=yue"}]
+                "yue": [{"ext":"json3","name":"粵語（自動產生）","url":"https://www.youtube.com/api/timedtext?kind=asr&lang=yue"}]
               }
             }
             """#.utf8))
