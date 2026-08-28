@@ -258,10 +258,12 @@ function isAllowedBilibiliResource(url) {
     const isAllowedHost = host === 'api.bilibili.com'
       || host.endsWith('.bilibili.com')
       || host.endsWith('.biliapi.net')
+      || host.endsWith('.biliapi.com')
       || host.endsWith('.hdslb.com')
       || host.endsWith('.hdslb.net')
       || host.endsWith('.bilivideo.com')
-      || host.endsWith('.bilivideo.cn');
+      || host.endsWith('.bilivideo.cn')
+      || host.endsWith('.szbdyd.com');
     return (parsed.protocol === 'https:' || parsed.protocol === 'http:') && isAllowedHost;
   } catch {
     return false;
@@ -277,7 +279,7 @@ function classifyNetworkError(error) {
 
 async function fetchBilibiliResource(url, sender) {
   if (!isTrustedSender(sender, 'bilibili')) {
-    return { success: false, error: { code: 'INVALID_SENDER', message: '请求来源不是哔哩哔视频页' } };
+    return { success: false, error: { code: 'INVALID_SENDER', message: '请求来源不是哔哩哔哩视频页' } };
   }
   if (!isAllowedBilibiliResource(url)) {
     return { success: false, error: { code: 'HOST_NOT_ALLOWED', message: '字幕资源域名不在扩展白名单中' } };
@@ -288,39 +290,54 @@ async function fetchBilibiliResource(url, sender) {
     controller.abort(new DOMException(`后台请求超时（${BILIBILI_REQUEST_TIMEOUT_MS}ms）`, 'TimeoutError'));
   }, BILIBILI_REQUEST_TIMEOUT_MS);
 
-  const fetchUrl = String(url).startsWith('http://') ? url.replace(/^http:\/\//i, 'https://') : url;
+  const parsedUrl = new URL(url);
+  const isApi = parsedUrl.hostname === 'api.bilibili.com' || parsedUrl.hostname.endsWith('.biliapi.net');
+  const fetchUrlHttps = String(url).startsWith('http://') ? url.replace(/^http:\/\//i, 'https://') : url;
+  const fetchUrlHttp = String(url).startsWith('https://') ? url.replace(/^https:\/\//i, 'http://') : url;
   const headers = {
-    Accept: 'application/json,text/plain;q=0.9,*/*;q=0.5',
-    Referer: 'https://www.bilibili.com/'
+    Accept: 'application/json,text/plain;q=0.9,*/*;q=0.5'
   };
 
   try {
     let response;
-    try {
-      response = await fetch(fetchUrl, {
-        credentials: 'include',
-        cache: 'no-store',
-        signal: controller.signal,
-        headers
-      });
-    } catch {
+    // Strategy:
+    // 1. If API, try include credentials with HTTPS
+    // 2. If CDN or if step 1 fails, try omit credentials with HTTPS
+    // 3. If HTTPS fails, try HTTP with omit credentials
+    if (isApi) {
       try {
-        response = await fetch(fetchUrl, {
+        response = await fetch(fetchUrlHttps, {
+          credentials: 'include',
+          cache: 'no-store',
+          signal: controller.signal,
+          headers
+        });
+      } catch {
+        response = await fetch(fetchUrlHttps, {
           credentials: 'omit',
           cache: 'no-store',
           signal: controller.signal,
           headers
         });
-      } catch (err2) {
-        if (fetchUrl !== url) {
-          response = await fetch(url, {
+      }
+    } else {
+      try {
+        response = await fetch(fetchUrlHttps, {
+          credentials: 'omit',
+          cache: 'no-store',
+          signal: controller.signal,
+          headers
+        });
+      } catch (httpsErr) {
+        try {
+          response = await fetch(fetchUrlHttp, {
             credentials: 'omit',
             cache: 'no-store',
             signal: controller.signal,
             headers
           });
-        } else {
-          throw err2;
+        } catch {
+          throw httpsErr;
         }
       }
     }
