@@ -608,11 +608,25 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   }).catch(() => {});
 });
 
+function isSameMediaOrUrl(cached, tabUrl) {
+  if (!cached || !tabUrl) return false;
+  if (cached.url === tabUrl) return true;
+  const cleanCached = String(cached.url || '').split('#')[0];
+  const cleanTab = String(tabUrl).split('#')[0];
+  if (cleanCached && cleanTab && cleanCached === cleanTab) return true;
+
+  const currentMediaKey = BSE.Utils?.getMediaKey ? (BSE.Utils.getMediaKey('bilibili', tabUrl) || BSE.Utils.getMediaKey('youtube', tabUrl)) : null;
+  if (currentMediaKey && cached.mediaKey && currentMediaKey === cached.mediaKey) {
+    return true;
+  }
+  return false;
+}
+
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   const url = changeInfo.url || tab?.url || '';
-  if (changeInfo.status === 'loading' || changeInfo.url) {
+  if (changeInfo.url) {
     const cached = tabStates.get(tabId);
-    if (cached && changeInfo.url && cached.url !== changeInfo.url) {
+    if (cached && !isSameMediaOrUrl(cached, changeInfo.url)) {
       tabStates.delete(tabId);
       captionRequests.delete(tabId);
     }
@@ -628,7 +642,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     tabStates.delete(tabId);
     captionRequests.delete(tabId);
   } else if (changeInfo.status === 'complete' || (changeInfo.url && isVideo)) {
-    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+    const activeTab = await getActiveTab();
     if (activeTab?.id === tabId) {
       const state = await getTabState(tabId);
       chrome.runtime.sendMessage({
@@ -641,8 +655,15 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 async function getActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  return tab || null;
+  try {
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (tabs?.length && tabs[0]?.id != null) return tabs[0];
+  } catch {}
+  try {
+    const fallbackTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (fallbackTabs?.length && fallbackTabs[0]?.id != null) return fallbackTabs[0];
+  } catch {}
+  return null;
 }
 
 async function getTabState(tabId) {
@@ -650,14 +671,13 @@ async function getTabState(tabId) {
   if (!tab) return null;
 
   const cached = tabStates.get(tabId);
-  if (cached && tab.url && cached.url === tab.url) {
+  if (cached && isSameMediaOrUrl(cached, tab.url)) {
     return cached;
   }
-  tabStates.delete(tabId);
 
   try {
     const state = await chrome.tabs.sendMessage(tabId, { type: 'BSE_GET_STATE' });
-    if (state) {
+    if (state && (state.status === 'ready' || state.cues?.length > 0 || state.status === 'loading')) {
       tabStates.set(tabId, state);
       return state;
     }
@@ -665,16 +685,22 @@ async function getTabState(tabId) {
     // Content script not ready yet
   }
 
+  if (cached && tab.url && isMatchingVideoUrl(tab.url)) {
+    return cached;
+  }
+
   if (tab.url && isMatchingSiteUrl(tab.url)) {
     const injected = await injectContentScripts(tabId, tab.url);
     if (injected) {
       await new Promise((r) => setTimeout(r, 220));
       const state = await chrome.tabs.sendMessage(tabId, { type: 'BSE_GET_STATE' }).catch(() => null);
-      if (state) tabStates.set(tabId, state);
-      return state;
+      if (state) {
+        tabStates.set(tabId, state);
+        return state;
+      }
     }
   }
-  return null;
+  return cached || null;
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

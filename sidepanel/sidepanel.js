@@ -1213,11 +1213,23 @@
   }
 
   function renderState(nextState) {
+    if (!nextState) return;
     if (
       state
       && nextState?.mediaKey === state.mediaKey
       && Number(nextState?.revision || 0) < Number(state.revision || 0)
     ) return;
+
+    // Prevent accidental downgrades from 'ready' with cues to transient 'empty'
+    if (
+      state?.status === 'ready'
+      && state.cues?.length > 0
+      && nextState.status === 'empty'
+      && (!nextState.mediaKey || nextState.mediaKey === state.mediaKey)
+    ) {
+      return;
+    }
+
     state = nextState;
     activeIndex = Number.isInteger(state?.activeIndex) ? state.activeIndex : -1;
     elements.title.textContent = state?.title || BSE.I18n?.t('waiting_video') || '等待视频…';
@@ -1337,21 +1349,52 @@
 
   async function loadInitialState() {
     try {
+      // 1. Direct active tab inquiry
+      let currentTab = null;
+      try {
+        const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        if (tabs?.length && tabs[0]?.id != null) currentTab = tabs[0];
+      } catch {}
+      if (!currentTab) {
+        try {
+          const fallbackTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (fallbackTabs?.length && fallbackTabs[0]?.id != null) currentTab = fallbackTabs[0];
+        } catch {}
+      }
+
+      if (currentTab?.id != null) {
+        activeTabId = currentTab.id;
+        // Direct ping to the content script for instant (<5ms) state retrieval!
+        try {
+          const directState = await chrome.tabs.sendMessage(currentTab.id, { type: 'BSE_GET_STATE' });
+          if (directState && (directState.status === 'ready' || (directState.cues && directState.cues.length > 0))) {
+            renderState(directState);
+            return;
+          }
+        } catch {}
+      }
+
+      // 2. Query service worker state
       const result = await chrome.runtime.sendMessage({ type: 'BSE_GET_ACTIVE_STATE' });
-      activeTabId = result?.tab?.id || null;
-      if (result?.state) {
+      if (result?.tab?.id) activeTabId = result.tab.id;
+      if (result?.state && (result.state.status === 'ready' || (result.state.cues && result.state.cues.length > 0))) {
+        renderState(result.state);
+      } else if (result?.state) {
         renderState(result.state);
       } else {
-        const isBili = result?.tab?.url && /bilibili\.com/i.test(result.tab.url);
-        const isYt = result?.tab?.url && /youtube\.com|youtu\.be/i.test(result.tab.url);
-        renderState({
-          status: 'empty',
-          platform: isBili ? 'bilibili' : (isYt ? 'youtube' : 'unknown'),
-          message: BSE.I18n?.t('no_subtitles') || '当前页面未检测到视频字幕',
-          cues: [],
-          tracks: [],
-          title: result?.tab?.title || ''
-        });
+        const activeUrl = currentTab?.url || result?.tab?.url || '';
+        const isBili = /bilibili\.com/i.test(activeUrl);
+        const isYt = /youtube\.com|youtu\.be/i.test(activeUrl);
+        if (state?.status !== 'ready' || (activeUrl && BSE.Utils?.getMediaKey && state?.mediaKey && BSE.Utils.getMediaKey('bilibili', activeUrl) !== state.mediaKey && BSE.Utils.getMediaKey('youtube', activeUrl) !== state.mediaKey)) {
+          renderState({
+            status: 'empty',
+            platform: isBili ? 'bilibili' : (isYt ? 'youtube' : 'unknown'),
+            message: BSE.I18n?.t('no_subtitles') || '当前页面未检测到视频字幕',
+            cues: [],
+            tracks: [],
+            title: currentTab?.title || result?.tab?.title || ''
+          });
+        }
       }
     } catch {
       // Ignore
@@ -1366,14 +1409,19 @@
       } else {
         loadInitialState();
       }
-    } else if (message?.type === 'BSE_STATE_BROADCAST' && (!activeTabId || message.tabId === activeTabId)) {
-      activeTabId = message.tabId;
-      if (message.state) {
-        renderState(message.state);
-      } else {
-        loadInitialState();
+    } else if (message?.type === 'BSE_STATE_BROADCAST') {
+      const shouldAccept = !activeTabId
+        || message.tabId === activeTabId
+        || (state?.status !== 'ready' && message.state?.status === 'ready');
+      if (shouldAccept) {
+        activeTabId = message.tabId;
+        if (message.state) {
+          renderState(message.state);
+        } else {
+          loadInitialState();
+        }
       }
-    } else if (message?.type === 'BSE_PLAYBACK_BROADCAST' && message.tabId === activeTabId) {
+    } else if (message?.type === 'BSE_PLAYBACK_BROADCAST' && (!activeTabId || message.tabId === activeTabId)) {
       updatePlayback(message.activeIndex);
     } else if (message?.type === 'BSE_QUEUE_UPDATED') {
       loadAndRenderQueue();
