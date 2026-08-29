@@ -74,23 +74,39 @@ if [[ "$browser" == 'chrome' ]]; then
 else
   MANIFEST_DIR="$APP_SUPPORT/Chromium/NativeMessagingHosts"
 fi
-MANIFEST_FILE="$MANIFEST_DIR/${HOST_NAME}.json"
+MANIFEST_PATH="$MANIFEST_DIR/${HOST_NAME}.json"
+ALLOWED_ORIGIN="chrome-extension://${extension_id}/"
 
 if ((dry_run != 0)); then
-  printf 'Manifest: %s\n' "$MANIFEST_FILE"
+  printf 'Manifest: %s\n' "$MANIFEST_PATH"
   printf 'Host: %s\n' "$HOST_DESTINATION"
-  printf 'Allowed origin: chrome-extension://%s/\n' "$extension_id"
+  printf 'Allowed origin: %s\n' "$ALLOWED_ORIGIN"
   printf 'yt-dlp asset: %s\n' "$YTDLP_ASSET_URL"
   printf 'yt-dlp sha256: %s\n' "$PINNED_YTDLP_SHA256"
   printf 'yt-dlp version sidecar: %s\n' "$YTDLP_VERSION_FILE"
   exit 0
 fi
 
-BUILT_HOST="$REPO_ROOT/native/SparkSubHost/.build/apple/Products/Release/SparkSubHost"
-[[ -x "$BUILT_HOST" ]] || BUILT_HOST="$REPO_ROOT/native/SparkSubHost/.build/release/SparkSubHost"
-[[ -x "$BUILT_HOST" ]] || BUILT_HOST="$REPO_ROOT/native/SparkSubHost/.build/arm64-apple-macosx/release/SparkSubHost"
-[[ -x "$BUILT_HOST" ]] || BUILT_HOST="$REPO_ROOT/native/SparkSubHost/.build/arm64-apple-macosx/debug/SparkSubHost"
-[[ -x "$BUILT_HOST" ]] || fail 'SparkSubHost executable not found; build it with swift build -c release'
+find_built_host() {
+  for candidate in \
+    "$REPO_ROOT/native/SparkSubHost/.build/release/sparksub-native-host" \
+    "$REPO_ROOT/native/SparkSubHost/.build/arm64-apple-macosx/release/sparksub-native-host" \
+    "$REPO_ROOT/native/SparkSubHost/.build/release/SparkSubHost" \
+    "$REPO_ROOT/native/SparkSubHost/.build/arm64-apple-macosx/release/SparkSubHost" \
+    "$REPO_ROOT/native/SparkSubHost/.build/apple/Products/Release/SparkSubHost"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+BUILT_HOST="$(find_built_host || true)"
+if [[ -z "$BUILT_HOST" ]]; then
+  swift build -c release --package-path "$REPO_ROOT/native/SparkSubHost"
+  BUILT_HOST="$(find_built_host || fail 'SparkSubHost executable not found; build failed')"
+fi
 
 mkdir -p "$MANIFEST_DIR" "$SPARKSUB_ROOT" "$SPARKSUB_BIN"
 WORK_DIR="$(mktemp -d "$SPARKSUB_ROOT/.install.XXXXXX")"
