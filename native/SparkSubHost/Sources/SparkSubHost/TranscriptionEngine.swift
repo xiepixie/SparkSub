@@ -48,7 +48,8 @@ enum TranscriptionRouter {
         if isCantonese(requested) { throw AppError.languageUnsupported }
         if let language = europeanLanguage(requested) { return .parakeet(languageCode: language) }
         if mandarinAliases.contains(requested) {
-            return cohereAvailable ? .cohereMandarin : .parakeet(languageCode: nil)
+            guard cohereAvailable else { throw AppError.modelNotFound }
+            return .cohereMandarin
         }
         guard requested == "auto" else { throw AppError.languageUnsupported }
 
@@ -56,10 +57,15 @@ enum TranscriptionRouter {
             if isCantonese(hint) { throw AppError.languageUnsupported }
             if let language = europeanLanguage(hint) { return .parakeet(languageCode: language) }
             if mandarinAliases.contains(hint) {
-                return cohereAvailable ? .cohereMandarin : .parakeet(languageCode: nil)
+                guard cohereAvailable else { throw AppError.modelNotFound }
+                return .cohereMandarin
             }
         }
-        return cohereAvailable && sourceKind == .remote ? .cohereMandarin : .parakeet(languageCode: nil)
+        if sourceKind == .remote {
+            guard cohereAvailable else { throw AppError.modelNotFound }
+            return .cohereMandarin
+        }
+        return .parakeet(languageCode: nil)
     }
 
     private static func normalized(_ value: String) -> String {
@@ -133,20 +139,11 @@ actor TranscriptionEngine: Transcribing {
                 onProgress: onProgress
             )
         case .cohereMandarin:
-            do {
-                return try await transcribeCohere(
-                    mediaURL: mediaURL,
-                    cancellation: cancellation,
-                    onProgress: onProgress
-                )
-            } catch {
-                return try await transcribeParakeet(
-                    mediaURL: mediaURL,
-                    languageCode: nil,
-                    cancellation: cancellation,
-                    onProgress: onProgress
-                )
-            }
+            return try await transcribeCohere(
+                mediaURL: mediaURL,
+                cancellation: cancellation,
+                onProgress: onProgress
+            )
         }
     }
 

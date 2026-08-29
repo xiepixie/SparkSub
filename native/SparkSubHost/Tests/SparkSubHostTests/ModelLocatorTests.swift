@@ -252,6 +252,7 @@ final class ModelLocatorTests: XCTestCase {
             userCachesURL: caches,
             sparkSubApplicationSupportURL: appSupport.appendingPathComponent("SparkSub")
         )
+        try XCTSkipUnless(locator.capabilities().parakeet.available, "Parakeet model not installed locally")
         let engine = TranscriptionEngine(modelLocator: locator)
         let token = CancellationToken()
         let output = try await engine.transcribe(
@@ -279,6 +280,7 @@ final class ModelLocatorTests: XCTestCase {
             userCachesURL: caches,
             sparkSubApplicationSupportURL: appSupport.appendingPathComponent("SparkSub")
         )
+        try XCTSkipUnless(locator.capabilities().cohere.available, "Cohere model not installed locally")
         let engine = TranscriptionEngine(modelLocator: locator)
         let token = CancellationToken()
         let output = try await engine.transcribe(
