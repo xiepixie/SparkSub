@@ -116,6 +116,20 @@ if ((skip_ytdlp == 0)); then
   curl --fail --location --proto '=https' --tlsv1.2 --output "$WORK_DIR/yt-dlp" "$YTDLP_ASSET_URL"
   curl --fail --location --proto '=https' --tlsv1.2 --output "$WORK_DIR/SHA2-256SUMS" "$YTDLP_SUMS_URL"
   verify_ytdlp
+  mv -f "$WORK_DIR/yt-dlp" "$SPARKSUB_BIN/yt-dlp_macos.zip"
+  cat << 'EOF' > "$WORK_DIR/yt-dlp_macos"
+#!/bin/bash
+DIR="$(cd "$(dirname "$0")" && pwd)"
+for py in /opt/homebrew/bin/python3.14 /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3.10 /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
+  if [ -x "$py" ]; then
+    ver=$("$py" -c 'import sys; print(sys.version_info >= (3, 10))' 2>/dev/null || true)
+    if [ "$ver" = "True" ]; then
+      exec "$py" "$DIR/yt-dlp_macos.zip" "$@"
+    fi
+  fi
+done
+exec python3 "$DIR/yt-dlp_macos.zip" "$@"
+EOF
   chmod 755 "$WORK_DIR/yt-dlp_macos"
   mv -f "$WORK_DIR/yt-dlp_macos" "$YTDLP_DESTINATION"
   printf '%s\n' "$YTDLP_VERSION" > "$WORK_DIR/yt-dlp_macos.version"

@@ -487,6 +487,11 @@ final class YTDLPCommandProcessExecutor: YTDLPCommandExecuting, @unchecked Senda
             let stderrPipe = Pipe()
             let stdout = BoundedProcessBuffer(limit: Self.maximumCapturedBytes)
             let stderr = BoundedProcessBuffer(limit: Self.maximumCapturedBytes)
+            var environment = ProcessInfo.processInfo.environment
+            let homebrewPaths = "/opt/homebrew/bin:/usr/local/bin:/opt/homebrew/sbin:/usr/local/sbin"
+            let existingPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+            environment["PATH"] = "\(homebrewPaths):\(existingPath)"
+            process.environment = environment
             process.executableURL = invocation.executableURL
             process.arguments = invocation.arguments
             process.currentDirectoryURL = invocation.workspaceURL

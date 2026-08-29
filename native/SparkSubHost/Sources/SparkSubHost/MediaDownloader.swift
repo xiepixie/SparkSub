@@ -354,6 +354,11 @@ final class YTDLPProcessExecutor: YTDLPExecuting, @unchecked Sendable {
             let pipe = Pipe()
             let outputLock = NSLock()
             var outputData = Data()
+            var environment = ProcessInfo.processInfo.environment
+            let homebrewPaths = "/opt/homebrew/bin:/usr/local/bin:/opt/homebrew/sbin:/usr/local/sbin"
+            let existingPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+            environment["PATH"] = "\(homebrewPaths):\(existingPath)"
+            process.environment = environment
             process.executableURL = invocation.executableURL
             process.arguments = invocation.arguments
             process.standardOutput = pipe
