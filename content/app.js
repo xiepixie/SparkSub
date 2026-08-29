@@ -367,7 +367,20 @@
       let cues = readCachedBody(cacheKey);
       if (!cues || options.force) {
         const adapter = platform === BSE.PLATFORM.YOUTUBE ? BSE.YouTube : BSE.Bilibili;
-        cues = await adapter.loadTrack(track, { signal: controller.signal, diagnostic });
+        const onIntermediateCues = (intermediateCues) => {
+          if (ownGeneration !== trackGeneration || options.mediaGeneration !== generation) return;
+          if (intermediateCues?.length) {
+            diagnostic('快速呈现', `源语言已读取 ${intermediateCues.length} 条字幕，先行动态显示并后台翻译`);
+            transitionTo('ready', {
+              message: `${intermediateCues.length} 条 · 原文已就绪，正在后台机翻…`,
+              cues: intermediateCues,
+              selectedTrackId: track.id
+            });
+            panel?.render(publicState());
+            panel?.syncLayout();
+          }
+        };
+        cues = await adapter.loadTrack(track, { signal: controller.signal, diagnostic, onIntermediateCues });
         if (cues.length) cacheBody(cacheKey, cues);
       } else {
         diagnostic('本地缓存', `复用已读取的 ${cues.length} 条字幕`);

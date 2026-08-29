@@ -259,7 +259,8 @@
    * @param {{ signal?: AbortSignal, diagnostic?: (stage: string, message: string) => void }} [options]
    * @returns {Promise<Array<import('../types/bse').Cue>>}
    */
-  async function loadTrack(track, { signal, diagnostic } = {}) {
+  async function loadTrack(track, options = {}) {
+    const { signal, diagnostic, onIntermediateCues } = options;
     await hydrateCapturedRequests();
     const existingCaptures = matchingRequests(track);
     const isTrans = Boolean(track.isTranslated || track.tlang);
@@ -316,6 +317,7 @@
           };
           const baseCues = await loadTrack(baseTrackObj, { signal, diagnostic });
           if (baseCues && baseCues.length) {
+            options?.onIntermediateCues?.(baseCues);
             diagnostic?.('智能翻译', `已成功提取 ${baseCues.length} 条源语言字幕，正在进行全自动高质量中文翻译…`);
             const translatedCues = await BSE.Utils.translateCues(baseCues, track.tlang || track.lan || 'zh-Hans', signal);
             if (translatedCues.length) {

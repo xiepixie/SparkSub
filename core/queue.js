@@ -811,8 +811,9 @@
         source
       }, { onProgress, signal });
     } catch (error) {
-      if (error?.code === 'CAPTIONS_NOT_FOUND') return null;
-      throw error;
+      if (signal?.aborted || error?.code === 'CANCELLED' || error?.name === 'AbortError') throw error;
+      console.warn('[BSE Queue] 本机服务获取 YouTube 原生字幕失败，回退至本地转录:', error);
+      return null;
     } finally {
       await writeTail;
     }
@@ -822,7 +823,7 @@
       || typeof result?.language !== 'string' || !result.language.trim()
       || typeof result?.langDoc !== 'string' || !result.langDoc.trim()
       || !['manual', 'auto', 'translated'].includes(result?.kind)) {
-      throw nativeError('RESULT_INCOMPLETE', '本机字幕结果不完整。', '本机服务没有返回有效的 YouTube 字幕。');
+      return null;
     }
     return {
       cues,
