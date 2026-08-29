@@ -2134,9 +2134,9 @@
           <div class="empty-desc">${BSE.Utils.escapeHtml(hint)}</div>
           ${isEmpty ? `
             <div class="empty-actions">
-              <button class="empty-btn btn-transcribe-asr" type="button">
+              <button class="empty-btn btn-transcribe-asr" type="button" title="优先尝试从网络获取官方/AI字幕，无字幕时自动进行离线转录">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-                <span>发起端侧转录</span>
+                <span>获取字幕 / 转文字</span>
               </button>
               <div class="empty-sub-actions">
                 <button class="empty-btn btn-retry" type="button">
@@ -2167,6 +2167,15 @@
         if (isEmpty) {
           this.empty.querySelector('.btn-transcribe-asr')?.addEventListener('click', async () => {
             try {
+              this.showToast('正在探测网络官方/AI字幕…');
+              if (typeof this.actions.refresh === 'function') {
+                await this.actions.refresh();
+                await new Promise((r) => setTimeout(r, 650));
+                if (this.currentCues?.length) {
+                  this.showToast(`已成功获取网络字幕（共 ${this.currentCues.length} 条）`);
+                  return;
+                }
+              }
               const res = await chrome.runtime.sendMessage({
                 type: 'BSE_QUEUE_ENQUEUE',
                 urls: [window.location.href],
@@ -2175,12 +2184,12 @@
               if (res?.ok) {
                 chrome.runtime.sendMessage({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
                 chrome.runtime.sendMessage({ type: 'BSE_OPEN_SIDE_PANEL', tab: 'queue' }).catch(() => {});
-                this.showToast('已加入离线转录队列，已在侧边栏开启转录！');
+                this.showToast('未检测到平台网络字幕，已在侧边栏开启离线转录！');
               } else {
                 this.showToast('加入转录队列失败：' + (res?.error || '未知错误'));
               }
             } catch (err) {
-              this.showToast('加入转录队列异常：' + (err?.message || err));
+              this.showToast('字幕获取操作异常：' + (err?.message || err));
             }
           });
           this.empty.querySelector('.btn-retry')?.addEventListener('click', () => this.actions.refresh?.());

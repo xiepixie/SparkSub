@@ -1617,6 +1617,25 @@
         toast('未定位到有效视频链接', true);
         return;
       }
+
+      // 1. 若当前处在视频页，优先尝试让页面直接探测网络官方/AI字幕
+      if (activeTab?.id && (targetUrl.includes('bilibili.com') || targetUrl.includes('youtube.com'))) {
+        toast('正在探测视频网络官方/AI字幕…');
+        try {
+          await chrome.tabs.sendMessage(activeTab.id, { type: 'BSE_COMMAND', command: 'REFRESH' });
+          await new Promise((r) => setTimeout(r, 650));
+          const latestState = await chrome.tabs.sendMessage(activeTab.id, { type: 'BSE_GET_STATE' }).catch(() => null);
+          if (latestState?.cues?.length) {
+            renderState(latestState);
+            toast(`已直接获取网络字幕（共 ${latestState.cues.length} 条）`);
+            return;
+          }
+        } catch {
+          // 当前页暂未就绪，继续进入后台队列处理
+        }
+      }
+
+      // 2. 页面无可用网络字幕时，再转入后台处理队列
       const response = await chrome.runtime.sendMessage({
         type: 'BSE_QUEUE_ENQUEUE',
         urls: [targetUrl],
@@ -1625,10 +1644,10 @@
       if (!response?.ok) throw new Error(response?.error || '无法加入队列');
       chrome.runtime.sendMessage({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
       switchTab('queue');
-      toast('已加入离线转录队列，正在进行端侧语音识别…');
+      toast('已加入转录队列，正在进行字幕处理…');
       await loadAndRenderQueue();
     } catch (err) {
-      toast(`发起转录失败：${err.message || String(err)}`, true);
+      toast(`发起字幕获取失败：${err.message || String(err)}`, true);
     }
   });
 

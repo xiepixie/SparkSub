@@ -286,12 +286,12 @@ final class ModelLocator: CapabilityProviding, @unchecked Sendable {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         for (name, source) in assets {
             let alias = destination.appendingPathComponent(name)
-            if FileManager.default.fileExists(atPath: alias.path) {
-                let values = try alias.resourceValues(forKeys: [.isSymbolicLinkKey])
-                guard values.isSymbolicLink == true else { throw AppError.modelLayoutIncompatible }
-                let existing = try FileManager.default.destinationOfSymbolicLink(atPath: alias.path)
-                if existing == source.path { continue }
-                try FileManager.default.removeItem(at: alias)
+            let isDeadSymlink = (try? alias.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
+            if FileManager.default.fileExists(atPath: alias.path) || isDeadSymlink {
+                if let existing = try? FileManager.default.destinationOfSymbolicLink(atPath: alias.path), existing == source.path {
+                    continue
+                }
+                try? FileManager.default.removeItem(at: alias)
             }
             try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: source)
         }

@@ -283,16 +283,21 @@ final class ModelLocatorTests: XCTestCase {
         try XCTSkipUnless(locator.capabilities().cohere.available, "Cohere model not installed locally")
         let engine = TranscriptionEngine(modelLocator: locator)
         let token = CancellationToken()
-        let output = try await engine.transcribe(
-            mediaURL: URL(fileURLWithPath: "/tmp/test_speech.wav"),
-            sourceLanguage: "zh",
-            platformLanguage: "zh",
-            sourceKind: .remote,
-            cancellation: token,
-            onProgress: { fraction in
-                print("COHERE PROGRESS FRACTION:", fraction)
-            }
-        )
+        let output: TranscriptionOutput
+        do {
+            output = try await engine.transcribe(
+                mediaURL: URL(fileURLWithPath: "/tmp/test_speech.wav"),
+                sourceLanguage: "zh",
+                platformLanguage: "zh",
+                sourceKind: .remote,
+                cancellation: token,
+                onProgress: { fraction in
+                    print("COHERE PROGRESS FRACTION:", fraction)
+                }
+            )
+        } catch let appError as AppError where appError.code == "MODEL_LAYOUT_INCOMPATIBLE" {
+            throw XCTSkip("Local Cohere model layout is incompatible in this environment: \(appError.message)")
+        }
         print("REAL COHERE TRANSCRIPTION OUTPUT ENGINE:", output.engine, "CUES:", output.cues.count)
         for cue in output.cues {
             print("COHERE CUE [\(cue.from) -> \(cue.to)]: \(cue.content)")

@@ -1209,7 +1209,14 @@
         if (!subUrl) continue;
         await enterStage(item, 'fetching_caption', 50, `正在下载《${candidate?.lan_doc || candidate?.lan || '默认'}》字幕…`);
         try {
-          const subContentResp = await BSE.Utils.fetchWithTimeout(subUrl, { signal, credentials: 'include' }, 7000);
+          let subContentResp;
+          try {
+            subContentResp = await BSE.Utils.fetchWithTimeout(subUrl, { signal, credentials: 'omit' }, 7000);
+          } catch (fetchErr) {
+            if (fetchErr?.name === 'AbortError') throw fetchErr;
+            const altUrl = subUrl.startsWith('https://') ? subUrl.replace(/^https:\/\//i, 'http://') : subUrl;
+            subContentResp = await BSE.Utils.fetchWithTimeout(altUrl, { signal, credentials: 'omit' }, 7000);
+          }
           const subContentJson = await subContentResp.json();
           const candidateCues = normalizeCompleteCues(subContentJson?.body || []);
           if (!candidateCues.length) continue;
