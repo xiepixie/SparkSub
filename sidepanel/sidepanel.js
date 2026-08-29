@@ -712,6 +712,8 @@
       card.className = `tracker-card ${hasUnread ? 'has-unread' : 'is-read'}`;
       card.dataset.id = sub.id;
       const items = sub.items || [];
+      const unreadCount = Math.min(sub.unreadCount || 0, items.length);
+      const expanded = expandedTrackerCards.has(sub.id);
       const defaultVisible = sub.type === 'season' ? 5 : 3;
       const visibleCount = expanded ? items.length : Math.max(unreadCount, Math.min(items.length, defaultVisible));
       const visibleItems = items.slice(0, visibleCount);
