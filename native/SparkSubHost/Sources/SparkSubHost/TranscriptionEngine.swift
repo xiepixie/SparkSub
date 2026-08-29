@@ -139,11 +139,21 @@ actor TranscriptionEngine: Transcribing {
                 onProgress: onProgress
             )
         case .cohereMandarin:
-            return try await transcribeCohere(
-                mediaURL: mediaURL,
-                cancellation: cancellation,
-                onProgress: onProgress
-            )
+            do {
+                return try await transcribeCohere(
+                    mediaURL: mediaURL,
+                    cancellation: cancellation,
+                    onProgress: onProgress
+                )
+            } catch {
+                try cancellation.checkCancellation()
+                return try await transcribeParakeet(
+                    mediaURL: mediaURL,
+                    languageCode: nil,
+                    cancellation: cancellation,
+                    onProgress: onProgress
+                )
+            }
         }
     }
 

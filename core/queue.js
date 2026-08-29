@@ -580,6 +580,25 @@
       .map(({ track }) => track);
   }
 
+  function formatEngineLabel(engine) {
+    if (!engine || typeof engine !== 'string') return '端侧 ASR';
+    if (engine === 'cohere') return 'Cohere (多语言)';
+    if (engine === 'parakeet') return 'Parakeet TDT (英文)';
+    if (engine === 'youtube' || engine === 'bilibili' || engine === 'platform') return '官方字幕';
+    if (engine.includes(' + ')) {
+      const parts = engine.split(' + ');
+      const asr = parts[0] === 'cohere' ? 'Cohere' : (parts[0] === 'parakeet' ? 'Parakeet' : parts[0]);
+      let llm = parts[1] || '';
+      if (llm.includes('/')) llm = llm.split('/').pop() || llm;
+      if (llm.includes(':')) llm = llm.split(':')[0];
+      llm = llm.replace(/\.gguf$/i, '').replace(/[-_]uncensored.*$/i, '').replace(/[-_]q\d+.*$/i, '').replace(/[-_]aggressive.*$/i, '');
+      if (llm.length > 18) llm = llm.slice(0, 18) + '…';
+      return `${asr} + ${llm}`;
+    }
+    if (engine.length > 20) return engine.slice(0, 20) + '…';
+    return engine;
+  }
+
   const YOUTUBE_TRANSCRIPT_FALLBACK_ID = 'youtube-native-transcript';
 
   function isTranscriptFallbackTrack(track) {
@@ -1360,7 +1379,7 @@
 
     item.stage = 'done';
     item.progress = 100;
-    const engineLabel = item.subtitle?.engine === 'cohere' ? 'Cohere (多语言)' : (item.subtitle?.engine === 'parakeet' ? 'Parakeet TDT (英文)' : (item.subtitle?.engine === 'bilibili' || item.subtitle?.source === 'platform' ? '官方字幕' : (item.subtitle?.engine || '端侧 ASR')));
+    const engineLabel = formatEngineLabel(item.subtitle?.engine);
     item.stageHint = `完成 · 模型: ${engineLabel} · 共 ${item.subtitle.cueCount} 句字幕`;
     item.completedAt = Date.now();
     finishExecution(item);
@@ -1693,7 +1712,7 @@
 
     item.stage = 'done';
     item.progress = 100;
-    const engineLabel = item.subtitle?.engine === 'cohere' ? 'Cohere (多语言)' : (item.subtitle?.engine === 'parakeet' ? 'Parakeet TDT (英文)' : (item.subtitle?.engine === 'youtube' || item.subtitle?.source === 'platform' ? '官方字幕' : (item.subtitle?.engine || '端侧 ASR')));
+    const engineLabel = formatEngineLabel(item.subtitle?.engine);
     item.stageHint = `完成 · 模型: ${engineLabel} · 共 ${item.subtitle.cueCount} 句字幕`;
     item.completedAt = Date.now();
     finishExecution(item);
