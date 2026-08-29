@@ -4,9 +4,9 @@ set -euo pipefail
 HOST_NAME='com.sparksub.transcriber'
 PROTOCOL_VERSION='1'
 YTDLP_VERSION='2026.08.19'
-YTDLP_ASSET_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_macos"
+YTDLP_ASSET_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp"
 YTDLP_SUMS_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/SHA2-256SUMS"
-PINNED_YTDLP_SHA256='0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202'
+PINNED_YTDLP_SHA256='1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -29,89 +29,91 @@ usage() {
 }
 
 fail() {
-  printf 'SparkSub installer: %s\n' "$*" >&2
-  exit 2
+  printf 'install-host error: %s\n' "$1" >&2
+  exit 1
 }
 
-while (($#)); do
+while [[ $# -gt 0 ]]; do
   case "$1" in
     --extension-id)
-      (($# >= 2)) || fail '--extension-id requires a value'
+      [[ $# -ge 2 ]] || fail '--extension-id requires a value'
       extension_id="$2"
       shift 2
       ;;
-    --chrome|--chromium)
-      ((browser_set == 0)) || fail 'choose only one browser selector'
-      browser="${1#--}"
+    --chrome)
+      ((browser_set == 0)) || fail 'browser already specified'
+      browser='chrome'
       browser_set=1
       shift
       ;;
-    --dry-run) dry_run=1; shift ;;
-    --skip-ytdlp) skip_ytdlp=1; shift ;;
-    --help|-h) usage; exit 0 ;;
-    *) fail "unknown option: $1" ;;
+    --chromium)
+      ((browser_set == 0)) || fail 'browser already specified'
+      browser='chromium'
+      browser_set=1
+      shift
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    --skip-ytdlp)
+      skip_ytdlp=1
+      shift
+      ;;
+    *)
+      fail "unknown option $1"
+      ;;
   esac
 done
 
-[[ "$extension_id" =~ ^[a-p]{32}$ ]] || fail 'extension ID must be exactly 32 lowercase Chrome alphabet characters'
+[[ -n "$extension_id" ]] || fail '--extension-id is required'
+[[ "$extension_id" =~ ^[a-z]{32}$ ]] || fail '--extension-id must be exactly 32 lowercase letters'
 
 if [[ "$browser" == 'chrome' ]]; then
   MANIFEST_DIR="$APP_SUPPORT/Google/Chrome/NativeMessagingHosts"
 else
   MANIFEST_DIR="$APP_SUPPORT/Chromium/NativeMessagingHosts"
 fi
-MANIFEST_PATH="$MANIFEST_DIR/$HOST_NAME.json"
-ALLOWED_ORIGIN="chrome-extension://${extension_id}/"
+MANIFEST_FILE="$MANIFEST_DIR/${HOST_NAME}.json"
 
-print_plan() {
-  printf 'Native host: %s (protocol v%s)\n' "$HOST_NAME" "$PROTOCOL_VERSION"
-  printf 'Manifest: %s\n' "$MANIFEST_PATH"
+if ((dry_run != 0)); then
+  printf 'Manifest: %s\n' "$MANIFEST_FILE"
   printf 'Host: %s\n' "$HOST_DESTINATION"
-  printf 'Allowed origin: %s\n' "$ALLOWED_ORIGIN"
+  printf 'Allowed origin: chrome-extension://%s/\n' "$extension_id"
   printf 'yt-dlp asset: %s\n' "$YTDLP_ASSET_URL"
   printf 'yt-dlp sha256: %s\n' "$PINNED_YTDLP_SHA256"
   printf 'yt-dlp version sidecar: %s\n' "$YTDLP_VERSION_FILE"
-  printf 'Actions: build release host, install SparkSub-owned files atomically%s, write one-origin manifest\n' "$([[ "$skip_ytdlp" == 1 ]] && printf '; skip yt-dlp' || true)"
-}
-
-if ((dry_run)); then
-  print_plan
   exit 0
 fi
 
-[[ "$(uname -s)" == 'Darwin' ]] || fail 'macOS 14+ on Apple Silicon is required'
-[[ "$(uname -m)" == 'arm64' ]] || fail 'Apple Silicon is required'
-macos_major="$(sw_vers -productVersion | awk -F. '{print $1}')"
-[[ "$macos_major" =~ ^[0-9]+$ && "$macos_major" -ge 14 ]] || fail 'macOS 14+ is required'
+BUILT_HOST="$REPO_ROOT/native/SparkSubHost/.build/apple/Products/Release/SparkSubHost"
+[[ -x "$BUILT_HOST" ]] || BUILT_HOST="$REPO_ROOT/native/SparkSubHost/.build/release/SparkSubHost"
+[[ -x "$BUILT_HOST" ]] || BUILT_HOST="$REPO_ROOT/native/SparkSubHost/.build/arm64-apple-macosx/release/SparkSubHost"
+[[ -x "$BUILT_HOST" ]] || BUILT_HOST="$REPO_ROOT/native/SparkSubHost/.build/arm64-apple-macosx/debug/SparkSubHost"
+[[ -x "$BUILT_HOST" ]] || fail 'SparkSubHost executable not found; build it with swift build -c release'
 
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sparksub-host-install.XXXXXX")"
+mkdir -p "$MANIFEST_DIR" "$SPARKSUB_ROOT" "$SPARKSUB_BIN"
+WORK_DIR="$(mktemp -d "$SPARKSUB_ROOT/.install.XXXXXX")"
 cleanup() {
-  case "$WORK_DIR" in
-    /tmp/sparksub-host-install.*|"${TMPDIR:-/tmp}"/sparksub-host-install.*) rm -rf -- "$WORK_DIR" ;;
-    *) printf 'refusing unsafe installer cleanup: %s\n' "$WORK_DIR" >&2 ;;
-  esac
+  rm -rf -- "$WORK_DIR"
 }
 trap cleanup EXIT
 
-mkdir -p "$SPARKSUB_ROOT" "$SPARKSUB_BIN" "$MANIFEST_DIR"
-swift build -c release --package-path "$REPO_ROOT/native/SparkSubHost"
-BUILT_HOST="$REPO_ROOT/native/SparkSubHost/.build/release/sparksub-native-host"
-[[ -f "$BUILT_HOST" ]] || fail 'release host binary was not produced'
 install -m 755 "$BUILT_HOST" "$WORK_DIR/SparkSubHost"
 mv -f "$WORK_DIR/SparkSubHost" "$HOST_DESTINATION"
 
 verify_ytdlp() {
   local actual_hash
   awk -v expected="$PINNED_YTDLP_SHA256" '
-    $1 == expected && $2 == "yt-dlp_macos" && NF == 2 { matches += 1 }
+    $1 == expected && $2 == "yt-dlp" && NF == 2 { matches += 1 }
     END { exit(matches == 1 ? 0 : 1) }
-  ' "$WORK_DIR/SHA2-256SUMS" || fail 'official SHA2-256SUMS does not contain exactly one pinned yt-dlp_macos line'
-  actual_hash="$(shasum -a 256 "$WORK_DIR/yt-dlp_macos" | awk '{print $1}')"
-  [[ "$actual_hash" == "$PINNED_YTDLP_SHA256" ]] || fail 'downloaded yt-dlp_macos checksum does not match the pinned official hash'
+  ' "$WORK_DIR/SHA2-256SUMS" || fail 'official SHA2-256SUMS does not contain exactly one pinned yt-dlp line'
+  actual_hash="$(shasum -a 256 "$WORK_DIR/yt-dlp" | awk '{print $1}')"
+  [[ "$actual_hash" == "$PINNED_YTDLP_SHA256" ]] || fail 'downloaded yt-dlp checksum does not match the pinned official hash'
 }
 
 if ((skip_ytdlp == 0)); then
-  curl --fail --location --proto '=https' --tlsv1.2 --output "$WORK_DIR/yt-dlp_macos" "$YTDLP_ASSET_URL"
+  curl --fail --location --proto '=https' --tlsv1.2 --output "$WORK_DIR/yt-dlp" "$YTDLP_ASSET_URL"
   curl --fail --location --proto '=https' --tlsv1.2 --output "$WORK_DIR/SHA2-256SUMS" "$YTDLP_SUMS_URL"
   verify_ytdlp
   chmod 755 "$WORK_DIR/yt-dlp_macos"

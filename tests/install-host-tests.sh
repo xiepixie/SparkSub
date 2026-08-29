@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALLER="$ROOT_DIR/native/scripts/install-host.sh"
 UNINSTALLER="$ROOT_DIR/native/scripts/uninstall-host.sh"
 EXTENSION_ID='abcdefghijklmnopabcdefghijklmnop'
-PINNED_URL='https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_macos'
-PINNED_SHA256='0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202'
+PINNED_URL='https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp'
+PINNED_SHA256='1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6'
 TEST_HOME="$(mktemp -d "${TMPDIR:-/tmp}/sparksub-install-test.XXXXXX")"
 
 cleanup() {
