@@ -1029,6 +1029,51 @@ assert.equal(bilibiliUpdate.updated, true, 'Bilibili 后续巡检必须识别新
 assert.deepEqual(Array.from(bilibiliUpdate.newItems, (item) => item.id), ['BV1NEWVIDEO1']);
 assert.equal(bilibiliSub.unreadCount, 1, 'Bilibili 新投稿必须准确增加未读数');
 
+// B站 UGC 合集拓扑追根与全量剧集提取巡检测试
+const seasonSub = {
+  id: 'bilibili:season:3092932',
+  platform: 'bilibili',
+  type: 'season',
+  title: '视频合集',
+  targetId: '3092932',
+  bvid: 'BV1T1GA6pEvp',
+  sourceUrl: 'https://www.bilibili.com/video/BV1T1GA6pEvp',
+  lastCheckedAt: 0,
+  unreadCount: 0,
+  items: []
+};
+const ugcEpisodes = Array.from({ length: 25 }, (_, i) => ({
+  bvid: `BV1EP${i + 1}`,
+  title: `第${i + 1}讲：AI与深度学习`,
+  arc: { pubdate: 1000 + i * 10, duration: 300 }
+}));
+mockFetch = async (url) => {
+  if (url.includes('x/web-interface/view')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        code: 0,
+        data: {
+          bvid: 'BV1T1GA6pEvp',
+          title: '原视频',
+          ugc_season: {
+            id: 3092932,
+            title: '人工智能与机器学习实战',
+            sections: [{ title: '正片', episodes: ugcEpisodes }]
+          }
+        }
+      })
+    };
+  }
+  throw new Error(`unexpected url: ${url}`);
+};
+const seasonBaseline = await BSE.Tracker.checkSubscriptionUpdates(seasonSub);
+assert.equal(seasonBaseline.initialized, true, 'UGC合集首次巡检必须成功建立基线');
+assert.equal(seasonSub.items.length, 25, 'UGC合集必须完整提取全部 25 集而不被 20 截断');
+assert.equal(seasonSub.title, '人工智能与机器学习实战', 'UGC合集巡检必须自动升级为精准真实合集标题');
+assert.equal(seasonSub.latestBvid, 'BV1EP25', 'UGC合集最新集 BVID 必须正确更新');
+
 mockFetch = async () => { throw new Error('network unavailable'); };
 const failedCheck = await BSE.Tracker.checkSubscriptionUpdates({ ...youtubeSub, targetId: 'UC1234567890123456789012' });
 assert.equal(failedCheck.checked, false, '网络失败不得伪装成成功的无更新巡检');

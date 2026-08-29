@@ -321,6 +321,18 @@
       renderTrackerList();
       updateTrackerCountsAndBadge();
       await updateQuickSubscribeBar();
+
+      // 自动静默修复：如果存在剧集列表为空的订阅，后台轮询一次补齐
+      const emptySubs = subscriptionsCache.filter((s) => !s.items || s.items.length === 0);
+      if (emptySubs.length > 0) {
+        Promise.allSettled(emptySubs.map((s) => BSE.Tracker.checkSubscriptionUpdates(s))).then(() => {
+          BSE.Tracker.getSubscriptions().then((updated) => {
+            subscriptionsCache = updated;
+            renderTrackerList();
+            updateTrackerCountsAndBadge();
+          });
+        });
+      }
     } catch (err) {
       console.warn('[BSE Tracker] 读取订阅列表异常:', err);
       if (elements.trackerStatusLine) elements.trackerStatusLine.textContent = `${t('status_error')}：${err?.message || ''}`;
@@ -357,16 +369,23 @@
     if (!state) return null;
     const platform = state.platform;
     const url = state.url || '';
+    let bvid = (BSE.Utils && BSE.Utils.getBvid) ? (BSE.Utils.getBvid(url) || BSE.Utils.getBvid(state.url || '')) : '';
+    if (!bvid && state.mediaKey) {
+      const match = state.mediaKey.match(/bili:(BV[a-zA-Z0-9]+)/i);
+      if (match) bvid = match[1];
+    }
+    if (!bvid && state.authorInfo?.bvid) bvid = state.authorInfo.bvid;
 
     // 1. 如果已通过 content script 提取到了完整 authorInfo（包含合集），优先复用
-    if (state.authorInfo && state.authorInfo.name && state.authorInfo.targetId && state.authorInfo.seasonId) {
+    if (state.authorInfo && state.authorInfo.name && (state.authorInfo.targetId || state.authorInfo.mid) && state.authorInfo.seasonId) {
       return {
         platform,
         type: platform === 'youtube' ? 'channel' : 'up',
         title: state.authorInfo.name,
         upName: state.authorInfo.name,
         mid: state.authorInfo.mid || state.authorInfo.targetId,
-        targetId: state.authorInfo.targetId,
+        targetId: state.authorInfo.targetId || state.authorInfo.mid,
+        bvid: bvid || state.authorInfo.bvid || '',
         avatar: state.authorInfo.avatar || '',
         seasonId: state.authorInfo.seasonId,
         seasonTitle: state.authorInfo.seasonTitle || (BSE.I18n?.t('tracker_type_season') || '视频合集'),
@@ -376,12 +395,6 @@
 
     // 2. B 站视频：多通道提取 BV 号并调用后台代理接口获取精准 UP 主与合集/系列/分P
     if (platform === 'bilibili') {
-      let bvid = BSE.Utils.getBvid(url);
-      if (!bvid && state.mediaKey) {
-        const match = state.mediaKey.match(/bili:(BV[a-zA-Z0-9]+)/i);
-        if (match) bvid = match[1];
-      }
-
       let owner = {};
       let ugc = null;
       let pages = [];
@@ -434,6 +447,7 @@
         title: upName,
         upName,
         mid,
+        bvid: bvid || '',
         targetId: mid,
         avatar,
         seasonId,
@@ -1720,7 +1734,7 @@
       await BSE.Tracker.removeSubscription(subId);
       toast(t('tracker_toast_untracked', { name: upName }));
     } else {
-      await BSE.Tracker.addSubscription({
+      const sub = await BSE.Tracker.addSubscription({
         id: subId,
         platform: currentAuthorInfo.platform,
         type: currentAuthorInfo.type || 'up',
@@ -1731,6 +1745,9 @@
         sourceUrl: state?.url || ''
       });
       toast(t('tracker_toast_tracked_up', { name: upName }));
+      try {
+        await BSE.Tracker.checkSubscriptionUpdates(sub);
+      } catch {}
     }
     await loadAndRenderTracker();
     chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
@@ -1746,7 +1763,8 @@
       await BSE.Tracker.removeSubscription(subId);
       toast(t('tracker_toast_untracked_season', { title: seasonTitle }));
     } else {
-      await BSE.Tracker.addSubscription({
+      const bvid = currentAuthorInfo.bvid || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(state?.url || '') : '') || '';
+      const sub = await BSE.Tracker.addSubscription({
         id: subId,
         platform: currentAuthorInfo.platform,
         type: 'season',
@@ -1755,9 +1773,14 @@
         ownerId: currentAuthorInfo.mid || '',
         avatar: currentAuthorInfo.avatar,
         targetId: currentAuthorInfo.seasonId,
-        sourceUrl: state?.url || ''
+        bvid: bvid,
+        latestBvid: bvid,
+        sourceUrl: state?.url || (bvid ? `https://www.bilibili.com/video/${bvid}` : '')
       });
       toast(t('tracker_toast_tracked_season', { title: seasonTitle }));
+      try {
+        await BSE.Tracker.checkSubscriptionUpdates(sub);
+      } catch {}
     }
     await loadAndRenderTracker();
     chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});

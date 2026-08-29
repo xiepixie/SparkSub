@@ -298,28 +298,33 @@
 
   function compactSubscriptions(subs) {
     const originalById = new Map((subs || []).map((sub) => [sub.id, sub]));
-    const sanitized = (subs || []).slice(0, MAX_SUBSCRIPTIONS).map((s) => ({
-      ...s,
-      id: String(s.id || '').slice(0, 256),
-      title: String(s.title || '').slice(0, 300),
-      author: String(s.author || '').slice(0, 200),
-      avatar: String(s.avatar || '').slice(0, 2048),
-      sourceUrl: String(s.sourceUrl || '').slice(0, 2048),
-      targetId: String(s.targetId || '').slice(0, 256),
-      unreadCount: Math.min(Number(s.unreadCount) || 0, MAX_HISTORY_PER_SUB),
-      items: Array.isArray(s.items) ? s.items.slice(0, MAX_HISTORY_PER_SUB).map((item) => ({
-        ...item,
-        id: String(item.id || '').slice(0, 256),
-        title: String(item.title || '').slice(0, 500),
-        author: String(item.author || '').slice(0, 200),
-        url: String(item.url || '').slice(0, 2048),
-        subtitle: item.subtitle ? {
-          ...item.subtitle,
-          markdown: undefined,
-          plainText: undefined
-        } : item.subtitle
-      })) : []
-    }));
+    const sanitized = (subs || []).slice(0, MAX_SUBSCRIPTIONS).map((s) => {
+      const maxHistory = s.type === 'season' ? 100 : MAX_HISTORY_PER_SUB;
+      return {
+        ...s,
+        id: String(s.id || '').slice(0, 256),
+        title: String(s.title || '').slice(0, 300),
+        author: String(s.author || '').slice(0, 200),
+        avatar: String(s.avatar || '').slice(0, 2048),
+        sourceUrl: String(s.sourceUrl || '').slice(0, 2048),
+        targetId: String(s.targetId || '').slice(0, 256),
+        bvid: s.bvid ? String(s.bvid).slice(0, 64) : '',
+        latestBvid: s.latestBvid ? String(s.latestBvid).slice(0, 64) : '',
+        unreadCount: Math.min(Number(s.unreadCount) || 0, maxHistory),
+        items: Array.isArray(s.items) ? s.items.slice(0, maxHistory).map((item) => ({
+          ...item,
+          id: String(item.id || '').slice(0, 256),
+          title: String(item.title || '').slice(0, 500),
+          author: String(item.author || '').slice(0, 200),
+          url: String(item.url || '').slice(0, 2048),
+          subtitle: item.subtitle ? {
+            ...item.subtitle,
+            markdown: undefined,
+            plainText: undefined
+          } : item.subtitle
+        })) : []
+      };
+    });
 
     const candidates = [];
     sanitized.forEach((sub, subIndex) => {
@@ -398,6 +403,8 @@
       targetId: String(subData.targetId || '').trim(),
       sourceUrl: subData.sourceUrl || '',
       ownerId: String(subData.ownerId || '').trim(),
+      bvid: subData.bvid || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(subData.sourceUrl || '') : '') || '',
+      latestBvid: subData.latestBvid || subData.bvid || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(subData.sourceUrl || '') : '') || '',
       subscribedAt: existingIndex >= 0 ? list[existingIndex].subscribedAt : now,
       lastCheckedAt: existingIndex >= 0 ? list[existingIndex].lastCheckedAt : 0,
       lastUpdatedItemId: existingIndex >= 0 ? list[existingIndex].lastUpdatedItemId : '',
@@ -587,44 +594,96 @@
             author: v.author || sub.author || ''
           }));
         } else if (type === 'season') {
-          // B站 专区/合集与分P连载增量查询
+          // B站 专区/合集与分P连载增量查询 (优先使用 BVID 直连视频拓扑，100%覆盖全量 sections 与 episodes)
           const targetId = String(sub.targetId || '').trim();
-          if (/^BV[a-zA-Z0-9]+/i.test(targetId)) {
-            // 多P分集连载检查
-            const resp = await BSE.Utils.fetchWithTimeout(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(targetId)}`, { signal }, 6000);
-            const resJson = await resp.json();
-            if (resJson?.code !== 0) throw new Error(`Bilibili 视频接口失败 (code ${resJson?.code ?? 'unknown'})`);
-            const pages = resJson?.data?.pages || [];
-            fetchedItems = pages.map((p) => ({
-              id: `${targetId}:p${p.page}`,
-              title: p.part || `第${p.page}P`,
-              url: `https://www.bilibili.com/video/${targetId}?p=${p.page}`,
-              pubdate: Date.now(),
-              duration: Number(p.duration) || 0,
-              author: sub.title || ''
-            }));
-          } else {
-            // UGC 合集/系列增量检查
+          const candidateBvid = sub.latestBvid || sub.bvid
+            || (/^BV[a-zA-Z0-9]+/i.test(targetId) ? targetId : '')
+            || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(sub.sourceUrl || '') : '')
+            || (/^BV[a-zA-Z0-9]+/i.test(sub.items?.[0]?.id || '') ? sub.items[0].id : '')
+            || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(sub.items?.[0]?.url || '') : '');
+
+          let bvidSuccess = false;
+          if (candidateBvid) {
+            try {
+              const resp = await BSE.Utils.fetchWithTimeout(
+                `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(candidateBvid)}`,
+                { signal },
+                6000
+              );
+              const resJson = await resp.json();
+              if (resJson?.code === 0 && resJson?.data) {
+                const ugc = resJson.data.ugc_season;
+                const pages = resJson.data.pages || [];
+
+                if (ugc?.sections?.length) {
+                  // A. UGC 合集：从所有 section 中精准提取全量 episodes
+                  const epList = [];
+                  for (const sec of ugc.sections) {
+                    for (const ep of (sec.episodes || [])) {
+                      const epBvid = ep.bvid || ep.arc?.bvid;
+                      if (!epBvid) continue;
+                      epList.push({
+                        id: epBvid,
+                        title: String(ep.title || ep.arc?.title || '').trim(),
+                        url: `https://www.bilibili.com/video/${epBvid}`,
+                        pubdate: (Number(ep.arc?.pubdate) || 0) * 1000,
+                        duration: Number(ep.arc?.duration || ep.page?.duration) || 0,
+                        author: ugc.title || sub.title || ''
+                      });
+                    }
+                  }
+                  if (epList.length > 0) {
+                    epList.sort((a, b) => (b.pubdate || 0) - (a.pubdate || 0));
+                    fetchedItems = epList;
+                    sub.latestBvid = epList[0].id;
+                    if (!sub.title || sub.title === '视频合集' || sub.title === '合集') {
+                      sub.title = ugc.title;
+                    }
+                    bvidSuccess = true;
+                  }
+                } else if (pages.length > 1) {
+                  // B. 多 P 视频连载：提取所有分 P
+                  const pubdate = (Number(resJson.data.pubdate) || 0) * 1000 || Date.now();
+                  fetchedItems = pages.map((p) => ({
+                    id: `${candidateBvid}:p${p.page}`,
+                    title: p.part || `第${p.page}P`,
+                    url: `https://www.bilibili.com/video/${candidateBvid}?p=${p.page}`,
+                    pubdate,
+                    duration: Number(p.duration) || 0,
+                    author: sub.title || resJson.data.title || ''
+                  }));
+                  bvidSuccess = true;
+                }
+              }
+            } catch (bvidErr) {
+              if (bvidErr?.name === 'AbortError') throw bvidErr;
+              console.warn('[BSE Tracker] 通过 BVID 解析合集拓扑未命中，尝试备用接口:', bvidErr);
+            }
+          }
+
+          if (!bvidSuccess) {
+            // C. 兜底回退：尝试 polymer 或 medialist 接口
             const seasonId = encodeURIComponent(targetId);
-            // ownerId avoids overloading the human-readable author field. Keep
-            // numeric legacy values compatible with subscriptions from v0.2.0.
             const ownerId = sub.ownerId || (/^\d+$/.test(String(sub.author || '')) ? sub.author : '');
             const mid = encodeURIComponent(ownerId);
             const url = mid
-              ? `https://api.bilibili.com/x/polymer/web-space/seasons_archives_list?mid=${mid}&season_id=${seasonId}&page_num=1&page_size=20`
-              : `https://api.bilibili.com/x/v2/medialist/resource/list?type=1&oid=${seasonId}&ps=20`;
+              ? `https://api.bilibili.com/x/polymer/web-space/seasons_archives_list?mid=${mid}&season_id=${seasonId}&page_num=1&page_size=30`
+              : `https://api.bilibili.com/x/v2/medialist/resource/list?type=1&oid=${seasonId}&ps=30`;
             const resp = await BSE.Utils.fetchWithTimeout(url, { signal, credentials: 'include' }, 6000);
             const resJson = await resp.json();
-            if (resJson?.code !== 0) throw new Error(`Bilibili 合集接口失败 (code ${resJson?.code ?? 'unknown'})`);
-            const archives = resJson?.data?.archives || resJson?.data?.media_list || [];
-            fetchedItems = archives.map((v) => ({
-              id: v.bvid || (v.bv_id ? v.bv_id : `aid:${v.id}`),
-              title: String(v.title || '').trim(),
-              url: `https://www.bilibili.com/video/${v.bvid || v.bv_id || ''}`,
-              pubdate: (Number(v.pubdate) || 0) * 1000,
-              duration: Number(v.duration) || 0,
-              author: sub.title || ''
-            }));
+            if (resJson?.code === 0 && resJson?.data) {
+              const archives = resJson.data.archives || resJson.data.media_list || [];
+              fetchedItems = archives.map((v) => ({
+                id: v.bvid || (v.bv_id ? v.bv_id : `aid:${v.id}`),
+                title: String(v.title || '').trim(),
+                url: `https://www.bilibili.com/video/${v.bvid || v.bv_id || ''}`,
+                pubdate: (Number(v.pubdate) || 0) * 1000,
+                duration: Number(v.duration) || 0,
+                author: sub.title || ''
+              }));
+            } else if (!candidateBvid) {
+              throw new Error(`Bilibili 合集接口失败 (code ${resJson?.code ?? 'unknown'})`);
+            }
           }
         }
       } else if (platform === BSE.PLATFORM.YOUTUBE) {
@@ -653,10 +712,12 @@
     const existingIds = new Set((sub.items || []).map((item) => item.id));
     const newItems = fetchedItems.filter((item) => !existingIds.has(item.id));
 
+    const maxItems = sub.type === 'season' ? 100 : MAX_HISTORY_PER_SUB;
+
     // The first successful poll establishes a baseline. Existing feed entries
     // predate the subscription and must not be reported as unread updates.
     if (!sub.lastCheckedAt && existingIds.size === 0) {
-      sub.items = fetchedItems.slice(0, MAX_HISTORY_PER_SUB);
+      sub.items = fetchedItems.slice(0, maxItems);
       sub.lastCheckedAt = Date.now();
       sub.lastUpdatedItemId = fetchedItems[0]?.id || '';
       sub.lastUpdatedTitle = fetchedItems[0]?.title || '';
@@ -679,8 +740,8 @@
         }
       } catch {}
 
-      // 合并并截断为最近 MAX_HISTORY_PER_SUB 条
-      const merged = [...newItems, ...(sub.items || [])].slice(0, MAX_HISTORY_PER_SUB);
+      // 合并并截断为最近 maxItems 条
+      const merged = [...newItems, ...(sub.items || [])].slice(0, maxItems);
       sub.items = merged;
       sub.unreadCount = Math.min(merged.length, (sub.unreadCount || 0) + newItems.length);
       sub.lastUpdatedItemId = newItems[0].id;
@@ -771,16 +832,47 @@
           return { status: 'not_found', errorHint: '无法定位视频分P CID', fetchedAt: Date.now() };
         }
 
-        // 2. 调用 WBI 播放器接口提取字幕列表
-        const { imgKey, subKey } = await fetchBilibiliNavWbiKeys(signal);
-        const signed = calculateWbiSign({ bvid, cid }, imgKey, subKey);
-        const playerResp = await BSE.Utils.fetchWithTimeout(
-          `https://api.bilibili.com/x/player/wbi/v2?${signed.query}`,
-          { signal, credentials: 'include' },
-          6000
-        );
-        const playerJson = await playerResp.json();
-        const subtitles = playerJson?.data?.subtitle?.subtitles || [];
+        // 2. 调用播放器接口提取字幕列表 (直连 wbi/v2 -> 签名 wbi/v2 -> 兼容 v2)
+        let subtitles = [];
+        try {
+          const p1 = await BSE.Utils.fetchWithTimeout(
+            `https://api.bilibili.com/x/player/wbi/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`,
+            { signal, credentials: 'include' },
+            5000
+          );
+          const j1 = await p1.json();
+          if (Array.isArray(j1?.data?.subtitle?.subtitles) && j1.data.subtitle.subtitles.length) {
+            subtitles = j1.data.subtitle.subtitles;
+          }
+        } catch {}
+
+        if (!subtitles.length) {
+          try {
+            const { imgKey, subKey } = await fetchBilibiliNavWbiKeys(signal);
+            const signed = calculateWbiSign({ bvid, cid }, imgKey, subKey);
+            const playerResp = await BSE.Utils.fetchWithTimeout(
+              `https://api.bilibili.com/x/player/wbi/v2?${signed.query}`,
+              { signal, credentials: 'include' },
+              5000
+            );
+            const playerJson = await playerResp.json();
+            if (Array.isArray(playerJson?.data?.subtitle?.subtitles) && playerJson.data.subtitle.subtitles.length) {
+              subtitles = playerJson.data.subtitle.subtitles;
+            }
+          } catch {}
+        }
+
+        if (!subtitles.length) {
+          try {
+            const p3 = await BSE.Utils.fetchWithTimeout(
+              `https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`,
+              { signal, credentials: 'include' },
+              5000
+            );
+            const j3 = await p3.json();
+            subtitles = j3?.data?.subtitle?.subtitles || [];
+          } catch {}
+        }
 
         if (!subtitles.length) {
           return { status: 'not_found', errorHint: '该视频暂无官方字幕轨道', fetchedAt: Date.now() };
@@ -792,8 +884,15 @@
         if (subUrl.startsWith('//')) subUrl = `https:${subUrl}`;
         else if (subUrl.startsWith('http://')) subUrl = subUrl.replace(/^http:\/\//i, 'https://');
 
-        // 3. 下载字幕 JSON
-        const subContentResp = await BSE.Utils.fetchWithTimeout(subUrl, { signal }, 6000);
+        // 3. 下载字幕 JSON (credentials: omit 彻底解决 CDN 跨域限制)
+        let subContentResp;
+        try {
+          subContentResp = await BSE.Utils.fetchWithTimeout(subUrl, { signal, credentials: 'omit' }, 6000);
+        } catch (fetchErr) {
+          if (fetchErr?.name === 'AbortError') throw fetchErr;
+          const altUrl = subUrl.startsWith('https://') ? subUrl.replace(/^https:\/\//i, 'http://') : subUrl;
+          subContentResp = await BSE.Utils.fetchWithTimeout(altUrl, { signal, credentials: 'omit' }, 6000);
+        }
         const subContentJson = await subContentResp.json();
         const rawBody = subContentJson?.body || [];
 

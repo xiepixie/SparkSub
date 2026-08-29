@@ -100,32 +100,75 @@
   function getAuthorInfo() {
     try {
       if (platform === BSE.PLATFORM.BILIBILI) {
+        const bvid = (BSE.Utils && BSE.Utils.getBvid) ? BSE.Utils.getBvid(location.href) : '';
+        let domData = null;
+        try {
+          if (typeof document !== 'undefined') {
+            const scripts = document.querySelectorAll('script');
+            for (const script of scripts) {
+              const text = script.textContent || '';
+              if (text.includes('__INITIAL_STATE__')) {
+                const match = text.match(/window\.__INITIAL_STATE__\s*=\s*(\{.+?\});/s) || text.match(/__INITIAL_STATE__\s*=\s*(\{.+?\});?/s);
+                if (match && match[1]) {
+                  const parsed = JSON.parse(match[1]);
+                  if (parsed?.videoData && (!bvid || parsed.videoData.bvid === bvid)) {
+                    domData = parsed.videoData;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        } catch {}
+
         const upLink = document.querySelector('.up-detail-top a.up-name, a.up-name, .up-info--right .name, .user-name a, .up-card .name, .up-info_right .name');
         const upNameElem = document.querySelector('.up-name, .up-detail-top .up-name, .username, .up-info--right .name, .up-info_right .name');
         const avatarImg = document.querySelector('.up-avatar img, .up-face img, .bili-avatar img, .header-avatar img');
         
-        let upName = upNameElem?.textContent?.trim() || upLink?.textContent?.trim() || '';
-        let mid = '';
-        if (upLink?.href) {
+        let upName = domData?.owner?.name || upNameElem?.textContent?.trim() || upLink?.textContent?.trim() || '';
+        let mid = domData?.owner?.mid ? String(domData.owner.mid) : '';
+        if (!mid && upLink?.href) {
           const match = upLink.href.match(/space\.bilibili\.com\/(\d+)/);
           if (match) mid = match[1];
         }
+        let avatar = domData?.owner?.face || avatarImg?.src || '';
 
-        const seasonTitleElem = document.querySelector('.video-sections-head_title, .cur-list-title, .season-title, .bili-video-pod__title, .bili-video-pod__header .title');
-        let seasonTitle = seasonTitleElem?.textContent?.trim() || null;
+        let seasonTitle = null;
         let seasonId = null;
 
-        const seasonLink = document.querySelector('.video-sections-head a, .cur-list-title a, a[href*="ugc_season"], a[href*="channel/collectiondetail"], a[href*="channel/seriesdetail"], .bili-video-pod a');
-        if (seasonLink?.href) {
-          const sMatch = seasonLink.href.match(/season_id=(\d+)|ugc_season\/(\d+)|sid=(\d+)|collectiondetail\?sid=(\d+)|seriesdetail\?sid=(\d+)/i);
-          if (sMatch) seasonId = sMatch[1] || sMatch[2] || sMatch[3] || sMatch[4] || sMatch[5];
+        // 1. 优先从页面状态数据中精准读取 UGC 合集
+        if (domData?.ugc_season && (domData.ugc_season.id || domData.ugc_season.season_id)) {
+          seasonId = String(domData.ugc_season.id || domData.ugc_season.season_id);
+          seasonTitle = domData.ugc_season.title || null;
+        } else if (domData?.pages && domData.pages.length > 1 && bvid) {
+          seasonId = bvid;
+          seasonTitle = domData.title ? `${domData.title} (共${domData.pages.length}P)` : '分P连载';
+        }
+
+        // 2. 兜底 DOM 结构探测 (UGC 合集、合集详情页、系列页、BPX 播放器选集)
+        if (!seasonId) {
+          const seasonTitleElem = document.querySelector('.video-sections-head_title, .cur-list-title, .season-title, .bili-video-pod__title, .bili-video-pod__header .title');
+          if (seasonTitleElem) seasonTitle = seasonTitleElem.textContent?.trim() || seasonTitle;
+
+          const seasonLink = document.querySelector('.video-sections-head a, .cur-list-title a, a[href*="ugc_season"], a[href*="channel/collectiondetail"], a[href*="channel/seriesdetail"], .bili-video-pod a');
+          if (seasonLink?.href) {
+            const sMatch = seasonLink.href.match(/season_id=(\d+)|ugc_season\/(\d+)|sid=(\d+)|collectiondetail\?sid=(\d+)|seriesdetail\?sid=(\d+)/i);
+            if (sMatch) seasonId = sMatch[1] || sMatch[2] || sMatch[3] || sMatch[4] || sMatch[5];
+          }
+
+          const eplistDomItems = typeof document !== 'undefined' ? document.querySelectorAll('.bpx-player-ctrl-eplist-menu-item') : [];
+          if (eplistDomItems.length > 1 && bvid) {
+            seasonId = bvid;
+            seasonTitle = seasonTitle || (document.title ? document.title.replace(/\s*[-_|]\s*(哔哩哔|bilibili).*$/i, '').trim() : '专题选集');
+          }
         }
 
         return {
           name: upName || 'UP主',
           targetId: mid || '',
           mid: mid || '',
-          avatar: avatarImg?.src || '',
+          bvid: bvid || '',
+          avatar: avatar || '',
           seasonId: seasonId || null,
           seasonTitle: seasonTitle || null
         };
