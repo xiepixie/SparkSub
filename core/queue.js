@@ -1175,17 +1175,99 @@
     // === Stage 2: Fetching Caption ===
     let subtitles = item.stageArtifacts?.captionTracks || [];
     let captionBody = item.stageArtifacts?.captionBody || null;
-    if (!subtitles.length) {
+    let cues = [];
+    let chosenSub = null;
+
+    // 0. 优先检查当前已打开的标签页是否已有该视频解析好的字幕数据（直接复用，0延迟，无需重复请求）
+    if (!subtitles.length && !captionBody && typeof chrome !== 'undefined' && chrome.tabs?.query) {
+      try {
+        const tabs = await chrome.tabs.query({}).catch(() => []);
+        for (const t of tabs) {
+          if (t.url && (t.url.includes(bvid) || (item.url && t.url.includes(item.url)))) {
+            const tabState = await chrome.tabs.sendMessage(t.id, { type: 'BSE_GET_STATE' }).catch(() => null);
+            if (tabState?.cues?.length) {
+              cues = normalizeCompleteCues(tabState.cues);
+              if (cues.length) {
+                captionBody = tabState.cues;
+                subtitles = tabState.tracks || [{
+                  id: 'tab_current',
+                  lan: tabState.currentTrack?.lan || 'zh-CN',
+                  lan_doc: tabState.currentTrack?.lanDoc || '网络字幕',
+                  subtitle_url: ''
+                }];
+                chosenSub = subtitles[0];
+                item.stageArtifacts = {
+                  ...(item.stageArtifacts || {}),
+                  captionTracks: subtitles,
+                  captionBody,
+                  captionTrackId: 'tab_current',
+                  selectedCaption: { id: 'tab_current', language: 'zh-CN', label: '网络字幕', kind: 'official' }
+                };
+                await saveItem(item);
+                break;
+              }
+            } else if (Array.isArray(tabState?.tracks) && tabState.tracks.length) {
+              subtitles = tabState.tracks.map((tr) => ({
+                id: tr.id,
+                lan: tr.lan,
+                lan_doc: tr.lanDoc || tr.lan,
+                subtitle_url: tr.subtitleUrl
+              }));
+              item.stageArtifacts = { ...(item.stageArtifacts || {}), captionTracks: subtitles };
+              await saveItem(item);
+              break;
+            }
+          }
+        }
+      } catch {}
+    }
+
+    if (!cues.length && !subtitles.length) {
       await enterStage(item, 'fetching_caption', 40, '正在提取官方/AI字幕…');
-      const { imgKey, subKey } = await fetchBilibiliNavKeys(signal);
-      const signed = calculateWbiSign({ bvid, cid }, imgKey, subKey);
-      const playerResp = await BSE.Utils.fetchWithTimeout(
-        `https://api.bilibili.com/x/player/wbi/v2?${signed.query}`,
-        { signal, credentials: 'include' },
-        7000
-      );
-      const playerJson = await playerResp.json();
-      subtitles = playerJson?.data?.subtitle?.subtitles || [];
+
+      // 尝试 1: 直接请求 wbi/v2（无签名直连）
+      try {
+        const p1 = await BSE.Utils.fetchWithTimeout(
+          `https://api.bilibili.com/x/player/wbi/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`,
+          { signal, credentials: 'include' },
+          6000
+        );
+        const j1 = await p1.json();
+        if (Array.isArray(j1?.data?.subtitle?.subtitles) && j1.data.subtitle.subtitles.length) {
+          subtitles = j1.data.subtitle.subtitles;
+        }
+      } catch {}
+
+      // 尝试 2: 若未拿到，尝试带 WBI 签名请求
+      if (!subtitles.length) {
+        try {
+          const { imgKey, subKey } = await fetchBilibiliNavKeys(signal);
+          const signed = calculateWbiSign({ bvid, cid }, imgKey, subKey);
+          const playerResp = await BSE.Utils.fetchWithTimeout(
+            `https://api.bilibili.com/x/player/wbi/v2?${signed.query}`,
+            { signal, credentials: 'include' },
+            6000
+          );
+          const playerJson = await playerResp.json();
+          if (Array.isArray(playerJson?.data?.subtitle?.subtitles) && playerJson.data.subtitle.subtitles.length) {
+            subtitles = playerJson.data.subtitle.subtitles;
+          }
+        } catch {}
+      }
+
+      // 尝试 3: 若仍未拿到，尝试兼容接口 x/player/v2
+      if (!subtitles.length) {
+        try {
+          const p3 = await BSE.Utils.fetchWithTimeout(
+            `https://api.bilibili.com/x/player/v2?aid=${encodeURIComponent(item.metaCache?.aid || '')}&bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`,
+            { signal, credentials: 'include' },
+            6000
+          );
+          const j3 = await p3.json();
+          subtitles = j3?.data?.subtitle?.subtitles || [];
+        } catch {}
+      }
+
       item.stageArtifacts = { ...(item.stageArtifacts || {}), captionTracks: subtitles };
       await saveItem(item);
     }
@@ -1193,8 +1275,6 @@
     const captionCandidates = rankCaptionTracks(subtitles, item.sourceLanguage);
     const cachedCaptionTrackId = item.stageArtifacts?.captionTrackId || '';
     const cachedCues = normalizeCompleteCues(captionBody);
-    let chosenSub = null;
-    let cues = [];
     for (const candidate of captionCandidates) {
       const candidateTrackId = captionTrackIdentity(candidate);
       if (cachedCues.length && cachedCaptionTrackId === candidateTrackId) {
