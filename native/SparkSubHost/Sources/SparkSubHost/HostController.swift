@@ -46,8 +46,14 @@ private final class TaskHeartbeatLease: HeartbeatLease, @unchecked Sendable {
 private final class TranscriptionProgressState: @unchecked Sendable {
     private let lock = NSLock()
     private var percent = 70
-    private var hint = "正在加载端侧 CoreML 识别模型…"
+    private var hint: String
     private var maxRawProgress = 0
+    private let engineName: String
+
+    init(engineName: String = "CoreML") {
+        self.engineName = engineName
+        self.hint = "已选用模型 [\(engineName)]，正在加载 CoreML 权重…"
+    }
 
     func updateProgress(fraction: Double) -> (percent: Int, hint: String) {
         lock.lock()
@@ -56,7 +62,9 @@ private final class TranscriptionProgressState: @unchecked Sendable {
         self.maxRawProgress = max(self.maxRawProgress, currentRaw)
         let computedPercent = 70 + Int(Double(self.maxRawProgress) * 0.25)
         self.percent = max(self.percent, computedPercent)
-        self.hint = self.percent >= 95 ? "正在进行时间轴对齐与标点切分…" : "正在进行端侧语音识别 (\(self.maxRawProgress)%)…"
+        self.hint = self.percent >= 95
+            ? "正在进行时间轴对齐与标点切分…"
+            : "正在进行端侧语音识别 [\(engineName)] (\(self.maxRawProgress)%)…"
         return (self.percent, self.hint)
     }
 
@@ -251,14 +259,16 @@ final class HostController: @unchecked Sendable {
                     }
                 )
                 try token.checkCancellation()
+                let isMandarin = ["zh", "zh-cn", "zh-hans", "zh-tw", "zh-hant", "cmn"].contains(sourceLanguage.lowercased()) || (source.kind == .remote && sourceLanguage == "auto")
+                let engineName = isMandarin ? "Cohere 多语言" : "Parakeet 英文"
+                let progressState = TranscriptionProgressState(engineName: engineName)
                 writeProgress(
                     requestId: request.requestId,
                     jobId: jobId,
                     stage: "transcribing",
                     percent: 70,
-                    hint: "正在加载端侧 CoreML 识别模型…"
+                    hint: progressState.snapshot().hint
                 )
-                let progressState = TranscriptionProgressState()
                 let heartbeat = heartbeatScheduler.schedule { [weak self] in
                     guard !token.isCancelled else { return }
                     let progress = progressState.tick()

@@ -741,6 +741,7 @@
     if (!cues.length) {
       throw nativeError('RESULT_INCOMPLETE', '本机转录结果不完整。', '本机服务没有返回有效的字幕内容。');
     }
+    cues.engine = result?.engine || 'parakeet';
     return cues;
   }
 
@@ -1262,7 +1263,8 @@
 
     item.stage = 'done';
     item.progress = 100;
-    item.stageHint = `完成 · 共 ${item.subtitle.cueCount} 句字幕`;
+    const engineLabel = item.subtitle?.engine === 'cohere' ? 'Cohere (多语言)' : (item.subtitle?.engine === 'parakeet' ? 'Parakeet TDT (英文)' : (item.subtitle?.engine === 'bilibili' || item.subtitle?.source === 'platform' ? '官方字幕' : (item.subtitle?.engine || '端侧 ASR')));
+    item.stageHint = `完成 · 模型: ${engineLabel} · 共 ${item.subtitle.cueCount} 句字幕`;
     item.completedAt = Date.now();
     finishExecution(item);
     await saveItem(item);
@@ -1594,7 +1596,8 @@
 
     item.stage = 'done';
     item.progress = 100;
-    item.stageHint = `完成 · 共 ${item.subtitle.cueCount} 句字幕`;
+    const engineLabel = item.subtitle?.engine === 'cohere' ? 'Cohere (多语言)' : (item.subtitle?.engine === 'parakeet' ? 'Parakeet TDT (英文)' : (item.subtitle?.engine === 'youtube' || item.subtitle?.source === 'platform' ? '官方字幕' : (item.subtitle?.engine || '端侧 ASR')));
+    item.stageHint = `完成 · 模型: ${engineLabel} · 共 ${item.subtitle.cueCount} 句字幕`;
     item.completedAt = Date.now();
     finishExecution(item);
     await saveItem(item);
