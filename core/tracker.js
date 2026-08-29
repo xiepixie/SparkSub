@@ -393,25 +393,26 @@
     const existingIndex = list.findIndex((s) => s.id === subData.id);
 
     const now = Date.now();
+    const prev = existingIndex >= 0 ? list[existingIndex] : null;
     const sub = {
       id: subData.id,
       platform: subData.platform,
       type: subData.type,
-      title: String(subData.title || '').trim() || '未命名订阅',
-      author: String(subData.author || '').trim(),
-      avatar: subData.avatar || '',
-      targetId: String(subData.targetId || '').trim(),
-      sourceUrl: subData.sourceUrl || '',
-      ownerId: String(subData.ownerId || '').trim(),
-      bvid: subData.bvid || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(subData.sourceUrl || '') : '') || '',
-      latestBvid: subData.latestBvid || subData.bvid || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(subData.sourceUrl || '') : '') || '',
-      subscribedAt: existingIndex >= 0 ? list[existingIndex].subscribedAt : now,
-      lastCheckedAt: existingIndex >= 0 ? list[existingIndex].lastCheckedAt : 0,
-      lastUpdatedItemId: existingIndex >= 0 ? list[existingIndex].lastUpdatedItemId : '',
-      lastUpdatedTitle: existingIndex >= 0 ? list[existingIndex].lastUpdatedTitle : '',
-      unreadCount: existingIndex >= 0 ? list[existingIndex].unreadCount : 0,
-      items: existingIndex >= 0 ? list[existingIndex].items : [],
-      autoExtractSubtitle: Boolean(subData.autoExtractSubtitle)
+      title: String(subData.title || prev?.title || '').trim() || '未命名订阅',
+      author: String(subData.author || prev?.author || '').trim(),
+      avatar: subData.avatar || prev?.avatar || '',
+      targetId: String(subData.targetId || prev?.targetId || '').trim(),
+      sourceUrl: subData.sourceUrl || prev?.sourceUrl || '',
+      ownerId: String(subData.ownerId || prev?.ownerId || '').trim(),
+      bvid: subData.bvid || prev?.bvid || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(subData.sourceUrl || '') : '') || '',
+      latestBvid: subData.latestBvid || prev?.latestBvid || subData.bvid || '',
+      subscribedAt: prev ? prev.subscribedAt : (subData.subscribedAt || now),
+      lastCheckedAt: subData.lastCheckedAt !== undefined ? subData.lastCheckedAt : (prev ? prev.lastCheckedAt : 0),
+      lastUpdatedItemId: subData.lastUpdatedItemId || prev?.lastUpdatedItemId || '',
+      lastUpdatedTitle: subData.lastUpdatedTitle || prev?.lastUpdatedTitle || '',
+      unreadCount: subData.unreadCount !== undefined ? subData.unreadCount : (prev ? prev.unreadCount : 0),
+      items: Array.isArray(subData.items) ? subData.items : (prev ? prev.items : []),
+      autoExtractSubtitle: Boolean(subData.autoExtractSubtitle !== undefined ? subData.autoExtractSubtitle : prev?.autoExtractSubtitle)
     };
 
     if (existingIndex >= 0) {
@@ -546,7 +547,8 @@
     return { imgKey: '', subKey: '' };
   }
 
-  async function checkSubscriptionUpdates(sub, { signal } = {}) {
+  async function checkSubscriptionUpdates(sub, options = {}) {
+    const signal = options?.signal;
     if (!sub || !sub.id) return { checked: false, updated: false, newItems: [], error: '无效订阅数据' };
     const platform = sub.platform;
     const type = sub.type;
@@ -596,11 +598,12 @@
         } else if (type === 'season') {
           // B站 专区/合集与分P连载增量查询 (优先使用 BVID 直连视频拓扑，100%覆盖全量 sections 与 episodes)
           const targetId = String(sub.targetId || '').trim();
-          const candidateBvid = sub.latestBvid || sub.bvid
+          let candidateBvid = sub.latestBvid || sub.bvid
             || (/^BV[a-zA-Z0-9]+/i.test(targetId) ? targetId : '')
             || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(sub.sourceUrl || '') : '')
             || (/^BV[a-zA-Z0-9]+/i.test(sub.items?.[0]?.id || '') ? sub.items[0].id : '')
-            || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(sub.items?.[0]?.url || '') : '');
+            || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(sub.items?.[0]?.url || '') : '')
+            || (options.activeBvid ? String(options.activeBvid).trim() : '');
 
           let bvidSuccess = false;
           if (candidateBvid) {
@@ -636,6 +639,8 @@
                     epList.sort((a, b) => (b.pubdate || 0) - (a.pubdate || 0));
                     fetchedItems = epList;
                     sub.latestBvid = epList[0].id;
+                    sub.bvid = candidateBvid;
+                    if (!sub.sourceUrl) sub.sourceUrl = `https://www.bilibili.com/video/${candidateBvid}`;
                     if (!sub.title || sub.title === '视频合集' || sub.title === '合集') {
                       sub.title = ugc.title;
                     }
@@ -652,6 +657,9 @@
                     duration: Number(p.duration) || 0,
                     author: sub.title || resJson.data.title || ''
                   }));
+                  sub.latestBvid = `${candidateBvid}:p1`;
+                  sub.bvid = candidateBvid;
+                  if (!sub.sourceUrl) sub.sourceUrl = `https://www.bilibili.com/video/${candidateBvid}`;
                   bvidSuccess = true;
                 }
               }
@@ -706,6 +714,9 @@
     fetchedItems = normalizeFetchedItems(fetchedItems);
     if (!fetchedItems.length) {
       sub.lastCheckedAt = Date.now();
+      if (options.persist !== false && sub.id) {
+        await updateStoredSubscription(sub);
+      }
       return { checked: true, updated: false, newItems: [] };
     }
 
@@ -721,6 +732,9 @@
       sub.lastCheckedAt = Date.now();
       sub.lastUpdatedItemId = fetchedItems[0]?.id || '';
       sub.lastUpdatedTitle = fetchedItems[0]?.title || '';
+      if (options.persist !== false && sub.id) {
+        await updateStoredSubscription(sub);
+      }
       return { checked: true, initialized: true, updated: false, newItems: [] };
     }
 
@@ -747,11 +761,31 @@
       sub.lastUpdatedItemId = newItems[0].id;
       sub.lastUpdatedTitle = newItems[0].title;
       sub.lastCheckedAt = Date.now();
+      if (options.persist !== false && sub.id) {
+        await updateStoredSubscription(sub);
+      }
       return { checked: true, updated: true, newItems };
     }
 
     sub.lastCheckedAt = Date.now();
+    if (options.persist !== false && sub.id) {
+      await updateStoredSubscription(sub);
+    }
     return { checked: true, updated: false, newItems: [] };
+  }
+
+  async function updateStoredSubscription(sub) {
+    if (!sub || !sub.id) return;
+    try {
+      const list = await getSubscriptions();
+      const idx = list.findIndex((s) => s.id === sub.id);
+      if (idx >= 0) {
+        list[idx] = { ...list[idx], ...sub };
+        await saveSubscriptions(list);
+      }
+    } catch (e) {
+      console.warn('[BSE Tracker] 保存订阅更新失败:', e);
+    }
   }
 
   function formatCuesToMarkdown(title, author, url, cues) {
@@ -992,7 +1026,7 @@
 
     for (const sub of list) {
       try {
-        const { checked, updated, newItems } = await checkSubscriptionUpdates(sub);
+        const { checked, updated, newItems } = await checkSubscriptionUpdates(sub, { persist: false });
         if (!checked) continue;
         hadNetworkSuccess = true;
         if (updated) {

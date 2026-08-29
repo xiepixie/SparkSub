@@ -1074,6 +1074,12 @@ assert.equal(seasonSub.items.length, 25, 'UGC合集必须完整提取全部 25 �
 assert.equal(seasonSub.title, '人工智能与机器学习实战', 'UGC合集巡检必须自动升级为精准真实合集标题');
 assert.equal(seasonSub.latestBvid, 'BV1EP25', 'UGC合集最新集 BVID 必须正确更新');
 
+await BSE.Tracker.addSubscription(seasonSub);
+const reloadedSeason = await BSE.Tracker.getSubscription(seasonSub.id);
+assert.equal(reloadedSeason.items.length, 25, '巡检建立基线后必须持久化到存储中');
+assert.equal(reloadedSeason.title, '人工智能与机器学习实战', '巡检建立基线后标题必须持久化更新');
+await BSE.Tracker.removeSubscription(seasonSub.id);
+
 mockFetch = async () => { throw new Error('network unavailable'); };
 const failedCheck = await BSE.Tracker.checkSubscriptionUpdates({ ...youtubeSub, targetId: 'UC1234567890123456789012' });
 assert.equal(failedCheck.checked, false, '网络失败不得伪装成成功的无更新巡检');

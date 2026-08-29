@@ -325,7 +325,10 @@
       // 自动静默修复：如果存在剧集列表为空的订阅，后台轮询一次补齐
       const emptySubs = subscriptionsCache.filter((s) => !s.items || s.items.length === 0);
       if (emptySubs.length > 0) {
-        Promise.allSettled(emptySubs.map((s) => BSE.Tracker.checkSubscriptionUpdates(s))).then(() => {
+        const activeBvid = (BSE.Utils && BSE.Utils.getBvid)
+          ? (BSE.Utils.getBvid(state?.url || '') || (state?.mediaKey ? state.mediaKey.match(/bili:(BV[a-zA-Z0-9]+)/i)?.[1] : ''))
+          : '';
+        Promise.allSettled(emptySubs.map((s) => BSE.Tracker.checkSubscriptionUpdates(s, { activeBvid }))).then(() => {
           BSE.Tracker.getSubscriptions().then((updated) => {
             subscriptionsCache = updated;
             renderTrackerList();
@@ -576,6 +579,8 @@
 
   function getSubscriptionBvid(sub) {
     if (!sub) return '';
+    if (sub.latestBvid && /^BV[a-zA-Z0-9]+/i.test(sub.latestBvid)) return sub.latestBvid;
+    if (sub.bvid && /^BV[a-zA-Z0-9]+/i.test(sub.bvid)) return sub.bvid;
     if (sub.targetId && /^BV[a-zA-Z0-9]+/i.test(sub.targetId)) return sub.targetId;
     if (sub.items?.[0]?.id && /^BV[a-zA-Z0-9]+/i.test(sub.items[0].id)) return sub.items[0].id;
     if (sub.sourceUrl) {
@@ -585,6 +590,17 @@
     if (sub.items?.[0]?.url) {
       const bvid = BSE.Utils?.getBvid?.(sub.items[0].url);
       if (bvid) return bvid;
+    }
+    if (currentAuthorInfo?.bvid && /^BV[a-zA-Z0-9]+/i.test(currentAuthorInfo.bvid)) {
+      return currentAuthorInfo.bvid;
+    }
+    if (state?.url) {
+      const bvid = BSE.Utils?.getBvid?.(state.url);
+      if (bvid) return bvid;
+    }
+    if (state?.mediaKey) {
+      const match = state.mediaKey.match(/bili:(BV[a-zA-Z0-9]+)/i);
+      if (match) return match[1];
     }
     return '';
   }
@@ -696,9 +712,8 @@
       card.className = `tracker-card ${hasUnread ? 'has-unread' : 'is-read'}`;
       card.dataset.id = sub.id;
       const items = sub.items || [];
-      const unreadCount = Math.min(sub.unreadCount || 0, items.length);
-      const expanded = expandedTrackerCards.has(sub.id);
-      const visibleCount = expanded ? items.length : Math.max(1, Math.min(unreadCount || 1, 3));
+      const defaultVisible = sub.type === 'season' ? 5 : 3;
+      const visibleCount = expanded ? items.length : Math.max(unreadCount, Math.min(items.length, defaultVisible));
       const visibleItems = items.slice(0, visibleCount);
       const typeLabel = sub.type === 'season' ? t('tracker_type_season') : (sub.platform === 'youtube' ? t('tracker_type_youtube_channel') : t('tracker_type_bilibili_up'));
 
@@ -2445,9 +2460,38 @@
       elements.batchCancelBtn.hidden = true;
 
       toast('正在分析合集与分P架构…');
-      const diagLogger = (stage, msg) => appendDiagnostic(stage, msg);
-
       currentTree = await BSE.Bilibili.fetchMediaTree(bvid, { diagnostic: diagLogger });
+
+      // 实时反哺同步到已有的追踪卡片中
+      if (currentTree && Array.isArray(currentTree.items) && currentTree.items.length > 0) {
+        const sid = currentTree.seasonId ? String(currentTree.seasonId) : '';
+        const matchingSub = subscriptionsCache.find((s) => {
+          if (sid && (s.targetId === sid || s.id.includes(`:${sid}`))) return true;
+          if (s.bvid === bvid || s.latestBvid === bvid || s.targetId === bvid) return true;
+          if (s.sourceUrl && (s.sourceUrl.includes(bvid) || (sid && s.sourceUrl.includes(sid)))) return true;
+          return false;
+        });
+        if (matchingSub) {
+          const episodes = currentTree.items.map((it) => ({
+            id: it.bvid || `${bvid}:p${it.page}`,
+            title: String(it.part || it.title || '').trim(),
+            url: `https://www.bilibili.com/video/${it.bvid || bvid}${it.page && it.page > 1 ? `?p=${it.page}` : ''}`,
+            pubdate: it.pubdate ? it.pubdate * 1000 : Date.now(),
+            duration: Number(it.duration) || 0,
+            author: currentTree.title || matchingSub.title
+          }));
+          matchingSub.items = episodes;
+          matchingSub.bvid = bvid;
+          matchingSub.latestBvid = episodes[0]?.id || bvid;
+          matchingSub.lastCheckedAt = Date.now();
+          if (currentTree.title && (matchingSub.title === '合集' || matchingSub.title === '视频合集' || !matchingSub.title)) {
+            matchingSub.title = currentTree.title;
+          }
+          await BSE.Tracker.addSubscription(matchingSub);
+          renderTrackerList();
+          updateTrackerCountsAndBadge();
+        }
+      }
 
       elements.batchModalTitle.textContent = currentTree.title;
       elements.batchTypePill.textContent = currentTree.kind === 'ugc_season' ? '🏷️ UGC合集' : (currentTree.kind === 'multi_page' ? '🎞️ 多P' : '🎬 单视频');
