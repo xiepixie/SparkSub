@@ -259,8 +259,15 @@ final class HostController: @unchecked Sendable {
                     }
                 )
                 try token.checkCancellation()
-                let isMandarin = ["zh", "zh-cn", "zh-hans", "zh-tw", "zh-hant", "cmn"].contains(sourceLanguage.lowercased()) || (source.kind == .remote && sourceLanguage == "auto")
+                let effectiveLang = (sourceLanguage == "auto" ? (request.platformLanguage ?? "auto") : sourceLanguage).lowercased()
+                let hasChineseInTitle = request.title.map { title in
+                    title.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) || (0x3400...0x4DBF).contains($0.value) }
+                } ?? false
+                let isMandarin = ["zh", "zh-cn", "zh-hans", "zh-tw", "zh-hant", "cmn"].contains(effectiveLang)
+                    || (source.kind == .remote && sourceLanguage == "auto")
+                    || (sourceLanguage == "auto" && hasChineseInTitle)
                 let engineName = isMandarin ? "Cohere 多语言" : "Parakeet 英文"
+                let resolvedPlatformLanguage = request.platformLanguage ?? (hasChineseInTitle ? "zh" : nil)
                 let progressState = TranscriptionProgressState(engineName: engineName)
                 writeProgress(
                     requestId: request.requestId,
@@ -284,7 +291,7 @@ final class HostController: @unchecked Sendable {
                 return try await transcriptionEngine.transcribe(
                     mediaURL: mediaURL,
                     sourceLanguage: sourceLanguage,
-                    platformLanguage: request.platformLanguage,
+                    platformLanguage: resolvedPlatformLanguage,
                     sourceKind: source.kind,
                     cancellation: token,
                     onProgress: { [weak self] fraction in

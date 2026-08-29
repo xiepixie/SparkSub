@@ -727,9 +727,18 @@
 
     let result;
     try {
+      const titleText = item.title || item.metaCache?.title || '';
+      const chineseMatches = titleText.match(/[\u4e00-\u9fa5]/g);
+      const hasChineseTitle = Boolean(chineseMatches && chineseMatches.length >= 2);
+      const inferredLang = item.platform === 'bilibili' || hasChineseTitle ? 'zh' : null;
+      const effectiveSourceLanguage = (item.sourceLanguage && item.sourceLanguage !== 'auto')
+        ? item.sourceLanguage
+        : (inferredLang || 'auto');
+
       result = await BSE.NativeHost.transcribe({
         jobId: nextNativeJobId(item, 'asr'),
-        sourceLanguage: item.sourceLanguage || 'auto',
+        sourceLanguage: effectiveSourceLanguage,
+        ...(inferredLang ? { platformLanguage: inferredLang } : {}),
         title: item.title,
         ...(Number.isFinite(Number(item.duration)) ? { duration: Number(item.duration) } : {}),
         source
