@@ -2971,12 +2971,21 @@ mark {
   white-space: nowrap;
 }
 
-/* Card Status Line */
 .queue-card-status-line {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
   margin-top: 3px;
+}
+
+.queue-card-progress-percent {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--primary);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .queue-status-badge {

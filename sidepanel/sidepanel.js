@@ -820,7 +820,8 @@
         if (last !== currentSig) {
           lastLoggedQueueStates.set(item.id, currentSig);
           const stageName = item.stage === 'fetching_audio' ? '音频准备' : (item.stage === 'transcribing' ? '端侧 ASR' : (item.stage === 'done' ? '转录完成' : (item.stage === 'failed' ? '转录失败' : item.stage)));
-          appendDiagnostic('转录队列', `[${item.title || item.id}] ${stageName} (${Math.floor(item.progress || 0)}%)：${item.stageHint || '执行中'}`);
+          const progressTag = item.stage === 'done' ? '100%' : (item.stage === 'failed' ? '终止' : `总进度 ${Math.floor(item.progress || 0)}%`);
+          appendDiagnostic('转录队列', `[${item.title || item.id}] ${stageName} (${progressTag}) · ${item.stageHint || '执行中'}`);
         }
       }
       const hasPending = queueCache.some((i) => !['done', 'failed'].includes(i.stage));
@@ -951,6 +952,9 @@
               <span class="queue-status-badge stage-${item.stage}" title="${BSE.Utils.escapeHtml(displayHint)}">
                 ${BSE.Utils.escapeHtml(displayHint)}
               </span>
+              ${item.stage !== 'done' && item.stage !== 'failed' ? `
+                <span class="queue-card-progress-percent" title="总任务流水线进度">${progressPercent}%</span>
+              ` : ''}
             </div>
           </div>
         </div>
