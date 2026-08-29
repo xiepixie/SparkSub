@@ -181,11 +181,33 @@
           const chMatch = channelLink.href.match(/\/(channel\/|@|c\/|user\/)([^/?]+)/);
           if (chMatch) channelId = chMatch[2] || chMatch[1];
         }
+
+        // 检测 YouTube 播放列表 / 合集 (URL 含有 list= 或页面包含 playlist 结构)
+        let seasonId = null;
+        let seasonTitle = null;
+        try {
+          const urlObj = new URL(location.href);
+          const listId = urlObj.searchParams.get('list');
+          if (listId && listId !== 'WL' && listId !== 'LL') {
+            seasonId = listId;
+            const plTitleElem = document.querySelector(
+              'ytd-playlist-panel-renderer #header-description h3, ytd-playlist-panel-renderer .title, ytd-playlist-header-renderer .title, #playlist .title'
+            );
+            seasonTitle = plTitleElem?.textContent?.trim() || 'YouTube 播放列表';
+          }
+        } catch {}
+
+        const videoId = (BSE.Utils?.getYouTubeVideoId ? BSE.Utils.getYouTubeVideoId() : '')
+          || new URL(location.href).searchParams.get('v') || '';
+
         return {
           name: channelName || 'YouTube 频道',
           targetId: channelId || '',
           channelId: channelId || '',
-          avatar: avatarImg?.src || ''
+          videoId,
+          avatar: avatarImg?.src || '',
+          seasonId,
+          seasonTitle
         };
       }
     } catch {}
@@ -611,6 +633,16 @@
           if (BSE.YouTube?.bridgeRequest) {
             BSE.YouTube.bridgeRequest('FETCH_VIDEO_SUBTITLE', { videoId: message.videoId }, 15000)
               .then((result) => sendResponse({ ok: true, result }))
+              .catch((err) => sendResponse({ ok: false, error: err.message }));
+            return true;
+          }
+          sendResponse({ ok: false, error: 'YouTube 桥接未初始化' });
+          return false;
+        }
+        if (message?.type === 'BSE_GET_PLAYLIST') {
+          if (BSE.YouTube?.bridgeRequest) {
+            BSE.YouTube.bridgeRequest('GET_PLAYLIST', {}, 5000)
+              .then((playlist) => sendResponse({ ok: true, playlist }))
               .catch((err) => sendResponse({ ok: false, error: err.message }));
             return true;
           }

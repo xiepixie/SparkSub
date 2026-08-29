@@ -265,10 +265,10 @@
     const isTrans = Boolean(track.isTranslated || track.tlang);
 
     // ==========================================
-    // 方案 A：自动翻译轨（极速直通：提取源语言原生字幕并瞬间完成高质量机翻）
+    // 方案 A：自动翻译轨（极速直通：先尝试 YouTube 服务端直译，次选源语言提取+机翻）
     // ==========================================
     if (isTrans) {
-      diagnostic?.('提取策略', `【自动翻译轨】目标语言: ${track.lanDoc || track.lan} · 开启极速直通机翻引擎`);
+      diagnostic?.('提取策略', `【自动翻译轨】目标语言: ${track.lanDoc || track.lan} · 开启极速直通翻译引擎`);
 
       // 1. 若已有同 tlang 捕获请求，优先重放
       for (const captured of existingCaptures) {
@@ -276,7 +276,30 @@
         if (cues.length) return cues;
       }
 
-      // 2. 毫秒级提取源语言原生字幕，并完成全自动高质量机翻
+      // 2. 极速直链探测：YouTube 服务端自带高质量机翻，直接请求带 tlang 的字幕直链 (50ms ~ 200ms 直出)
+      if (track.subtitleUrl) {
+        const probeUrls = [
+          { url: buildFormatUrl(track.subtitleUrl, 'json3'), fmt: 'json3' },
+          { url: track.subtitleUrl, fmt: 'srv3' },
+          { url: buildFormatUrl(track.subtitleUrl, 'vtt'), fmt: 'vtt' }
+        ];
+        try {
+          const directCues = await Promise.any(
+            probeUrls.map(({ url, fmt }) =>
+              fetchAndParse(url, fmt, signal, diagnostic, `服务端直译探测(${fmt})`).then((res) => {
+                if (res && res.length) return res;
+                throw new Error('empty');
+              })
+            )
+          );
+          if (directCues && directCues.length) {
+            diagnostic?.('服务端直译', `✓ 命中 YouTube 服务端秒级翻译通道，成功获取 ${directCues.length} 条中文字幕`);
+            return directCues;
+          }
+        } catch {}
+      }
+
+      // 3. 兜底回退：提取源语言原生字幕，并完成全自动高质量机翻
       try {
         const state = await bridgeRequest('GET_PLAYER_STATE', {}, 1000).catch(() => null);
         const baseTrackId = track.id ? track.id.split(':tlang:')[0] : '';
@@ -305,7 +328,7 @@
         diagnostic?.('智能翻译', `机翻直通降级：${transErr.message}`);
       }
 
-      // 3. 转录面板回退机翻
+      // 4. 转录面板回退机翻
       const transcript = await transcriptFallback(signal, diagnostic);
       if (transcript.length) {
         diagnostic?.('智能翻译', `正在将转录面板提取的 ${transcript.length} 句字幕自动翻译为中文…`);
@@ -330,31 +353,7 @@
       if (cues.length) return cues;
     }
 
-    // 2. 驱动播放器切换轨道触发原生拉取
-    try {
-      await bridgeRequest('SELECT_TRACK', track, 1500);
-      diagnostic?.('播放器', `已请求切换到 ${track.lanDoc || track.lan} 轨道`);
-    } catch (error) {
-      diagnostic?.('播放器', `切换轨道提示：${error.message}`);
-    }
-
-    // 3. 短轮询等待新拦截请求 (最高 1.8s)
-    const deadline = Date.now() + 1800;
-    const triedUrls = new Set();
-    while (Date.now() < deadline) {
-      await hydrateCapturedRequests();
-      const candidates = matchingRequests(track).filter((item) => !triedUrls.has(item.url));
-      if (candidates.length) {
-        for (const captured of candidates) {
-          triedUrls.add(captured.url);
-          const cues = await fetchAndParse(captured.url, captured.fmt, signal, diagnostic, '新拦截请求');
-          if (cues.length) return cues;
-        }
-      }
-      await delay(100, signal);
-    }
-
-    // 4. 并行探测快速直链
+    // 2. 极速直链探测 (0ms ~ 150ms 极速呈现，避免无谓阻塞等待播放器切换)
     if (track.subtitleUrl) {
       const probeUrls = [
         { url: buildFormatUrl(track.subtitleUrl, 'json3'), fmt: 'json3' },
@@ -375,6 +374,30 @@
       } catch {}
     }
 
+    // 3. 驱动播放器切换轨道触发原生拉取
+    try {
+      await bridgeRequest('SELECT_TRACK', track, 1500);
+      diagnostic?.('播放器', `已请求切换到 ${track.lanDoc || track.lan} 轨道`);
+    } catch (error) {
+      diagnostic?.('播放器', `切换轨道提示：${error.message}`);
+    }
+
+    // 4. 短轮询等待新拦截请求 (最高 1.8s)
+    const deadline = Date.now() + 1800;
+    const triedUrls = new Set();
+    while (Date.now() < deadline) {
+      await hydrateCapturedRequests();
+      const candidates = matchingRequests(track).filter((item) => !triedUrls.has(item.url));
+      if (candidates.length) {
+        for (const captured of candidates) {
+          triedUrls.add(captured.url);
+          const cues = await fetchAndParse(captured.url, captured.fmt, signal, diagnostic, '新拦截请求');
+          if (cues.length) return cues;
+        }
+      }
+      await delay(100, signal);
+    }
+
     // 5. 转录面板回退
     const transcript = await transcriptFallback(signal, diagnostic);
     if (transcript.length) return transcript;
@@ -385,5 +408,233 @@
     throw error;
   }
 
-  BSE.YouTube = Object.freeze({ discoverTracks, loadTrack, rememberRequest, bridgeRequest });
+  async function fetchMediaTree(targetId, { signal, diagnostic } = {}) {
+    diagnostic?.('合集拓扑', '正在解析 YouTube 播放列表/合集拓扑…');
+    let plData = null;
+
+    // 1. 如果在页面内，通过 bridgeRequest 请求 GET_PLAYLIST
+    try {
+      plData = await bridgeRequest('GET_PLAYLIST', {}, 1500);
+    } catch {}
+
+    // 2. 检查活动标签页
+    if (!plData || !plData.items || !plData.items.length) {
+      if (typeof chrome !== 'undefined' && chrome.tabs?.query) {
+        try {
+          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tabs?.length && tabs[0].url && tabs[0].url.includes('youtube.com')) {
+            const tabResp = await chrome.tabs.sendMessage(tabs[0].id, { type: 'BSE_GET_PLAYLIST' });
+            if (tabResp?.playlist?.items?.length) {
+              plData = tabResp.playlist;
+            }
+          }
+        } catch {}
+      }
+    }
+
+    if (!plData || !plData.items || !plData.items.length) {
+      throw new Error('未在当前 YouTube 页面检测到可用播放列表或合集视频');
+    }
+
+    diagnostic?.('合集拓扑', `成功解析 YouTube 播放列表：共 ${plData.items.length} 个视频`);
+
+    const parseDurationToSeconds = (durStr) => {
+      const parts = String(durStr || '').trim().split(':').map(Number);
+      if (parts.length === 2) return parts[0] * 60 + parts[1];
+      if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+      return 0;
+    };
+
+    const currentVideoId = getYouTubeVideoId();
+
+    const items = plData.items.map((it, idx) => {
+      const globalIndex = idx + 1;
+      const durationSec = typeof it.duration === 'number' ? it.duration : parseDurationToSeconds(it.duration);
+      return {
+        globalIndex,
+        bvid: it.id,
+        videoId: it.id,
+        cid: it.id,
+        aid: it.id,
+        title: it.title || `第 ${globalIndex} 节`,
+        page: globalIndex,
+        part: it.title || `第 ${globalIndex} 节`,
+        duration: durationSec,
+        sourceUrl: it.url,
+        sectionKey: 'section_0',
+        sectionTitle: plData.title || '播放列表'
+      };
+    });
+
+    const episodes = items.map((it) => ({
+      bvid: it.videoId,
+      title: it.title,
+      index: it.globalIndex,
+      pagesCount: 1,
+      items: [it]
+    }));
+
+    const sections = [{
+      key: 'section_0',
+      title: plData.title || '播放列表',
+      items,
+      episodes
+    }];
+
+    return {
+      title: plData.title || 'YouTube 播放列表',
+      kind: 'youtube_playlist',
+      seasonId: plData.listId || targetId || '',
+      currentBvid: currentVideoId,
+      items,
+      sections,
+      hasNestedPages: false
+    };
+  }
+
+  async function runBatchExport(tree, config, onProgress, taskControl = {}, { diagnostic } = {}) {
+    const selectedIndices = config.customIndices instanceof Set ? config.customIndices : new Set(config.customIndices || []);
+    const selectedItems = (tree.items || []).filter((item) => selectedIndices.has(item.globalIndex));
+
+    if (!selectedItems.length) {
+      throw new Error('未选择需要导出的视频条目');
+    }
+
+    const controlTask = taskControl || {};
+    controlTask.cancelled = false;
+    controlTask.paused = false;
+
+    const stats = {
+      total: selectedItems.length,
+      completed: 0,
+      success: 0,
+      noSub: 0,
+      failed: 0,
+      packPercent: 0
+    };
+
+    const results = [];
+    const report = (currentItem, phase = 'fetching') => {
+      onProgress?.(stats, currentItem, phase, controlTask);
+    };
+
+    let itemQueue = [...selectedItems];
+    const worker = async () => {
+      while (itemQueue.length > 0) {
+        if (controlTask.cancelled) break;
+        while (controlTask.paused && !controlTask.cancelled) {
+          await delay(200);
+        }
+        const item = itemQueue.shift();
+        if (!item) break;
+
+        report(item, 'fetching');
+        diagnostic?.('批量抓取', `正在提取: [${item.globalIndex}/${tree.items.length}] ${item.title}`);
+
+        let res = null;
+        try {
+          const ytUrl = item.sourceUrl || `https://www.youtube.com/watch?v=${item.videoId}`;
+          let cues = null;
+          let trackLabel = '字幕';
+
+          // 1. 优先通过本机服务 Native Host fetchYouTubeCaptions (yt-dlp) 直取
+          if (BSE.NativeHost?.fetchYouTubeCaptions) {
+            try {
+              const nativeRes = await BSE.NativeHost.fetchYouTubeCaptions({
+                jobId: `batch-${item.videoId}-${Date.now()}`,
+                sourceLanguage: 'auto',
+                source: { kind: 'youtube', url: ytUrl }
+              });
+              if (nativeRes?.cues && nativeRes.cues.length > 0) {
+                cues = nativeRes.cues;
+                trackLabel = nativeRes.langDoc || nativeRes.language || '中文字幕';
+              }
+            } catch (nativeErr) {
+              console.warn('[YouTube Batch] 本机服务提取失败:', nativeErr);
+            }
+          }
+
+          if (cues && cues.length) {
+            res = { status: 'success', item, body: cues, track: { label: trackLabel } };
+            stats.success += 1;
+          } else {
+            res = { status: 'no_subtitle', item, reason: '该视频未检测到可用字幕' };
+            stats.noSub += 1;
+          }
+        } catch (err) {
+          res = { status: 'failed', item, reason: err.message || '抓取异常' };
+          stats.failed += 1;
+        }
+
+        stats.completed += 1;
+        results.push(res);
+        report(item, 'fetching');
+        await delay(100);
+      }
+    };
+
+    const CONCURRENCY = Math.min(2, selectedItems.length);
+    await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+
+    if (controlTask.cancelled) {
+      report(null, 'cancelled');
+      return { selectedItems, results, stats, cancelled: true };
+    }
+
+    report(null, 'building');
+    const manifest = BSE.Formatters.buildBatchManifest(tree, selectedItems, results, stats, config);
+
+    if (config.outputMode === 'merged-md') {
+      const text = BSE.Formatters.toMergedMarkdown(tree, results, stats, { withTimestamp: config.withTimestamp });
+      const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+      BSE.Utils.downloadBlob(blob, `${BSE.Utils.sanitizeFilename(tree.title)}_播放列表字幕.md`);
+      diagnostic?.('批量完成', `已合并生成 Markdown 并下载 · 成功 ${stats.success} · 无字幕 ${stats.noSub} · 失败 ${stats.failed}`);
+    } else {
+      const JSZipClass = globalThis.JSZip;
+      if (!JSZipClass) throw new Error('JSZip 模块未加载');
+      const zip = new JSZipClass();
+
+      for (const res of results) {
+        if (!res) continue;
+        const baseName = `${String(res.item.globalIndex || 1).padStart(3, '0')}_${BSE.Utils.sanitizeFilename((res.item.title || '').trim() || '未命名')}`;
+
+        if (res.status === 'success') {
+          const content = BSE.Formatters.format(config.format || 'srt', res.body, {
+            title: res.item.title,
+            url: res.item.sourceUrl,
+            platform: 'YouTube',
+            language: res.track?.label || ''
+          }, { withTimestamp: config.withTimestamp });
+          zip.file(`${baseName}.${config.format || 'srt'}`, content);
+        } else if (res.status === 'no_subtitle') {
+          zip.file(`${baseName} (无字幕).txt`, `标题：${res.item.title}\nID：${res.item.videoId}\n链接：${res.item.sourceUrl}\n状态：未检测到可用字幕轨道\n`);
+        } else if (res.status === 'failed') {
+          zip.file(`${baseName} (下载失败).error.txt`, `标题：${res.item.title}\nID：${res.item.videoId}\n链接：${res.item.sourceUrl}\n原因：${res.reason || '网络或解析异常'}\n`);
+        }
+      }
+
+      const readmeMd = BSE.Formatters.toMergedMarkdown(tree, results, stats, { withTimestamp: config.withTimestamp });
+      zip.file('_README.md', readmeMd);
+      zip.file('manifest.json', JSON.stringify(manifest, null, 2));
+
+      report(null, 'packing');
+      const blob = await zip.generateAsync({ type: 'blob' }, (meta) => {
+        onProgress?.({ ...stats, packPercent: meta.percent }, null, 'packing', controlTask);
+      });
+      BSE.Utils.downloadBlob(blob, `${BSE.Utils.sanitizeFilename(tree.title)}_字幕.zip`);
+      diagnostic?.('批量完成', `ZIP 压缩包打包完成并触发下载 · 成功 ${stats.success} · 无字幕 ${stats.noSub} · 失败 ${stats.failed}`);
+    }
+
+    report(null, 'done');
+    return { selectedItems, results, stats };
+  }
+
+  BSE.YouTube = Object.freeze({
+    discoverTracks,
+    loadTrack,
+    rememberRequest,
+    bridgeRequest,
+    fetchMediaTree,
+    runBatchExport
+  });
 })();

@@ -958,6 +958,71 @@
       }
     }
 
+    const ytMatch = (item.id || item.url || '').match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/))([a-zA-Z0-9_-]{11})/);
+    const ytVideoId = ytMatch ? ytMatch[1] : (item.id && /^[a-zA-Z0-9_-]{11}$/.test(item.id) ? item.id : null);
+
+    if (ytVideoId) {
+      const ytUrl = item.url && item.url.includes('youtube.com') ? item.url : `https://www.youtube.com/watch?v=${ytVideoId}`;
+      try {
+        // 1. 优先通过本机服务 Native Host fetchYouTubeCaptions 直取全量字幕
+        if (BSE.NativeHost?.fetchYouTubeCaptions) {
+          try {
+            const nativeRes = await BSE.NativeHost.fetchYouTubeCaptions({
+              jobId: `tracker-${ytVideoId}-${Date.now()}`,
+              sourceLanguage: 'auto',
+              source: { kind: 'youtube', url: ytUrl }
+            }, { signal });
+            if (nativeRes?.cues && nativeRes.cues.length > 0) {
+              const cues = nativeRes.cues;
+              const plainText = cues.map((c) => c.content).join(' ');
+              const markdown = formatCuesToMarkdown(item.title, item.author, ytUrl, cues);
+              return {
+                status: 'ready',
+                language: nativeRes.language || 'zh',
+                langDoc: nativeRes.langDoc || '字幕',
+                cueCount: cues.length,
+                fetchedAt: Date.now(),
+                plainText,
+                markdown
+              };
+            }
+          } catch (nativeErr) {
+            if (nativeErr?.name === 'AbortError') throw nativeErr;
+            console.warn('[BSE Tracker] 本机服务提取 YouTube 字幕失败，尝试前端通道:', nativeErr);
+          }
+        }
+
+        // 2. 检查是否有打开该视频的 YouTube 标签页，若有直接通过 bridge 获取
+        if (typeof chrome !== 'undefined' && chrome.tabs?.query) {
+          try {
+            const tabs = await chrome.tabs.query({ url: `*://*.youtube.com/watch*v=${ytVideoId}*` });
+            if (tabs?.length && tabs[0].id) {
+              const tabRes = await chrome.tabs.sendMessage(tabs[0].id, { type: 'BSE_GET_STATE' });
+              if (tabRes?.state?.cues?.length) {
+                const cues = tabRes.state.cues;
+                const plainText = cues.map((c) => c.content).join(' ');
+                const markdown = formatCuesToMarkdown(item.title, item.author, ytUrl, cues);
+                return {
+                  status: 'ready',
+                  language: tabRes.state.track?.lan || 'zh',
+                  langDoc: tabRes.state.track?.lanDoc || '字幕',
+                  cueCount: cues.length,
+                  fetchedAt: Date.now(),
+                  plainText,
+                  markdown
+                };
+              }
+            }
+          } catch {}
+        }
+
+        return { status: 'not_found', errorHint: '该 YouTube 视频暂无可用字幕', fetchedAt: Date.now() };
+      } catch (err) {
+        if (err?.name === 'AbortError') throw err;
+        return { status: 'error', errorHint: err?.message || '抓取字幕失败', fetchedAt: Date.now() };
+      }
+    }
+
     return { status: 'not_found', errorHint: '当前平台暂不支持后台直取字幕', fetchedAt: Date.now() };
   }
 

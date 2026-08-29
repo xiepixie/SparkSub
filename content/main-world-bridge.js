@@ -338,6 +338,90 @@
     };
   }
 
+  function getPlaylistData() {
+    let listId = '';
+    try {
+      listId = new URL(location.href).searchParams.get('list') || '';
+    } catch {}
+    let title = '';
+    const items = [];
+
+    // 1. 尝试从 ytInitialData 获取
+    try {
+      const initData = window.ytInitialData;
+      // 场景 A: Watch page with playlist panel
+      const playlistRenderer = initData?.contents?.twoColumnWatchNextResults?.playlist?.playlist;
+      if (playlistRenderer) {
+        title = playlistRenderer.title || '';
+        const rawContents = playlistRenderer.contents || [];
+        for (const item of rawContents) {
+          const v = item.playlistPanelVideoRenderer;
+          if (!v || !v.videoId) continue;
+          const epTitle = v.title?.simpleText || v.title?.runs?.map((r) => r.text).join('') || '';
+          const epDuration = v.lengthText?.simpleText || '';
+          items.push({
+            id: v.videoId,
+            title: epTitle,
+            url: `https://www.youtube.com/watch?v=${v.videoId}&list=${listId || ''}`,
+            duration: epDuration,
+            author: v.shortBylineText?.runs?.[0]?.text || ''
+          });
+        }
+      }
+
+      // 场景 B: Playlist page (/playlist?list=...)
+      if (!items.length) {
+        const tabs = initData?.contents?.twoColumnBrowseResultsRenderer?.tabs;
+        const tabContent = tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer?.contents?.[0]?.playlistVideoListRenderer;
+        if (tabContent) {
+          title = initData?.metadata?.playlistMetadataRenderer?.title || initData?.header?.playlistHeaderRenderer?.title?.simpleText || '';
+          const rawContents = tabContent.contents || [];
+          for (const item of rawContents) {
+            const v = item.playlistVideoRenderer;
+            if (!v || !v.videoId) continue;
+            const epTitle = v.title?.runs?.map((r) => r.text).join('') || v.title?.simpleText || '';
+            const epDuration = v.lengthText?.simpleText || '';
+            items.push({
+              id: v.videoId,
+              title: epTitle,
+              url: `https://www.youtube.com/watch?v=${v.videoId}&list=${listId || ''}`,
+              duration: epDuration,
+              author: v.shortBylineText?.runs?.[0]?.text || ''
+            });
+          }
+        }
+      }
+    } catch {}
+
+    // 2. DOM 兜底探测
+    if (!items.length) {
+      const plTitleElem = document.querySelector('ytd-playlist-panel-renderer #header-description h3, ytd-playlist-panel-renderer .title, ytd-playlist-header-renderer .title, #playlist .title');
+      if (plTitleElem) title = plTitleElem.textContent?.trim() || '';
+
+      const domItems = document.querySelectorAll('ytd-playlist-panel-video-renderer, ytd-playlist-video-renderer');
+      domItems.forEach((node) => {
+        const link = node.querySelector('a#wc-endpoint, a#video-title, a#thumbnail');
+        const href = link?.getAttribute('href') || '';
+        const vMatch = href.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
+        const epVid = vMatch ? vMatch[1] : '';
+        if (!epVid) return;
+        const titleElem = node.querySelector('#video-title, .title');
+        const epTitle = titleElem?.textContent?.trim() || '';
+        const durElem = node.querySelector('span.ytd-thumbnail-overlay-time-status-renderer, #time-status');
+        const epDur = durElem?.textContent?.trim() || '';
+        items.push({
+          id: epVid,
+          title: epTitle,
+          url: `https://www.youtube.com/watch?v=${epVid}&list=${listId || ''}`,
+          duration: epDur,
+          author: ''
+        });
+      });
+    }
+
+    return { listId: listId || '', title: title || 'YouTube 播放列表', items };
+  }
+
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.data?.channel !== CHANNEL || event.data?.direction !== 'request') return;
     const { requestId, type, payload } = event.data;
@@ -351,6 +435,9 @@
         window.postMessage({ channel: CHANNEL, direction: 'response', requestId, ok: true, result }, '*');
       } else if (type === 'GET_VIDEO_DATA') {
         result = getState().video;
+        window.postMessage({ channel: CHANNEL, direction: 'response', requestId, ok: true, result }, '*');
+      } else if (type === 'GET_PLAYLIST') {
+        result = getPlaylistData();
         window.postMessage({ channel: CHANNEL, direction: 'response', requestId, ok: true, result }, '*');
       } else if (type === 'FETCH_VIDEO_SUBTITLE') {
         fetchVideoSubtitle(payload?.videoId).then((res) => {

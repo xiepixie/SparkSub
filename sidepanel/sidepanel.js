@@ -1978,6 +1978,11 @@
       const sub = subscriptionsCache.find((s) => s.id === subId);
       if (!sub) return;
 
+      if (sub.platform === 'youtube' && typeof openBatchModal === 'function') {
+        openBatchModal(sub.id);
+        return;
+      }
+
       const bvid = getSubscriptionBvid(sub);
       if (bvid && typeof openBatchModal === 'function') {
         openBatchModal(bvid);
@@ -2448,11 +2453,14 @@
     });
   }
 
-  async function openBatchModal(targetBvid) {
+  async function openBatchModal(targetId) {
     try {
-      const bvid = targetBvid || BSE.Utils.getBvid(state?.url || location.href);
-      if (!bvid) {
-        toast('未识别到 B 站视频 BV 号', true);
+      const isYouTube = state?.platform === 'youtube' || (state?.url && state.url.includes('youtube.com'));
+      const bvid = (!isYouTube ? (targetId || BSE.Utils?.getBvid?.(state?.url || location.href)) : null);
+      const ytId = isYouTube ? (targetId || (BSE.Utils?.getYouTubeVideoId ? BSE.Utils.getYouTubeVideoId(state?.url || '') : '')) : null;
+
+      if (!bvid && !isYouTube) {
+        toast('未识别到视频或合集 ID', true);
         return;
       }
       elements.batchOverlay.hidden = false;
@@ -2462,31 +2470,79 @@
       elements.batchCancelBtn.hidden = true;
 
       toast('正在分析合集与分P架构…');
-      currentTree = await BSE.Bilibili.fetchMediaTree(bvid, { diagnostic: diagLogger });
+      const diagLogger = (stage, msg) => appendDiagnostic(stage, msg);
+
+      if (isYouTube) {
+        const cachedSub = subscriptionsCache.find((s) => s.id === targetId || s.targetId === targetId);
+        if (cachedSub && Array.isArray(cachedSub.items) && cachedSub.items.length > 0) {
+          const items = cachedSub.items.map((it, idx) => {
+            const globalIndex = idx + 1;
+            return {
+              globalIndex,
+              bvid: it.id,
+              videoId: it.id,
+              cid: it.id,
+              aid: it.id,
+              title: it.title || `第 ${globalIndex} 节`,
+              page: globalIndex,
+              part: it.title || `第 ${globalIndex} 节`,
+              duration: typeof it.duration === 'number' ? it.duration : 0,
+              sourceUrl: it.url,
+              sectionKey: 'section_0',
+              sectionTitle: cachedSub.title || '播放列表'
+            };
+          });
+          currentTree = {
+            title: cachedSub.title || 'YouTube 播放列表',
+            kind: 'youtube_playlist',
+            seasonId: cachedSub.targetId || targetId || '',
+            currentBvid: ytId || '',
+            items,
+            sections: [{
+              key: 'section_0',
+              title: cachedSub.title || '播放列表',
+              items,
+              episodes: items.map((it) => ({
+                bvid: it.videoId,
+                title: it.title,
+                index: it.globalIndex,
+                pagesCount: 1,
+                items: [it]
+              }))
+            }],
+            hasNestedPages: false
+          };
+        } else {
+          currentTree = await BSE.YouTube.fetchMediaTree(ytId, { diagnostic: diagLogger });
+        }
+      } else {
+        currentTree = await BSE.Bilibili.fetchMediaTree(bvid, { diagnostic: diagLogger });
+      }
 
       // 实时反哺同步到已有的追踪卡片中
       if (currentTree && Array.isArray(currentTree.items) && currentTree.items.length > 0) {
         const sid = currentTree.seasonId ? String(currentTree.seasonId) : '';
         const matchingSub = subscriptionsCache.find((s) => {
           if (sid && (s.targetId === sid || s.id.includes(`:${sid}`))) return true;
-          if (s.bvid === bvid || s.latestBvid === bvid || s.targetId === bvid) return true;
-          if (s.sourceUrl && (s.sourceUrl.includes(bvid) || (sid && s.sourceUrl.includes(sid)))) return true;
+          if (bvid && (s.bvid === bvid || s.latestBvid === bvid || s.targetId === bvid)) return true;
+          if (ytId && (s.bvid === ytId || s.latestBvid === ytId || s.targetId === ytId)) return true;
+          if (s.sourceUrl && ((bvid && s.sourceUrl.includes(bvid)) || (sid && s.sourceUrl.includes(sid)))) return true;
           return false;
         });
         if (matchingSub) {
           const episodes = currentTree.items.map((it) => ({
-            id: it.bvid || `${bvid}:p${it.page}`,
+            id: it.videoId || it.bvid || `${bvid}:p${it.page}`,
             title: String(it.part || it.title || '').trim(),
-            url: `https://www.bilibili.com/video/${it.bvid || bvid}${it.page && it.page > 1 ? `?p=${it.page}` : ''}`,
-            pubdate: it.pubdate ? it.pubdate * 1000 : Date.now(),
+            url: it.sourceUrl || `https://www.bilibili.com/video/${it.bvid || bvid}${it.page && it.page > 1 ? `?p=${it.page}` : ''}`,
+            pubdate: it.pubdate ? (it.pubdate > 1e11 ? it.pubdate : it.pubdate * 1000) : Date.now(),
             duration: Number(it.duration) || 0,
             author: currentTree.title || matchingSub.title
           }));
           matchingSub.items = episodes;
-          matchingSub.bvid = bvid;
-          matchingSub.latestBvid = episodes[0]?.id || bvid;
+          if (bvid) matchingSub.bvid = bvid;
+          matchingSub.latestBvid = episodes[0]?.id || bvid || ytId;
           matchingSub.lastCheckedAt = Date.now();
-          if (currentTree.title && (matchingSub.title === '合集' || matchingSub.title === '视频合集' || !matchingSub.title)) {
+          if (currentTree.title && (matchingSub.title === '合集' || matchingSub.title === '视频合集' || matchingSub.title === 'YouTube 播放列表' || !matchingSub.title)) {
             matchingSub.title = currentTree.title;
           }
           await BSE.Tracker.addSubscription(matchingSub);
@@ -2496,7 +2552,9 @@
       }
 
       elements.batchModalTitle.textContent = currentTree.title;
-      elements.batchTypePill.textContent = currentTree.kind === 'ugc_season' ? '🏷️ UGC合集' : (currentTree.kind === 'multi_page' ? '🎞️ 多P' : '🎬 单视频');
+      elements.batchTypePill.textContent = currentTree.kind === 'youtube_playlist'
+        ? '▶️ 播放列表'
+        : (currentTree.kind === 'ugc_season' ? '🏷️ UGC合集' : (currentTree.kind === 'multi_page' ? '🎞️ 多P' : '🎬 单视频'));
       elements.batchSelectedSummary.textContent = `共 ${currentTree.items.length} 个分P${currentTree.hasNestedPages ? ' · 含复合多P' : ''}`;
 
       // Initialize quick range bar values
@@ -2674,7 +2732,9 @@
     const diagLogger = (stage, msg) => appendDiagnostic(stage, msg);
 
     try {
-      const exportResult = await BSE.Bilibili.runBatchExport(currentTree, config, (stats, currentItem, phase, task) => {
+      const runner = currentTree?.kind === 'youtube_playlist' ? BSE.YouTube?.runBatchExport : BSE.Bilibili?.runBatchExport;
+      if (!runner) throw new Error('当前合集/播放列表导出引擎不可用');
+      const exportResult = await runner(currentTree, config, (stats, currentItem, phase, task) => {
         if (phase === 'packing') {
           elements.batchProgressText.textContent = `正在打包 ZIP (${stats.packPercent || 0}%)…`;
           elements.batchProgressBarFill.style.width = `${stats.packPercent || 0}%`;

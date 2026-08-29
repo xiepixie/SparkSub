@@ -87,18 +87,29 @@ const windowMock = {
   postMessage: (data) => {
     if (data?.channel === 'bse-extension-bridge-v1' && data.direction === 'request') {
       queueMicrotask(() => {
+        let result = {
+          ready: true,
+          video: { id: 'Ewd6CGwaEXY', title: '4 Language Habits That Get You Fluent FAST' },
+          tracks: [
+            { id: 'asr:en', lan: 'en', lanDoc: 'English (auto-generated)', subtitleUrl: 'https://www.youtube.com/api/timedtext?v=Ewd6CGwaEXY&lang=en', isAuto: true }
+          ]
+        };
+        if (data.type === 'GET_PLAYLIST') {
+          result = {
+            listId: 'PL1234567890',
+            title: 'Learn English FAST Playlist',
+            items: [
+              { id: 'Ewd6CGwaEXY', title: '4 Language Habits', duration: '10:05', url: 'https://www.youtube.com/watch?v=Ewd6CGwaEXY&list=PL1234567890' },
+              { id: 'dQw4w9WgXcQ', title: 'Never Gonna Give You Up', duration: '03:32', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1234567890' }
+            ]
+          };
+        }
         const responseData = {
           channel: 'bse-extension-bridge-v1',
           direction: 'response',
           requestId: data.requestId,
           ok: true,
-          result: {
-            ready: true,
-            video: { id: 'Ewd6CGwaEXY', title: '4 Language Habits That Get You Fluent FAST' },
-            tracks: [
-              { id: 'asr:en', lan: 'en', lanDoc: 'English (auto-generated)', subtitleUrl: 'https://www.youtube.com/api/timedtext?v=Ewd6CGwaEXY&lang=en', isAuto: true }
-            ]
-          }
+          result
         };
         messageListeners.forEach((fn) => {
           try { fn({ data: responseData }); } catch {}
@@ -1606,6 +1617,48 @@ assert.ok(mockTracks.length >= 1, '必须发现 YouTube 基础字幕轨道');
 const transTrack = mockTracks.find((t) => t.isTranslated && t.lan === 'zh-Hans');
 assert.ok(transTrack, '非中文 YouTube 视频必须自动生成中文自动翻译轨道选项');
 assert.ok(transTrack.subtitleUrl.includes('tlang=zh-Hans'), '翻译轨道 URL 必须包含 tlang 参数');
+
+// 22.1 YouTube Playlist fetchMediaTree Test
+const ytTree = await BSE.YouTube.fetchMediaTree('PL1234567890');
+assert.equal(ytTree.kind, 'youtube_playlist', 'YouTube 必须正确识别播放列表拓扑');
+assert.equal(ytTree.title, 'Learn English FAST Playlist', '必须返回正确的播放列表标题');
+assert.equal(ytTree.items.length, 2, '必须提取播放列表中的两个视频');
+assert.equal(ytTree.items[0].globalIndex, 1, '第 1 集的 globalIndex 必须为 1');
+assert.equal(ytTree.items[0].duration, 605, '10:05 必须正确换算为 605 秒');
+assert.equal(ytTree.sections[0].episodes.length, 2, '必须构造合法的 sections 与 episodes 结构以适配批量导出 UI');
+
+// 22.2 YouTube Subtitle direct fetching in Tracker
+const fakeYtSubItem = {
+  id: 'dQw4w9WgXcQ',
+  title: 'Never Gonna Give You Up',
+  author: 'Rick Astley',
+  url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+};
+const prevNative = BSE.NativeHost;
+BSE.NativeHost = {
+  fetchYouTubeCaptions: async () => ({
+    cues: [
+      { from: 0, to: 5, content: 'Never gonna give you up' },
+      { from: 5, to: 10, content: 'Never gonna let you down' }
+    ],
+    language: 'zh-Hans',
+    langDoc: '中文（自动翻译）'
+  })
+};
+const directYtRes = await BSE.Tracker.addSubscription({
+  id: 'youtube:channel:UCuAXFkgsw1L7xaCfnd5JJOw',
+  platform: 'youtube',
+  type: 'channel',
+  title: 'Rick Astley',
+  targetId: 'UCuAXFkgsw1L7xaCfnd5JJOw',
+  items: [fakeYtSubItem]
+});
+const itemSubtitle = await BSE.Tracker.fetchSubtitleForItem(directYtRes.id, fakeYtSubItem.id);
+assert.equal(itemSubtitle.status, 'ready', 'YouTube 条目必须通过 Native Host 成功直取字幕');
+assert.equal(itemSubtitle.cueCount, 2, '字幕条数必须正确解析');
+assert.ok(itemSubtitle.markdown.includes('Never gonna give you up'), 'Markdown 必须包含字幕正文');
+BSE.NativeHost = prevNative;
+await BSE.Tracker.removeSubscription(directYtRes.id);
 
 // 23. Queue native-ASR fallback behavior. These exercise the real queue; only
 // the Native Messaging boundary is replaced with a deterministic fake.
