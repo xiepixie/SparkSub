@@ -1740,14 +1740,17 @@
           styleEl = document.createElement('style');
           styleEl.id = 'bse-bilibili-spacer-style';
           styleEl.textContent = `
-            #right-bottom-banner .up-panel-container + *,
-            .right-container .up-panel-container + *,
-            #right-bottom-banner .up-info-container + *,
-            .right-container .up-info-container + *,
-            .grid-right > *:first-child,
-            .grid-box .grid-right > *:first-child,
-            .grid-right .video-danmuku,
-            #danmakuBox, .danmaku-box, #danmukuBox {
+            #right-bottom-banner > .up-panel-container + *,
+            .right-container > .up-panel-container + *,
+            .right-container-inner > .up-panel-container + *,
+            #right-bottom-banner > .up-info-container + *,
+            .right-container > .up-info-container + *,
+            .right-container-inner > .up-info-container + *,
+            .r-con > .up-panel-container + *,
+            .grid-right > .up-panel-container + *,
+            #right-bottom-banner:not(:has(.up-panel-container)):not(:has(.up-info-container)) > *:first-child,
+            .right-container:not(:has(.up-panel-container)):not(:has(.up-info-container)) > *:first-child,
+            .grid-right:not(:has(.up-panel-container)):not(:has(.up-info-container)) > *:first-child {
               margin-top: var(--bse-injected-spacer-height, 0px) !important;
               transition: margin-top 0.15s ease-out;
             }
