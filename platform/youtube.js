@@ -175,7 +175,7 @@
       credentials: 'include',
       cache: 'no-store',
       signal
-    }, 4500);
+    }, 9000);
     const text = await response.text();
     return { ok: response.ok, status: response.status, text, via: 'direct' };
   }
@@ -384,8 +384,8 @@
       diagnostic?.('播放器', `切换轨道提示：${error.message}`);
     }
 
-    // 4. 短轮询等待新拦截请求 (最高 1.8s)
-    const deadline = Date.now() + 1800;
+    // 4. 短轮询等待新拦截请求 (最高 3.5s)
+    const deadline = Date.now() + 3500;
     const triedUrls = new Set();
     while (Date.now() < deadline) {
       await hydrateCapturedRequests();
