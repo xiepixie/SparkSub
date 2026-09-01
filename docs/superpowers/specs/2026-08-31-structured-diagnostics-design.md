@@ -80,6 +80,7 @@ interface DiagnosticEvent {
 ```js
 createEvent(input, now?)
 sanitizeText(value)
+sanitizeEndpoint(value)
 formatEvent(event, options?)
 createStore({ limit, dedupeWindowMs, now? })
 createLegacyReporter(emit, defaults)
@@ -206,4 +207,3 @@ Native Host 的 stdout 契约保持不变：正常模式只写 Native Messaging 
 - 默认日志明显少于详细日志，且仍完整呈现用户可操作的失败信息。
 - 所有既有自动化测试和新增日志测试通过。
 - Native Messaging stdout 协议保持原样。
-
