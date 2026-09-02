@@ -36,6 +36,75 @@ export interface ErrorFault {
   time?: string;
 }
 
+export type DiagnosticLevel = 'debug' | 'info' | 'warn' | 'error';
+export type DiagnosticScope = 'media' | 'queue' | 'native' | 'batch' | 'tracker' | 'system';
+
+export interface DiagnosticEvent {
+  id: string;
+  timestamp: string;
+  level: DiagnosticLevel;
+  scope: DiagnosticScope;
+  code: string;
+  stage: string;
+  message: string;
+  sessionId: string;
+  context: {
+    mediaKey?: string;
+    jobId?: string;
+    platform?: string;
+    tabId?: number;
+  };
+}
+
+export interface DiagnosticStore {
+  append(input: Partial<DiagnosticEvent> | string): DiagnosticEvent | null;
+  replaceSession(scope: DiagnosticScope, sessionId: string): void;
+  events(filter?: { scope?: DiagnosticScope; sessionId?: string; minLevel?: DiagnosticLevel }): DiagnosticEvent[];
+  clear(filter?: { scope?: DiagnosticScope; sessionId?: string }): void;
+}
+
+export interface DiagnosticsModule {
+  LEVELS: readonly DiagnosticLevel[];
+  SCOPES: readonly DiagnosticScope[];
+  createEvent(input: Partial<DiagnosticEvent> | string, now?: () => Date): DiagnosticEvent;
+  sanitizeText(value: unknown, options?: { maxLength?: number }): string;
+  sanitizeEndpoint(value: unknown): string;
+  formatEvent(event: Partial<DiagnosticEvent> | string): string;
+  createStore(options?: { limit?: number; perSessionLimit?: number; dedupeWindowMs?: number; now?: () => Date }): DiagnosticStore;
+  createLegacyReporter(emit: (event: DiagnosticEvent) => void, defaults?: Partial<DiagnosticEvent> & { now?: () => Date }): (stage: string, message: string) => void;
+  createFaultEvents(fault: ErrorFault, defaults?: Partial<DiagnosticEvent> & { now?: () => Date }): DiagnosticEvent[];
+  createMediaSession(options?: { platform?: string; limit?: number; now?: () => Date }): {
+    begin(mediaKey: string): string;
+    report(stage: string, message: string, overrides?: Partial<DiagnosticEvent>): DiagnosticEvent | null;
+    append(event: Partial<DiagnosticEvent>): DiagnosticEvent | null;
+    recordFault(fault: ErrorFault): DiagnosticEvent[];
+    events(): DiagnosticEvent[];
+    readonly sessionId: string;
+    readonly mediaKey: string;
+  };
+  classifyLegacy(stage: string, message: string): DiagnosticLevel;
+}
+
+export interface DiagnosticPresenter {
+  activateMedia(input: { tabId?: number | null; sessionId: string; mediaKey?: string | null }): void;
+  ingestMedia(events: Array<DiagnosticEvent | string>): void;
+  append(input: Partial<DiagnosticEvent>): DiagnosticEvent | null;
+  observeQueueItem(item: Partial<QueueItem>): DiagnosticEvent | null;
+  selectScope(scope: 'media' | 'queue' | 'native' | 'batch'): void;
+  setDetailed(value: boolean): void;
+  visibleEvents(): DiagnosticEvent[];
+  statusEvents(): DiagnosticEvent[];
+  activityEvents(state: Partial<AppState>): DiagnosticEvent[];
+  statusItem(event: DiagnosticEvent): { id: string; tone: 'success' | 'running' | 'warning' | 'error' | 'info'; title: string; detail: string; time: string };
+  summarizeState(state: Partial<AppState>): { tone: 'success' | 'running' | 'warning' | 'error' | 'info'; label: string; title: string; detail: string };
+  technicalEvents(): DiagnosticEvent[];
+  clearSelected(): void;
+  copySelected(header?: string): string;
+  copyTechnical(header?: string): string;
+  readonly selectedScope: string;
+  readonly detailed: boolean;
+}
+
 export interface AppState {
   version: string;
   platform: Platform;
@@ -54,7 +123,8 @@ export interface AppState {
   cues: Cue[];
   activeIndex: number;
   currentTime: number;
-  diagnostics: string[];
+  diagnosticSessionId: string;
+  diagnostics: DiagnosticEvent[];
   authorInfo?: {
     name: string;
     targetId: string;
@@ -286,6 +356,7 @@ export interface TrackedItem {
   duration?: number;
   author?: string;
   hasSubtitle?: boolean;
+  isRead?: boolean;
   cid?: string | number;
   subtitle?: TrackedItemSubtitle | null;
 }
@@ -303,6 +374,8 @@ export interface TrackedSubscription {
   resolvedTargetId?: string;
   subscribedAt: number;
   lastCheckedAt: number;
+  lastReadPubdate?: number;
+  lastReadItemId?: string;
   lastUpdatedItemId?: string;
   lastUpdatedTitle?: string;
   unreadCount: number;
@@ -416,6 +489,7 @@ export interface QueueSettings {
 }
 
 export interface BSEQueueNamespace {
+  setDiagnosticReporter(reporter: ((event: Partial<DiagnosticEvent>) => void) | null): void;
   getQueue(): Promise<QueueItem[]>;
   saveQueue(items: QueueItem[]): Promise<QueueItem[]>;
   getItem(id: string): Promise<QueueItem | null>;
@@ -512,6 +586,11 @@ export interface BSEQueueUINamespace {
   safeFailurePresentation(item: Partial<QueueItem>): { code: string; hint: string; retriable: boolean };
   componentState(name: string, component?: { available?: boolean; detail?: string }): { key: string; detail: string };
   capabilityState(capabilities?: any, error?: { code?: string }): { key: string };
+  createCapabilityProbeState(): {
+    begin(): number;
+    commit(revision: number, result?: { capabilities?: any; error?: { code?: string; message?: string } | null }): boolean;
+    snapshot(): { phase: 'idle' | 'checking' | 'settled'; capabilities: any; error: { code?: string; message?: string } | null; revision: number };
+  };
   enqueueWithLanguage(options: {
     urls: string[];
     sourceLanguage: string;
@@ -561,6 +640,8 @@ export interface BSENamespace {
   NativeHost?: NativeHostNamespace;
   LanguageRouting?: BSELanguageRoutingNamespace;
   QueueUI?: BSEQueueUINamespace;
+  Diagnostics: DiagnosticsModule;
+  DiagnosticPresenter?: { create(options?: { limit?: number; perSessionLimit?: number; now?: () => Date; store?: DiagnosticStore }): DiagnosticPresenter };
   YouTube: BSEPlatformNamespace;
   Bilibili: BSEPlatformNamespace;
   I18n?: BSEI18nNamespace;

@@ -166,12 +166,34 @@
     const bvid = getBvid();
     if (!bvid) throw createError('BVID_NOT_FOUND', '未识别到视频 BV 号', '请确认当前处于 B 站视频播放页面。');
 
-    // 实验特性：优先尝试从 BPX 播放器活跃选集 DOM 或当前稳定 mediaKey 提取 CID
+    let viewData = extractDomVideoData(bvid);
+    if (viewData) {
+      diagnostic?.('页面数据', `直接从页面嵌入数据读取视频信息 · aid ${viewData.aid || '未知'}`);
+    } else {
+      const view = assertApiSuccess(await requestApiJson(
+        `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
+        { signal, diagnostic, stage: '视频信息' }
+      ), '视频信息接口');
+      viewData = view?.data;
+    }
+    if (!viewData) throw createError('VIEW_DATA_EMPTY', '视频信息接口缺少数据', '接口数据结构可能已更新。');
+
+    const validCids = new Set([
+      String(viewData.cid || ''),
+      ...(viewData.pages || []).map((p) => String(p.cid || ''))
+    ]);
+
+    // 实验特性：优先尝试从 BPX 播放器活跃选集 DOM 快速提取 CID（必须严格属于当前视频的 validCids，严防 SPA 跨视频污染）
     const mediaKey = BSE.Utils.getMediaKey ? BSE.Utils.getMediaKey(BSE.PLATFORM.BILIBILI) : '';
-    const domCid = (BSE.Utils.getActiveCidFromDom ? BSE.Utils.getActiveCidFromDom() : null)
+    let domCid = (BSE.Utils.getActiveCidFromDom ? BSE.Utils.getActiveCidFromDom() : null)
       || (mediaKey && mediaKey.includes(':cid') ? mediaKey.split(':cid')[1] : null);
+    if (domCid && !validCids.has(String(domCid))) {
+      diagnostic?.('实验特性/BPX校验', `检测到残留选集 CID (${domCid}) 不属于当前视频，已安全丢弃`);
+      domCid = null;
+    }
+
     if (domCid) {
-      diagnostic?.('实验特性/BPX探测', `检测到活跃选集 · 快速锁定 CID: ${domCid}`);
+      diagnostic?.('实验特性/BPX探测', `检测到当前视频活跃选集 · 快速锁定 CID: ${domCid}`);
       try {
         const player = assertApiSuccess(await requestApiJson(
           `https://api.bilibili.com/x/player/v2?cid=${encodeURIComponent(domCid)}&bvid=${encodeURIComponent(bvid)}`,
@@ -191,18 +213,6 @@
         diagnostic?.('实验特性/BPX降级', `BPX 快速通道未返回可用字幕 (${bpxErr.message})，平滑回退到常规接口`);
       }
     }
-
-    let viewData = extractDomVideoData(bvid);
-    if (viewData) {
-      diagnostic?.('页面数据', `直接从页面嵌入数据读取视频信息 · aid ${viewData.aid || '未知'}`);
-    } else {
-      const view = assertApiSuccess(await requestApiJson(
-        `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
-        { signal, diagnostic, stage: '视频信息' }
-      ), '视频信息接口');
-      viewData = view?.data;
-    }
-    if (!viewData) throw createError('VIEW_DATA_EMPTY', '视频信息接口缺少数据', '接口数据结构可能已更新。');
 
     const page = getBilibiliPage(location.href);
     const pageInfo = viewData.pages?.find((p) => p.page === page) || viewData.pages?.[Math.max(0, page - 1)] || viewData.pages?.[0] || {};
@@ -777,25 +787,7 @@
     let title = '音频';
     let cid = null;
 
-    // 1. 优先尝试从 DOM 读取已注入的 window.__playinfo__
-    if (typeof document !== 'undefined') {
-      const scripts = document.querySelectorAll('script');
-      for (const script of scripts) {
-        const text = script.textContent || '';
-        if (text.includes('__playinfo__')) {
-          const match = text.match(/window\.__playinfo__\s*=\s*(\{.+?\});/s) || text.match(/__playinfo__\s*=\s*(\{.+?\});?/s);
-          if (match && match[1]) {
-            try {
-              playInfo = JSON.parse(match[1]);
-              diagnostic?.('音频提取', '从页面嵌入 __playinfo__ 成功读取 DASH 音频数据');
-              break;
-            } catch {}
-          }
-        }
-      }
-    }
-
-    // 获取视频基础元数据 (Title, CID)
+    // 1. 优先获取视频权威元数据 (Title, CID)
     let viewData = extractDomVideoData(bvid);
     if (!viewData) {
       const view = assertApiSuccess(await requestApiJson(
@@ -809,15 +801,27 @@
     cid = pageInfo.cid || viewData?.cid;
     title = pageInfo.part || viewData?.title || 'B站音频';
 
-    // 2. 如果页面没有直接嵌入或分P切换未更新，调用 B站 playurl 接口获取
-    if (!playInfo?.data?.dash?.audio?.length && cid) {
-      const playUrlApi = `https://api.bilibili.com/x/player/wbi/playurl?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}&qn=0&fnval=4048&fnver=0&fourk=1`;
+    if (!cid) {
+      throw createError('CID_NOT_FOUND', '未定位到视频 CID，无法提取音频流');
+    }
+
+    // 2. 通过 playurl 官方 API 动态获取精准匹配当前 bvid 与 cid 的 DASH 音轨 (严禁盲目读取静态 DOM 脚本，杜绝 SPA 串台)
+    const playUrlApi = `https://api.bilibili.com/x/player/wbi/playurl?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}&qn=0&fnval=4048&fnver=0&fourk=1`;
+    try {
       const res = assertApiSuccess(await requestApiJson(playUrlApi, {
         signal,
         diagnostic,
         stage: 'DASH音频接口'
       }), 'DASH音频接口');
       playInfo = res;
+    } catch (playErr) {
+      if (playErr?.name === 'AbortError') throw playErr;
+      const fallbackUrl = `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}&qn=0&fnval=4048`;
+      playInfo = assertApiSuccess(await requestApiJson(fallbackUrl, {
+        signal,
+        diagnostic,
+        stage: 'DASH音频接口(兼容)'
+      }), 'DASH音频接口(兼容)');
     }
 
     const audioStreams = playInfo?.data?.dash?.audio || [];

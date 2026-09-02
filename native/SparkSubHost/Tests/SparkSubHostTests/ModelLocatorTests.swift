@@ -253,6 +253,7 @@ final class ModelLocatorTests: XCTestCase {
             sparkSubApplicationSupportURL: appSupport.appendingPathComponent("SparkSub")
         )
         try XCTSkipUnless(locator.capabilities().parakeet.available, "Parakeet model not installed locally")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: "/tmp/test_speech.wav"), "Temporary test audio /tmp/test_speech.wav not found")
         let engine = TranscriptionEngine(modelLocator: locator)
         let token = CancellationToken()
         let output = try await engine.transcribe(
@@ -281,6 +282,7 @@ final class ModelLocatorTests: XCTestCase {
             sparkSubApplicationSupportURL: appSupport.appendingPathComponent("SparkSub")
         )
         try XCTSkipUnless(locator.capabilities().cohere.available, "Cohere model not installed locally")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: "/tmp/test_speech.wav"), "Temporary test audio /tmp/test_speech.wav not found")
         let engine = TranscriptionEngine(modelLocator: locator)
         let token = CancellationToken()
         let output: TranscriptionOutput

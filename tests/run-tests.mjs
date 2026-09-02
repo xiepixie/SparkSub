@@ -5,6 +5,8 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { runOrchestratorTests } from './orchestrator-tests.mjs';
 
+await import('./diagnostics-tests.mjs');
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 await runOrchestratorTests();
 let mockFetch = async () => { throw new Error('Unexpected network request in test'); };
@@ -121,6 +123,8 @@ const windowMock = {
 URL.createObjectURL = () => 'blob:mock-url';
 URL.revokeObjectURL = () => {};
 
+let mockAiFetchHandler = null;
+
 const context = vm.createContext({
   console,
   crypto: {
@@ -178,11 +182,18 @@ const context = vm.createContext({
             };
           }
         }
+        if (msg.type === 'BSE_FETCH_LOCAL_LLM' || msg.type === 'BSE_AI_FETCH') {
+          if (mockAiFetchHandler) {
+            return mockAiFetchHandler(msg);
+          }
+          throw new Error('Native fetch fallback');
+        }
         return { success: true, status: 200, text: '{}' };
       }
     }
   },
   document: {
+    compatMode: 'CSS1Compat',
     querySelector: () => null,
     querySelectorAll: () => [],
     createElement: () => ({
@@ -201,15 +212,18 @@ context.globalThis = context;
 
 for (const file of [
   'core/namespace.js',
+  'core/diagnostics.js',
   'core/native-host.js',
   'core/utils.js',
   'core/jszip.js',
   'core/i18n.js',
   'core/parsers.js',
+  'core/media.js',
+  'core/visual-state-detector.js',
+  'core/katex.min.js',
   'core/formatters.js',
   'core/asr-polisher.js',
   'core/tracker.js',
-  'core/media.js',
   'core/queue.js',
   'platform/bilibili.js',
   'platform/youtube.js'
@@ -761,6 +775,22 @@ const oversizedCues = [{ from: 0, to: 1, content: 'x'.repeat(2 * 1024 * 1024) }]
 BSE.Utils.SessionSnapshotManager.saveSnapshot('yt:oversized', { tracks: [], cues: oversizedCues });
 assert.equal(BSE.Utils.SessionSnapshotManager.findSnapshot('yt:oversized'), null, '超大字幕不得写满 sessionStorage');
 
+// 6b. UnifiedSubtitleCache 全局统一字幕持久化缓存测试
+await BSE.Utils.UnifiedSubtitleCache.set('bili:BV1TestUnifiedCache:p1', {
+  title: '统一缓存测试',
+  author: '测试UP主',
+  language: 'zh',
+  langDoc: '中文',
+  cues: [
+    { from: 0.0, to: 2.5, content: '第一句统一缓存字幕' },
+    { from: 2.5, to: 5.0, content: '第二句统一缓存字幕' }
+  ]
+});
+const unifiedLoaded = await BSE.Utils.UnifiedSubtitleCache.get('bili:BV1TestUnifiedCache:p1');
+assert.ok(unifiedLoaded, '统一字幕缓存必须成功写入并读取');
+assert.equal(unifiedLoaded.cues.length, 2, '统一字幕缓存必须保留完整 cues 数组');
+assert.equal(unifiedLoaded.title, '统一缓存测试', '统一字幕缓存必须保留视频元数据');
+
 // 7. Manifest & File Integrity
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
 assert.equal(manifest.manifest_version, 3);
@@ -1109,6 +1139,72 @@ const persistedBaseline = await BSE.Tracker.getSubscription('youtube:channel:UC1
 assert.ok(persistedBaseline.lastCheckedAt > 0, '无新视频的成功巡检也必须持久化 lastCheckedAt');
 assert.equal(persistedBaseline.items.length, 2, '全量巡检必须持久化首次基线');
 await BSE.Tracker.removeSubscription('youtube:channel:UC1234567890123456789012');
+
+// 13.5 已读状态持久化与防复发测试 (Anti-Resurrection Read State Guard)
+const readTestSub = {
+  id: 'bilibili:season:888999',
+  platform: 'bilibili',
+  type: 'season',
+  title: '已读状态测试合集',
+  targetId: '888999',
+  bvid: 'BV1READTEST',
+  unreadCount: 3,
+  lastCheckedAt: 1000,
+  items: [
+    { id: 'BV1EP3', title: '第3集', pubdate: 3000, isRead: false },
+    { id: 'BV1EP2', title: '第2集', pubdate: 2000, isRead: false },
+    { id: 'BV1EP1', title: '第1集', pubdate: 1000, isRead: false }
+  ]
+};
+await BSE.Tracker.addSubscription(readTestSub);
+let savedSub = await BSE.Tracker.getSubscription(readTestSub.id);
+assert.equal(savedSub.unreadCount, 3, '初始未读数必须为 3');
+
+// 测试单条标记已读
+await BSE.Tracker.markAsRead(readTestSub.id, 'BV1EP3');
+savedSub = await BSE.Tracker.getSubscription(readTestSub.id);
+assert.equal(savedSub.unreadCount, 2, '单条标记已读后未读数递减');
+assert.equal(savedSub.items.find(i => i.id === 'BV1EP3')?.isRead, true, '指定条目必须持久化为已读');
+
+// 测试整卡全部标记已读
+await BSE.Tracker.markAsRead(readTestSub.id);
+savedSub = await BSE.Tracker.getSubscription(readTestSub.id);
+assert.equal(savedSub.unreadCount, 0, '标为已读后卡片未读数必须清零');
+assert.ok(savedSub.lastReadPubdate >= 3000, '标记已读后必须更新已读时间戳水位线');
+assert.ok(savedSub.items.every(i => i.isRead), '标记已读后所有条目必须为已读状态');
+
+// 测试后续巡检返回历史条目时，绝不复发为未读
+mockFetch = async () => ({
+  ok: true,
+  status: 200,
+  json: async () => ({
+    code: 0,
+    data: {
+      title: '已读状态测试合集',
+      ugc_season: {
+        id: 888999,
+        title: '已读状态测试合集',
+        sections: [{
+          title: '正片',
+          episodes: [
+            { bvid: 'BV1EP3', title: '第3集', arc: { pubdate: 3, duration: 100 } },
+            { bvid: 'BV1EP2', title: '第2集', arc: { pubdate: 2, duration: 100 } },
+            { bvid: 'BV1EP1', title: '第1集', arc: { pubdate: 1, duration: 100 } }
+          ]
+        }]
+      }
+    }
+  })
+});
+const recheckRes = await BSE.Tracker.checkSubscriptionUpdates(savedSub);
+assert.equal(recheckRes.updated, false, '历史已读条目巡检不得触发更新');
+assert.equal(savedSub.unreadCount, 0, '历史条目绝不能复活为未读');
+
+// 测试全量标记已读
+await BSE.Tracker.markAllAsRead();
+const reloadedAll = await BSE.Tracker.getSubscriptions();
+assert.ok(reloadedAll.every(s => s.unreadCount === 0), 'markAllAsRead 必须将所有订阅未读数彻底清零');
+await BSE.Tracker.removeSubscription(readTestSub.id);
 
 assert.ok(manifest.permissions.includes('alarms'), 'manifest.json 必须申请 alarms 权限');
 assert.ok(manifest.permissions.includes('notifications'), 'manifest.json 必须申请 notifications 权限');
@@ -2472,6 +2568,20 @@ assert.equal(fakeCapabilityPanel.dataset.state, 'queue_capability_partial');
 assert.equal(fakeCapabilityStatus.textContent, 'queue_capability_partial');
 assert.match(fakeCapabilityDetails.textContent, /queue_capability_ytdlp/);
 assert.match(fakeCapabilityDetails.textContent, /queue_capability_cohere/);
+const capabilityProbe = queueUi.createCapabilityProbeState();
+const olderProbe = capabilityProbe.begin();
+const currentProbe = capabilityProbe.begin();
+assert.equal(capabilityProbe.commit(olderProbe, {
+  capabilities: { hostReady: true, ytDLP: { available: true }, models: { parakeet: { available: true }, cohere: { available: true } } },
+  error: null
+}), false, 'an older native capability response must not overwrite a newer probe');
+assert.deepEqual({ ...capabilityProbe.snapshot() }, {
+  phase: 'checking', capabilities: null, error: null, revision: currentProbe
+});
+assert.equal(capabilityProbe.commit(currentProbe, { capabilities: null, error: { code: 'NATIVE_HOST_DISCONNECTED' } }), true);
+assert.deepEqual({ ...capabilityProbe.snapshot() }, {
+  phase: 'settled', capabilities: null, error: { code: 'NATIVE_HOST_DISCONNECTED' }, revision: currentProbe
+});
 const fakeFailureCard = { textContent: '' };
 queueUi.renderFailureCard(fakeFailureCard, { errorCode: 'MEDIA_DOWNLOAD_FAILED', errorHint: '<b>bad</b> https://host.invalid/?token=x', retriable: false }, (key) => key);
 assert.equal(/<|https?:\/\/|token=/.test(fakeFailureCard.textContent), false, 'failed-card renderer must use safe text output');
@@ -2483,7 +2593,17 @@ for (const locale of ['zh-CN', 'zh-TW', 'en']) {
 }
 const taskFiveSidepanelSource = fs.readFileSync(path.join(root, 'sidepanel/sidepanel.js'), 'utf8');
 const taskFiveSidepanelHtml = fs.readFileSync(path.join(root, 'sidepanel/sidepanel.html'), 'utf8');
+const taskFiveBackgroundSource = fs.readFileSync(path.join(root, 'background/service-worker.js'), 'utf8');
+assert.match(
+  taskFiveBackgroundSource,
+  /injectContentScripts[\s\S]+?files:\s*\[\s*'core\/namespace\.js',\s*'core\/diagnostics\.js'[\s\S]+?'content\/app\.js'/,
+  'dynamic injection must load diagnostics before content/app.js'
+);
 assert.match(taskFiveSidepanelSource, /BSE_NATIVE_CAPABILITIES/, 'capability diagnostics must go through the Service Worker proxy');
+assert.match(taskFiveSidepanelSource, /scope:\s*'batch'[\s\S]+?sessionId:\s*diagnosticSessions\.batch/, 'batch diagnostics must use an explicit batch scope and operation session');
+const taskFiveQueueSource = fs.readFileSync(path.join(root, 'core/queue.js'), 'utf8');
+assert.match(taskFiveQueueSource, /code:\s*'NATIVE_CAPTION_FALLBACK'/, 'unexpected native caption fallback must emit a stable structured diagnostic');
+assert.doesNotMatch(taskFiveQueueSource, /console\.warn\('\[BSE Queue\] 本机字幕回退:/, 'recoverable native caption fallback must not bypass structured diagnostics');
 assert.match(taskFiveSidepanelSource, /(?:sourceLanguage\s*,|sourceLanguage:\s*sourceLanguage)/, 'batch enqueue must forward the exact selected source language');
 assert.match(taskFiveSidepanelSource, /queue-source-language/, 'queue batch input must expose a source-language control');
 assert.ok(
@@ -2512,5 +2632,576 @@ assert.equal(aligned[1].content, 'and Codex tool.');
 const dynamicAiPrompt = BSE.Formatters.generateAiPrompt('polish', [{ from: 0, to: 1, content: 'test' }], false, { title: 'AI 论文研读' });
 assert.match(dynamicAiPrompt, /AI 论文研读/);
 
+// === 媒体一致性防错互锁与 SPA 跨视频污染防御回归测试 ===
+// 1. Tracker Duration Guard 回归测试：拦截时长超标的错配字幕
+const trackerDurationTestItem = {
+  id: 'BV1C1896KE3m',
+  title: 'CRC循环冗余检验-[一图流]-408计算机考研笔记',
+  author: '真题详解-27考研',
+  url: 'https://www.bilibili.com/video/BV1C1896KE3m',
+  duration: 207 // 目标视频时长 207s
+};
+
+// 模拟接口错误返回了老郭美食（时长 471s / 214句）的字幕 JSON
+mockFetch = async (url) => {
+  const urlStr = String(url || '');
+  if (urlStr.includes('/x/web-interface/view')) {
+    return {
+      ok: true,
+      json: async () => ({
+        code: 0,
+        data: {
+          bvid: 'BV1C1896KE3m',
+          title: trackerDurationTestItem.title,
+          cid: 41281980079,
+          pages: [{ page: 1, cid: 41281980079, part: 'CRC循环冗余检验' }]
+        }
+      })
+    };
+  }
+  if (urlStr.includes('/x/player/wbi/v2') || urlStr.includes('/x/player/v2')) {
+    return {
+      ok: true,
+      json: async () => ({
+        code: 0,
+        data: {
+          bvid: 'BV1C1896KE3m',
+          subtitle: {
+            subtitles: [{
+              lan: 'ai-zh',
+              lan_doc: '中文',
+              subtitle_url: 'https://i0.hdslb.com/bfs/subtitle/mismatched_laoguo.json'
+            }]
+          }
+        }
+      })
+    };
+  }
+  if (urlStr.includes('mismatched_laoguo.json')) {
+    return {
+      ok: true,
+      json: async () => ({
+        body: [
+          { from: 0.0, to: 9.0, content: '大蚂蝗每个人都爱吃 但你们了解蚂蝗吗' },
+          { from: 468.0, to: 471.0, content: '咱们下期解密水质的神奇吃法' }
+        ]
+      })
+    };
+  }
+  if (urlStr.includes('mismatched_bbq.json')) {
+    return {
+      ok: true,
+      json: async () => ({
+        body: [
+          { from: 0.0, to: 6.0, content: '今天吃几碗烧烤的总结就是两个字' },
+          { from: 244.0, to: 247.0, content: '向东流啊 天上的星星参北斗哇' }
+        ]
+      })
+    };
+  }
+  return { ok: false, json: async () => ({}) };
+};
+
+const interceptedResult = await BSE.Tracker?.fetchSubtitleForItem ?
+  await BSE.Tracker.fetchItemSubtitle?.(trackerDurationTestItem) : null;
+if (interceptedResult) {
+  assert.equal(interceptedResult.status, 'not_found', '严重时长错配的字幕必须被拦截判定为 not_found');
+  assert.match(interceptedResult.errorHint, /时长严重不符/, '错误提示中必须包含时长严重不符');
+}
+
+// 1b. 针对 247s 烧烤视频对比 207s 考研视频的边界防错测试
+mockFetch = async (url) => {
+  const urlStr = String(url);
+  if (urlStr.includes('x/web-interface/view')) {
+    return {
+      ok: true,
+      json: async () => ({
+        code: 0,
+        data: {
+          bvid: 'BV1C1896KE3m',
+          title: 'CRC循环冗余检验-[一图流]-408计算机考研笔记',
+          duration: 207,
+          pages: [{ page: 1, cid: 41281980079, duration: 207 }]
+        }
+      })
+    };
+  }
+  if (urlStr.includes('x/player/wbi/v2')) {
+    return {
+      ok: true,
+      json: async () => ({
+        code: 0,
+        data: {
+          bvid: 'BV1C1896KE3m',
+          subtitle: {
+            subtitles: [
+              { lan: 'ai-zh', lan_doc: '中文', subtitle_url: 'https://aisubtitle.hdslb.com/mismatched_bbq.json' }
+            ]
+          }
+        }
+      })
+    };
+  }
+  if (urlStr.includes('mismatched_bbq.json')) {
+    return {
+      ok: true,
+      json: async () => ({
+        body: [
+          { from: 0.0, to: 6.0, content: '今天吃几碗烧烤的总结就是两个字' },
+          { from: 244.0, to: 247.0, content: '向东流啊 天上的星星参北斗哇' }
+        ]
+      })
+    };
+  }
+  return { ok: false, json: async () => ({}) };
+};
+
+const bbqResult = await BSE.Tracker?.fetchItemSubtitle?.({
+  id: 'BV1C1896KE3m',
+  title: 'CRC循环冗余检验-[一图流]-408计算机考研笔记',
+  duration: 207
+});
+assert.equal(bbqResult.status, 'not_found', '247s 烧烤字幕在 207s 视频中必须被拦截判定为 not_found');
+assert.match(bbqResult.errorHint, /时长严重不符/, '错误提示中必须包含时长严重不符');
+
+// 1c. 针对 12 句（34s）残缺片头字幕对比 207s 考研视频的拦截测试
+mockFetch = async (url) => {
+  const urlStr = String(url);
+  if (urlStr.includes('x/web-interface/view')) {
+    return {
+      ok: true,
+      json: async () => ({
+        code: 0,
+        data: {
+          bvid: 'BV1C1896KE3m',
+          title: 'CRC循环冗余检验-[一图流]-408计算机考研笔记',
+          duration: 207,
+          pages: [{ page: 1, cid: 41281980079, duration: 207 }]
+        }
+      })
+    };
+  }
+  if (urlStr.includes('x/player/wbi/v2')) {
+    return {
+      ok: true,
+      json: async () => ({
+        code: 0,
+        data: {
+          bvid: 'BV1C1896KE3m',
+          subtitle: {
+            subtitles: [
+              { lan: 'ai-zh', lan_doc: '中文', subtitle_url: 'https://aisubtitle.hdslb.com/mismatched_bumper.json' }
+            ]
+          }
+        }
+      })
+    };
+  }
+  if (urlStr.includes('mismatched_bumper.json')) {
+    return {
+      ok: true,
+      json: async () => ({
+        body: [
+          { from: 13.0, to: 20.0, content: '画面里这两位正在海底打电钻的潜水员' },
+          { from: 26.0, to: 34.0, content: '我们自己也可以参与其中 哔哩哔哩' }
+        ]
+      })
+    };
+  }
+  return { ok: false, json: async () => ({}) };
+};
+
+const bumperResult = await BSE.Tracker?.fetchItemSubtitle?.({
+  id: 'BV1C1896KE3m',
+  title: 'CRC循环冗余检验-[一图流]-408计算机考研笔记',
+  duration: 207
+});
+assert.equal(bumperResult.status, 'not_found', '12句残缺片头字幕在 207s 视频中必须被拦截判定为 not_found');
+assert.match(bumperResult.errorHint, /官方字幕残缺/, '错误提示中必须包含官方字幕残缺');
+
+// 2. Queue Tab Snooping 防错测试：标签页处于旧视频状态时，队列绝不能盗用旧视频字幕
+await BSE.Queue.clearAll();
+const prevTabs = context.chrome.tabs;
+context.chrome.tabs = {
+  query: async () => [{
+    id: 999,
+    url: 'https://www.bilibili.com/video/BV1C1896KE3m',
+    title: 'B站播放页'
+  }],
+  sendMessage: async (tabId, msg) => {
+    if (msg?.type === 'BSE_GET_STATE') {
+      return {
+        status: 'ready',
+        mediaKey: 'bili:BV1StsYecEmP:cid25983519148', // 标签页中残留老郭美食的 mediaKey
+        bvid: 'BV1StsYecEmP',
+        cues: [
+          { from: 0.0, to: 9.0, content: '大蚂蝗每个人都爱吃 但你们了解蚂蝗吗' },
+          { from: 468.0, to: 471.0, content: '咱们下期解密水质的神奇吃法' }
+        ]
+      };
+    }
+    return null;
+  }
+};
+
+mockFetch = biliResponse({ tracks: [] });
+
+setFakeNativeHost(
+  async (payload) => [{ from: 0, to: 3, content: 'CRC循环冗余校验码正确的本地转录结果。' }]
+);
+
+await BSE.Queue.addToQueue('https://www.bilibili.com/video/BV1C1896KE3m');
+await BSE.Queue.processPendingJobs();
+const queueProcessedItem = await getOnlyQueueItem();
+if (queueProcessedItem.stage !== 'done') {
+  console.error('Queue item failed with error:', queueProcessedItem.error, queueProcessedItem.failureDetail);
+}
+assert.equal(queueProcessedItem.stage, 'done');
+assert.notEqual(queueProcessedItem.stageArtifacts?.captionTrackId, 'tab_current', '绝不能窃取未匹配或残留的标签页字幕');
+assert.equal(queueProcessedItem.subtitle?.source, 'native', '当标签页与官方均无字幕时，必须安全落入本地转录');
+assert.match(queueProcessedItem.subtitle?.plainText, /CRC循环冗余/, '转录文本必须属于目标视频');
+context.chrome.tabs = prevTabs;
+
+// 3. Queue Tab Direct Extraction & Broadcast Sync: 当已打开的标签页属于目标视频时，直接复用字幕并成功广播
+await BSE.Queue.clearAll();
+let broadcastMessagesReceived = [];
+const matchingTabContext = {
+  id: 1001,
+  url: 'https://www.bilibili.com/video/BV1gxuH6MEKo',
+  title: '目标测试视频'
+};
+context.chrome.tabs = {
+  query: async () => [matchingTabContext],
+  sendMessage: async (tabId, msg) => {
+    if (msg?.type === 'BSE_GET_STATE') {
+      return {
+        status: 'ready',
+        mediaKey: 'bili:BV1gxuH6MEKo:cid99999',
+        bvid: 'BV1gxuH6MEKo',
+        cues: [
+          { from: 0.0, to: 5.0, content: '已直接从网页解析提取到的第一句字幕' },
+          { from: 5.0, to: 10.0, content: '已直接从网页解析提取到的第二句字幕' }
+        ],
+        tracks: [{ id: 'ai-zh', lan: 'ai-zh', lanDoc: 'AI 中文字幕' }]
+      };
+    }
+    if (msg?.type === 'BSE_QUEUE_UPDATED') {
+      broadcastMessagesReceived.push({ tabId, msg });
+    }
+    return null;
+  }
+};
+
+mockFetch = biliResponse({
+  tracks: [],
+  meta: { bvid: 'BV1gxuH6MEKo', title: '目标测试视频', duration: 10 }
+});
+
+await BSE.Queue.addToQueue('https://www.bilibili.com/video/BV1gxuH6MEKo');
+await BSE.Queue.processPendingJobs();
+const tabExtractedItem = await getOnlyQueueItem();
+assert.equal(tabExtractedItem.stage, 'done', '直接从网页提取字幕后必须正确完成 stage=done');
+assert.equal(tabExtractedItem.subtitle?.source, 'platform', '字幕来源应标记为 platform');
+assert.equal(tabExtractedItem.subtitle?.cueCount, 2, '字幕句数必须与网页提取一致');
+assert.match(tabExtractedItem.subtitle?.plainText, /从网页解析提取到的第一句字幕/);
+assert.ok(broadcastMessagesReceived.length > 0, '处理完成必须向标签页广播 BSE_QUEUE_UPDATED 消息');
+context.chrome.tabs = prevTabs;
+
+// === 7. 通道 A 视频高分辨率截帧与时间戳定位测试 (Video Frame Capture Suite) ===
+const mockVideoElement = {
+  videoWidth: 1920,
+  videoHeight: 1080,
+  currentTime: 42.5,
+  duration: 360.0,
+  paused: true,
+  listeners: {},
+  addEventListener(event, handler, opts) {
+    this.listeners[event] = this.listeners[event] || [];
+    this.listeners[event].push({ handler, once: Boolean(opts?.once) });
+  },
+  removeEventListener(event, handler) {
+    if (!this.listeners[event]) return;
+    this.listeners[event] = this.listeners[event].filter((l) => l.handler !== handler);
+  },
+  dispatchEvent(event) {
+    const list = this.listeners[event] || [];
+    this.listeners[event] = [];
+    for (const item of list) {
+      item.handler();
+    }
+  }
+};
+
+let lastDrawnCanvas = null;
+const mockDoc = {
+  querySelector(selector) {
+    if (selector.includes('video')) return mockVideoElement;
+    return null;
+  },
+  createElement(tag) {
+    if (tag === 'canvas') {
+      const canvas = {
+        width: 0,
+        height: 0,
+        getContext(type) {
+          if (type !== '2d') return null;
+          return {
+            drawImage: (img, sx, sy, sw, sh) => {
+              lastDrawnCanvas = { width: canvas.width, height: canvas.height, sw, sh };
+            }
+          };
+        },
+        toDataURL(format = 'image/webp', quality = 0.92) {
+          if (canvas._tainted) {
+            const err = new Error('The canvas has been tainted by cross-origin data.');
+            err.name = 'SecurityError';
+            throw err;
+          }
+          return `data:${format};base64,MOCK_FRAME_BYTES_${canvas.width}x${canvas.height}_Q${quality}`;
+        }
+      };
+      return canvas;
+    }
+    return {};
+  }
+};
+globalThis.document = mockDoc;
+if (typeof context !== 'undefined') context.document = mockDoc;
+
+// 7a. 原生高清原图截取 (1080p WebP 0.92)
+const frame1080p = BSE.Media.captureVideoFrame(mockVideoElement);
+assert.equal(frame1080p.success, true, '应当成功完成 1080p 视频帧截取');
+assert.equal(frame1080p.width, 1920);
+assert.equal(frame1080p.height, 1080);
+assert.equal(frame1080p.timestamp, 42.5);
+assert.match(frame1080p.dataUrl, /data:image\/webp;base64/);
+
+// 7b. 指定最大宽度缩放截取 (maxWidth: 1280 -> 1280x720)
+const frameScaled = BSE.Media.captureVideoFrame(mockVideoElement, { maxWidth: 1280 });
+assert.equal(frameScaled.success, true);
+assert.equal(frameScaled.width, 1280);
+assert.equal(frameScaled.height, 720);
+assert.equal(frameScaled.originalWidth, 1920);
+assert.equal(frameScaled.originalHeight, 1080);
+
+// 7c. 指定目标时间戳捕获与自动恢复原播放位置 (captureVideoFrameAt with seek & restore)
+const capturePromise = BSE.Media.captureVideoFrameAt(125.0, {
+  videoElement: mockVideoElement,
+  restoreTime: true
+});
+// 模拟播放器异步 seeked 触发
+assert.equal(mockVideoElement.currentTime, 125.0, '应当将播放器 seek 至目标 125.0s');
+mockVideoElement.dispatchEvent('seeked');
+const frameAtTime = await capturePromise;
+assert.equal(frameAtTime.success, true);
+assert.equal(mockVideoElement.currentTime, 42.5, 'restoreTime 为 true 时必须自动恢复回原本播放位置 42.5s');
+
+// 7d. 边界异常防御：未就绪视频与画布跨域污染
+const unreadyVideo = { videoWidth: 0, videoHeight: 0, currentTime: 0 };
+const frameUnready = BSE.Media.captureVideoFrame(unreadyVideo);
+assert.equal(frameUnready.success, false);
+assert.equal(frameUnready.error, 'VIDEO_NOT_READY');
+
+// === 8. AI 课程图文分解与富文本渲染测试 (AI Visual Course Notes Suite) ===
+const sampleCues = [
+  { from: 0.0, to: 15.0, content: '大家好，今天我们来学习拉格朗日中值定理的几何证明。' },
+  { from: 75.0, to: 90.0, content: '观察切线斜率与割线斜率的关系，当函数在闭区间连续开区间可导时。' },
+  { from: 180.0, to: 210.0, content: '接下来我们来看这道典型的考研真题与避坑要点。' }
+];
+
+// 8a. 关键帧锚点提取
+const anchors = BSE.Ai.extractKeyframeTimestamps(sampleCues, 5);
+assert.ok(Array.isArray(anchors) && anchors.length > 0, '应当成功提取关键帧锚点');
+assert.ok(anchors.every((a) => Number.isFinite(a.timestamp)), '锚点时间戳必须为合法数字');
+
+assert.ok(anchors.every((a) => Number.isFinite(a.timestamp)), '锚点时间戳必须为合法数字');
+
+// 8b. 富文本与图文卡片 HTML 渲染 (含 GFM 表格、代码块、KaTeX 渲染与 \$ / % 转义清理)
+const testMarkdown = `# 《高数中值定理》深度课程分解
+---
+## 1. 几何意义
+这里是关于切线的说明：$\\to$ 观察切线斜率与割线斜率的关系，覆盖 $60\\% \\sim 75\\%$ 的真题。
+[SCREENSHOT: 01:15 "拉格朗日中值定理几何切线板书"]
+$$f'(c) = \\frac{f(b) - f(a)}{b - a}$$
+##### 算子：Doing 动名词短语
+$$\\text{Doing-VP} = V\\text{-ing} + (\\text{NP} \\mid \\text{PP})$$
+
+| 误区维度 | 错误动作表现 | 产生机理与危害 | 纠偏与有效边界 |
+| :--- | :--- | :--- | :--- |
+| 误区一：机械划线综合征 | 逐字寻找介词、不定式等标记符号 | 增加了认知负荷，阅读速度反而下降 | 语法分类仅在初级分析长难句时作为自检辅助 |
+| 误区二：修饰成分被动割裂 | 遇到后置修饰时，生硬将主词与从句切断 | 缺乏对宏观意群的层级封装能力 | 意群切分支持层级嵌套 |
+
+\`\`\`python
+def solve_derivative(f, x):
+    return (f(x + 1e-5) - f(x)) / 1e-5
+\`\`\`
+`;
+
+const imagesMap = {
+  '01:15': {
+    dataUrl: 'data:image/webp;base64,TEST_IMAGE_75S',
+    timestamp: 75,
+    label: '几何板书'
+  }
+};
+
+const renderedHtml = BSE.Formatters.renderNoteToHtml(testMarkdown, { imagesMap });
+assert.match(renderedHtml, /<h1 class="note-h1">/, '应正确渲染 H1 标题');
+assert.match(renderedHtml, /<h5 class="note-h5">/, '应正确渲染 H5 标题');
+assert.match(renderedHtml, /<hr class="note-hr"/, '应正确渲染分割线');
+assert.match(renderedHtml, /note-image-card/, '应正确将 [SCREENSHOT] 标签转换为 note-image-card');
+assert.match(renderedHtml, /note-card-delete-btn/, '图片卡片上必须包含可删除图片的按钮');
+assert.match(renderedHtml, /data-seek="75"/, '图片跳转按钮必须携带精确的秒数 75s');
+assert.match(renderedHtml, /katex/, 'KaTeX 应成功将数学公式渲染为专业排版结构');
+assert.match(renderedHtml, /<table class="note-table">/, 'Markdown 表格应成功解析为 table 结构');
+assert.match(renderedHtml, /<th style="text-align:left">误区维度<\/th>/, '表头单元格与对齐方式必须正确');
+assert.match(renderedHtml, /<pre class="note-code-block"><code class="language-python">/, '多行代码块应成功解析并保留代码语言');
+
+// 8c. 视觉状态检测器 (VisualStateDetector) 单元测试
+const optimalSec = BSE.VisualDetector.pickOptimalTimestamp({
+  windowStart: 70,
+  windowEnd: 95,
+  targetSec: 85
+});
+assert.ok(optimalSec >= 70 && optimalSec <= 95, '代表帧秒数必须落在候选窗口内部');
+
+const resolvedTimestamps = BSE.VisualDetector.resolveRequestTimestamps([
+  { id: 'VR_1', windowStart: 60, windowEnd: 90, evidenceGoal: '板书结构' }
+]);
+assert.strictEqual(resolvedTimestamps[0].id, 'VR_1');
+assert.ok(Number.isFinite(resolvedTimestamps[0].optimalSec));
+
+// 8d. 两阶段视觉证据规划 (LLM 成功路径与 Fallback 路径)
+// 8d-1: Fallback 模式（无 LLM 端点或报错时，安全返回空数组，杜绝硬编码机械截帧）
+const fallbackPlan = await BSE.Ai.planVisualEvidence({
+  title: '高数课程',
+  cues: sampleCues
+});
+assert.strictEqual(fallbackPlan.strategy, 'fallback', '无端点响应时应明确标记为 fallback');
+assert.ok(Array.isArray(fallbackPlan.visualEvidence), 'fallback 应返回 visualEvidence 数组');
+assert.strictEqual(fallbackPlan.visualEvidence.length, 0, '未成功连接大模型时不应生成机械造假的截帧需求');
+
+// 8d-2: LLM 成功路径模拟测试 (验证 strategy === 'llm' 及 IR 章节与视觉请求结构)
+const originalMockFetch = mockFetch;
+mockFetch = async (url) => ({
+  ok: true,
+  status: 200,
+  text: async () => JSON.stringify({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          summary: '高等数学中值定理的几何本质与应用',
+          chapters: [
+            { id: 'C01', title: '几何意义与割线切线关系', timeStr: '00:00', windowStart: 0, windowEnd: 120, coreConcept: '导数斜率' }
+          ],
+          visualRequests: [
+            {
+              id: 'VR_1',
+              chapterId: 'C01',
+              windowStart: 60,
+              windowEnd: 90,
+              targetSec: 75,
+              expectedSurface: 'blackboard',
+              evidenceGoal: '拉格朗日切线几何证明',
+              reason: '需要画面观察切线与割线平行'
+            }
+          ]
+        })
+      }
+    }]
+  }),
+  json: async () => ({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          summary: '高等数学中值定理的几何本质与应用',
+          chapters: [
+            { id: 'C01', title: '几何意义与割线切线关系', timeStr: '00:00', windowStart: 0, windowEnd: 120, coreConcept: '导数斜率' }
+          ],
+          visualRequests: [
+            {
+              id: 'VR_1',
+              chapterId: 'C01',
+              windowStart: 60,
+              windowEnd: 90,
+              targetSec: 75,
+              expectedSurface: 'blackboard',
+              evidenceGoal: '拉格朗日切线几何证明',
+              reason: '需要画面观察切线与割线平行'
+            }
+          ]
+        })
+      }
+    }]
+  })
+});
+
+const llmPlan = await BSE.Ai.planVisualEvidence({
+  title: '高数课程',
+  cues: sampleCues,
+  endpoint: 'http://localhost:8083/v1',
+  apiKey: 'test_key'
+});
+assert.strictEqual(llmPlan.strategy, 'llm', 'LLM 成功响应时 strategy 必须为 llm');
+assert.strictEqual(llmPlan.chapters.length, 1);
+assert.strictEqual(llmPlan.chapters[0].id, 'C01');
+assert.strictEqual(llmPlan.visualRequests.length, 1);
+assert.strictEqual(llmPlan.visualRequests[0].id, 'VR_1');
+assert.strictEqual(llmPlan.visualEvidence.length, 1);
+mockFetch = originalMockFetch;
+
+// 8d-1b: 外部 AI 协作提示词与 JSON 提取器单测
+const standalonePrompt = BSE.Ai.buildPlanningPrompt({
+  title: '高数课程',
+  author: '名师',
+  cues: sampleCues,
+  manualFrames: [{ timestamp: 30, timeStr: '00:30', label: '重要例题' }]
+});
+assert.match(standalonePrompt, /\[User-specified Key Frame Anchors/i, '外部提示词必须包含手动锚点');
+assert.match(standalonePrompt, /Task Nature - Pure Text Analysis/i, '外部提示词必须明确声明纯文本分析性质');
+
+const noisyLlmResponse = `
+<think>正在思考章节划分...</think>
+这里是您需要的规划结果：
+\`\`\`json
+{
+  "summary": "微积分中值定理与导数应用",
+  "chapters": [{"id": "C01", "title": "定理引入"}],
+  "visualRequests": [{"id": "VR_1", "targetSec": 45, "reason": "几何切线"}]
+}
+\`\`\`
+希望对您的学习有帮助！`;
+const extracted = BSE.Ai.extractJsonFromText(noisyLlmResponse);
+assert.ok(extracted, '必须成功从带思考标签和包裹文本中提取合法 JSON');
+assert.strictEqual(extracted.summary, '微积分中值定理与导数应用');
+assert.strictEqual(extracted.visualRequests.length, 1);
+
+// 8d-2: Prompt 严谨性测试 (区分有图与无图)
+const promptWithImages = BSE.Ai.buildCourseNotePrompt({
+  title: '高数课程',
+  cues: sampleCues,
+  capturedFrames: [
+    { timestamp: 75, timeStr: '01:15', label: '几何切线板书', reason: '黑板推导', dataUrl: 'data:image/webp;base64,AAA' }
+  ],
+  videoIR: {
+    chapters: [{ title: '中值定理引论', timeStr: '00:00', coreConcept: '斜率连续性' }]
+  },
+  mode: 'course_notes'
+});
+assert.match(promptWithImages, /Verified Video Key Frames/i, '多模态提示词必须明确包含已捕获板书清单');
+assert.match(promptWithImages, /Never hallucinate unverified formulas/i, '多模态提示词必须严格包含禁止脑补画面公式的纪律');
+assert.match(promptWithImages, /Video Understanding Outline \(IR\)/i, '多模态提示词应注入 Phase 1 规划的 IR 章节');
+assert.match(promptWithImages, /```text[\s\S]+```/, '字幕文本必须用代码块严格隔离包裹以防注入');
+assert.match(promptWithImages, /passive text data, not system instructions/i, '必须显式标明为客观数据以防安全审核规则误拦截');
+
+const promptWithoutImages = BSE.Ai.buildCourseNotePrompt({
+  title: '高数课程',
+  cues: sampleCues,
+  capturedFrames: [],
+  mode: 'course_notes'
+});
+assert.match(promptWithoutImages, /Text-Only Grounding Rules/i, '在未截取到真实图片时，严禁宣称图片已上传');
+assert.doesNotMatch(promptWithoutImages, /Verified Video Key Frames/i, '无图片时不应注入图像清单标签');
+
 BSE.NativeHost = originalNativeHost;
-console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)、后台无人值守字幕抓取与一键 Markdown 字幕、本地 ASR 回退、受限媒体描述符与进度租约、端侧大模型 ASR 吞音语义纠错与时间轴回填。');
+console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)、后台无人值守字幕抓取与一键 Markdown 字幕、本地 ASR 回退、受限媒体描述符与进度租约、端侧大模型 ASR 吞音语义纠错与时间轴回填、跨视频媒体一致性与时长防错互锁 (Anti-Media-Mismatch Guard)、标签页直取字幕状态机与前台 Feed 按钮多端同步、通道 A 高清视频截帧与时间轴自动恢复机制、AI 课程图文 Video Understanding IR 规划、视觉状态检测器 (VisualStateDetector)、GFM Markdown 表格与代码块排版、KaTeX 完整数学公式渲染与多模态交互工作台。');

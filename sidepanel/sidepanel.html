@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>SparkSub - 侧边栏</title>
+  <link rel="stylesheet" href="../core/katex.min.css">
   <link rel="stylesheet" href="sidepanel.css">
 </head>
 <body>
@@ -150,13 +151,120 @@
       </div>
     </section>
 
-    <!-- AI Prompts View -->
+    <!-- AI Prompts & Visual Course Breakdown View -->
     <section class="ai-section" id="ai-section" hidden>
       <div class="ai-header">
-        <span class="ai-title" id="ai-title">AI 总结与学习助手</span>
-        <span class="ai-tip">点击一键复制提示词与文稿，直接粘贴至 AI</span>
+        <div class="ai-header-left">
+          <span class="ai-title" id="ai-title">🤖 课程图文分解与学习助手</span>
+          <div class="ai-model-badge" id="ai-model-badge" title="大模型连接状态">
+            <span class="badge-dot" id="ai-status-dot"></span>
+            <span class="ai-model-name" id="ai-model-name">Gemini 3.7 Flash Thinking</span>
+          </div>
+        </div>
+        <button class="ai-btn-icon" id="ai-settings-toggle" title="配置 AI 端点与 API Key">⚙️</button>
       </div>
-      <div class="ai-prompts-grid">
+
+      <!-- AI Settings Panel Drawer -->
+      <div class="ai-settings-drawer" id="ai-settings-drawer" hidden>
+        <div class="ai-settings-title">⚙️ 大模型端点与凭证配置</div>
+        <div class="ai-field-group">
+          <label class="ai-field-label" for="ai-input-endpoint">API 端点 (Base URL)</label>
+          <input type="text" id="ai-input-endpoint" class="ai-text-input" placeholder="http://localhost:8083/v1" />
+        </div>
+        <div class="ai-field-group">
+          <label class="ai-field-label" for="ai-input-apikey">API Key (令牌)</label>
+          <input type="password" id="ai-input-apikey" class="ai-text-input" placeholder="sk-..." />
+        </div>
+        <div class="ai-field-group">
+          <label class="ai-field-label" for="ai-input-model">模型名称 (Model)</label>
+          <input type="text" id="ai-input-model" class="ai-text-input" placeholder="gemini-3.7-flash-thinking" />
+        </div>
+        <div class="ai-settings-actions">
+          <button class="btn-ai-action-secondary" id="ai-btn-test-conn">测试连接</button>
+          <button class="btn-ai-action-primary" id="ai-btn-save-settings">保存配置</button>
+        </div>
+        <div class="ai-test-status" id="ai-test-status"></div>
+      </div>
+
+      <!-- Mode Selector Tabs -->
+      <div class="ai-modes-bar">
+        <button class="ai-mode-pill active" data-mode="course_notes">🎓 课程图文分解</button>
+        <button class="ai-mode-pill" data-mode="summary">📝 核心主旨脉络</button>
+        <button class="ai-mode-pill" data-mode="deep_qa">💡 难点辨析与自测</button>
+        <button class="ai-mode-pill" data-mode="prompts">📋 提示词库</button>
+      </div>
+
+      <!-- Action Toolbar -->
+      <div class="ai-action-toolbar" id="ai-action-toolbar">
+        <button class="btn-ai-run" id="ai-btn-generate">
+          <span class="btn-icon">✨</span>
+          <span id="ai-btn-generate-text">生成图文课程讲义</span>
+        </button>
+        <button class="btn-ai-tool" id="ai-btn-snip-frame" title="截取当前播放位置的高清原画并加入笔记">
+          <span>📸 截当前帧</span>
+        </button>
+        <button class="btn-ai-tool" id="ai-btn-copy-note" title="复制生成的 Markdown 笔记" disabled>
+          <span>📋 复制笔记</span>
+        </button>
+        <button class="btn-ai-tool" id="ai-btn-export-zip" title="打包导出为包含图片的 Markdown 压缩包 (Obsidian/Notion 直读)" disabled>
+          <span>📦 导出图文包</span>
+        </button>
+      </div>
+
+      <!-- External Web AI Copilot Toolbar -->
+      <div class="ai-external-toolbar" id="ai-external-toolbar">
+        <button class="btn-ai-subtool" id="ai-btn-copy-plan-prompt" title="【阶段一：视觉规划】复制大纲规划提示词与字幕，发给网页版 AI 获取截图时间点 JSON">
+          <span class="subtool-icon">📋</span>
+          <span>1. 复制规划词</span>
+        </button>
+        <button class="btn-ai-subtool" id="ai-btn-copy-synth-prompt" title="【阶段二：讲义合成】复制图文合成提示词（已自动打包已截取的画面清单与标签），发给网页版 AI 编写完整讲义">
+          <span class="subtool-icon">📝</span>
+          <span>2. 复制讲义词</span>
+        </button>
+        <button class="btn-ai-subtool" id="ai-btn-open-import-modal" title="【回流】导入外部 AI 返回的规划 JSON（自动定向截取原画）或最终 Markdown 讲义（直接图文渲染）">
+          <span class="subtool-icon">📥</span>
+          <span>3. 导入结果</span>
+        </button>
+      </div>
+
+      <!-- Manual Snipped Frames Tray (Pre-generation) -->
+      <div class="ai-manual-tray" id="ai-manual-tray" hidden>
+        <div class="ai-manual-tray-header">
+          <span class="ai-manual-tray-title">🖼️ 已捕获画面 (<span id="ai-manual-tray-count">0</span>)</span>
+          <div class="ai-manual-tray-actions">
+            <div class="btn-tray-drag" id="btn-drag-all-tray" draggable="true" title="按住直接拖入左侧网页版 ChatGPT / Claude / DeepSeek 对话框，一次性无损上传全部独立原画！">
+              <span>🖐️ 拖拽全部</span>
+            </div>
+            <button class="btn-tray-action" id="btn-copy-stitched-tray" title="将所有截图自动拼成一张带时间戳的高清板书长图，直接复制到剪贴板（去网页 AI 直接按 Ctrl+V 粘贴即可）">
+              <span>🖼️ 复制长图</span>
+            </button>
+            <button class="btn-tray-action" id="btn-download-tray-images" title="将所有截图打包为 ZIP 压缩包下载到本地，可直接批量拖入网页版 AI">
+              <span>📦 打包下载</span>
+            </button>
+            <button class="btn-clear-manual-tray" id="btn-clear-manual-tray" title="清空所有预选截图">清空</button>
+          </div>
+        </div>
+        <div class="ai-manual-tray-list" id="ai-manual-tray-list"></div>
+      </div>
+
+      <!-- Live Generation Status / Progress -->
+      <div class="ai-progress-box" id="ai-progress-box" hidden>
+        <div class="ai-spinner"></div>
+        <span class="ai-progress-text" id="ai-progress-text">正在分析视频时间轴与关键板书…</span>
+      </div>
+
+      <!-- Rendered Note Container -->
+      <div class="ai-note-result-container" id="ai-note-result-container">
+        <div class="ai-note-placeholder" id="ai-note-placeholder">
+          <div class="placeholder-icon">💡</div>
+          <div class="placeholder-title">点击上方「生成图文课程讲义」</div>
+          <p class="placeholder-desc">AI 将自动解构视频知识脉络，提取核心公式、定理推导与避坑边界，并在关键节点自动截取原画板书，生成图文并茂的交互式讲义。</p>
+        </div>
+        <div class="ai-note-content" id="ai-note-content" hidden></div>
+      </div>
+
+      <!-- Legacy Prompts View (Shown when 'prompts' mode is selected) -->
+      <div class="ai-prompts-grid" id="ai-prompts-grid" hidden>
         <button class="ai-prompt-card" data-prompt="polish">
           <div class="ai-card-top">
             <strong class="ai-card-title" id="ai-card-polish">吞音纠错与口语润色</strong>
@@ -335,23 +443,28 @@
     <details class="diagnostics" id="diagnostics">
       <summary class="diag-summary">
         <div class="diag-summary-left">
-          <span class="diag-icon">⚡</span>
-          <span class="diag-title" id="diag-title">诊断信息</span>
-          <span class="diag-pill" id="diagnostic-summary">等待就绪</span>
+          <span class="diag-status-dot" aria-hidden="true"></span>
+          <strong class="diag-title" id="diagnostic-status-title">等待视频</strong>
+          <span class="diag-status-meta" id="diagnostic-status-detail" aria-live="polite">打开视频后自动检查</span>
         </div>
         <div class="diag-summary-right">
-          <button id="copy-diagnostic-button" type="button" class="diag-copy-btn" title="复制完整诊断日志">
+          <button id="copy-diagnostic-button" type="button" class="diag-copy-btn" title="复制完整诊断日志" aria-label="复制完整诊断日志">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            <span>复制</span>
           </button>
         </div>
       </summary>
       <div class="diag-body">
-        <div class="diag-alert" id="diag-alert" hidden>
-          <strong id="diagnostic-code">尚无错误</strong>
-          <span id="diagnostic-hint">提取过程会在这里显示每个请求阶段。</span>
-        </div>
-        <pre class="diag-log-view" id="diagnostic-text">暂无诊断信息</pre>
+        <section class="diag-activity" id="diagnostic-activity" aria-labelledby="diagnostic-activity-title" hidden>
+          <div class="diag-section-title" id="diagnostic-activity-title">关键记录</div>
+          <ol class="diag-timeline" id="diagnostic-timeline"></ol>
+        </section>
+        <details class="diag-technical" id="diagnostic-technical">
+          <summary>
+            <span id="diagnostic-technical-label">技术详情</span>
+            <span class="diag-technical-count" id="diagnostic-technical-count">· 0</span>
+          </summary>
+          <pre class="diag-log-view" id="diagnostic-text">暂无诊断信息</pre>
+        </details>
       </div>
     </details>
   </main>
@@ -484,15 +597,41 @@
     </div>
   </div>
 
+  <!-- External AI Import Modal Overlay -->
+  <div class="ai-import-modal-overlay" id="ai-import-modal" hidden>
+    <div class="ai-import-modal-card">
+      <div class="ai-import-modal-header">
+        <div class="ai-import-modal-title">
+          <span class="modal-icon">📥</span>
+          <strong>导入外部 AI 结果</strong>
+        </div>
+        <button class="btn-modal-close" id="ai-btn-close-import-modal" title="关闭">✕</button>
+      </div>
+      <p class="ai-import-modal-desc">
+        在此粘贴外部大模型（ChatGPT / DeepSeek / Claude / Kimi 等）返回的 <b>规划 JSON</b>（扩展将自动在视频中为您精准定向截取原画），或直接粘贴已写好的 <b>Markdown 讲义</b>。
+      </p>
+      <textarea class="ai-import-textarea" id="ai-import-textarea" placeholder="在此粘贴外部大模型返回的内容 (支持带代码块、思考过程或纯文本)..."></textarea>
+      <div class="ai-import-modal-footer">
+        <button class="btn-secondary" id="ai-btn-cancel-import">取消</button>
+        <button class="btn-primary" id="ai-btn-confirm-import">确认并开始处理</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast" role="status"></div>
   <script src="../core/namespace.js"></script>
+  <script src="../core/diagnostics.js"></script>
+  <script src="../core/diagnostic-presenter.js"></script>
   <script src="../core/utils.js"></script>
   <script src="../core/jszip.js"></script>
   <script src="../core/i18n.js"></script>
   <script src="../core/language-routing.js"></script>
+  <script src="../core/native-host.js"></script>
   <script src="../core/queue-ui.js"></script>
   <script src="../core/parsers.js"></script>
   <script src="../core/media.js"></script>
+  <script src="../core/visual-state-detector.js"></script>
+  <script src="../core/katex.min.js"></script>
   <script src="../core/formatters.js"></script>
   <script src="../core/asr-polisher.js"></script>
   <script src="../platform/bilibili.js"></script>

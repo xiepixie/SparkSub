@@ -157,11 +157,10 @@ enum CueBuilder {
         var cues: [Cue] = []
         for (text, window) in zip(transcripts, windows) {
             let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !content.isEmpty, window.endSample > window.startSample else { continue }
             let windowStart = Double(window.startSample) / Double(sampleRate)
             let windowEnd = Double(window.endSample) / Double(sampleRate)
             let duration = windowEnd - windowStart
-            guard duration >= 2 else { continue }
+            guard duration > 0 else { continue }
             let characters = Array(content)
             let desiredCount = max(1, Int(ceil(duration / 8)))
             let segmentCount = min(desiredCount, characters.count)
@@ -176,8 +175,8 @@ enum CueBuilder {
                 characterIndex += length
                 guard !segmentText.isEmpty else { continue }
                 let start = windowStart + Double(index) * stride
-                let end = min(windowEnd, start + min(8, max(2, stride)))
-                let cue = Cue(from: start, to: end, content: segmentText)
+                let end = min(windowEnd, start + max(0.1, stride))
+                let cue = Cue(from: start, to: max(end, start + 0.1), content: segmentText)
                 if cue.isValid { cues.append(cue) }
             }
         }

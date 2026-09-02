@@ -2,21 +2,25 @@
 
 try {
   importScripts(
-    '/core/namespace.js',
-    '/core/utils.js',
-    '/core/i18n.js',
-    '/core/parsers.js',
-    '/core/media.js',
-    '/core/formatters.js',
-    '/core/asr-polisher.js',
-    '/core/tracker.js',
-    '/core/native-host.js',
-    '/core/queue-orchestrator.js',
-    '/core/queue.js'
+    '../core/namespace.js',
+    '../core/diagnostics.js',
+    '../core/utils.js',
+    '../core/jszip.js',
+    '../core/i18n.js',
+    '../core/parsers.js',
+    '../core/media.js',
+    '../core/formatters.js',
+    '../core/asr-polisher.js',
+    '../core/tracker.js',
+    '../core/native-host.js',
+    '../core/queue-orchestrator.js',
+    '../core/queue.js'
   );
 } catch (e) {
-  console.warn('[BSE Worker] importScripts 异常:', e);
+  console.error('[BSE Worker] importScripts 致命异常:', e);
 }
+
+const BSE = globalThis.BSE || {};
 
 /** @type {Map<number, import('../types/bse').AppState>} */
 const tabStates = new Map();
@@ -50,6 +54,22 @@ function setupContextMenus() {
   } catch {}
 }
 
+function safeNotification(options) {
+  try {
+    if (!chrome.notifications?.create) return;
+    const iconUrl = chrome.runtime.getURL('icons/icon-128.png');
+    const opts = { type: 'basic', iconUrl, priority: 1, ...options };
+    const p = chrome.notifications.create(opts, () => {
+      if (chrome.runtime.lastError) {
+        // Silently consume icon or permission warnings
+      }
+    });
+    if (p && typeof p.catch === 'function') {
+      p.catch(() => {});
+    }
+  } catch {}
+}
+
 if (chrome.contextMenus?.onClicked) {
   chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     if (info.menuItemId === 'sparksub_add_to_queue') {
@@ -58,15 +78,10 @@ if (chrome.contextMenus?.onClicked) {
         const added = await BSE.Queue?.addToQueue(targetUrl);
         if (added?.length) {
           await startQueueExecutor();
-          if (chrome.notifications) {
-            chrome.notifications.create({
-              type: 'basic',
-              iconUrl: chrome.runtime.getURL('icons/icon-128.png'),
-              title: 'SparkSub 已加入转录队列',
-              message: `已将《${added[0].title}》加入后台队列，正在转录…`,
-              priority: 1
-            });
-          }
+          safeNotification({
+            title: 'SparkSub 已加入转录队列',
+            message: `已将《${added[0].title}》加入后台队列，正在转录…`
+          });
         }
       }
     }
@@ -152,13 +167,15 @@ async function setupBilibiliNetRules() {
 }
 
 if (typeof chrome !== 'undefined' && chrome.runtime) {
-  chrome.runtime.onInstalled?.addListener(setupBilibiliNetRules);
+  chrome.runtime.onInstalled?.addListener(() => {
+    setupBilibiliNetRules().catch(() => {});
+  });
   chrome.runtime.onStartup?.addListener(() => {
-    setupBilibiliNetRules();
+    setupBilibiliNetRules().catch(() => {});
     startQueueExecutor().catch((err) => console.warn('[SparkSub ServiceWorker] 队列执行异常:', err));
   });
 }
-setupBilibiliNetRules();
+setupBilibiliNetRules().catch(() => {});
 
 if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -494,12 +511,14 @@ async function injectContentScripts(tabId, url = '') {
       world: 'ISOLATED',
       files: [
         'core/namespace.js',
+        'core/diagnostics.js',
         'core/utils.js',
         'core/jszip.js',
         'core/i18n.js',
         'core/parsers.js',
         'core/media.js',
         'core/formatters.js',
+        'core/asr-polisher.js',
         'core/tracker.js',
         'core/queue.js',
         'platform/youtube.js',
@@ -541,12 +560,9 @@ if (chrome.alarms?.onAlarm) {
         const settings = await BSE.Tracker?.getSettings?.() || { enableNotification: true };
         if (settings.enableNotification && updatedSubs.length > 0) {
           const t = (k, p) => BSE.I18n?.t(k, p) || k;
-          chrome.notifications?.create({
-            type: 'basic',
-            iconUrl: chrome.runtime.getURL('icons/icon-128.png'),
+          safeNotification({
             title: 'SparkSub 订阅更新提醒',
-            message: `发现 ${updatedSubs.length} 个订阅源有新更新：${updatedSubs.map((s) => s.title).slice(0, 3).join('、')}`,
-            priority: 1
+            message: `发现 ${updatedSubs.length} 个订阅源有新更新：${updatedSubs.map((s) => s.title).slice(0, 3).join('、')}`
           });
         }
       } catch (err) {
@@ -767,15 +783,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'BSE_FETCH_NATIVE_YOUTUBE_CAPTIONS') {
+    (async () => {
+      try {
+        if (!BSE.NativeHost?.fetchYouTubeCaptions) {
+          throw new Error('NativeHost is not initialized in background');
+        }
+        const res = await BSE.NativeHost.fetchYouTubeCaptions(message.payload);
+        sendResponse({ success: true, result: res });
+      } catch (err) {
+        sendResponse({ success: false, error: err?.message || String(err) });
+      }
+    })();
+    return true;
+  }
+
   if (message.type === 'BSE_FETCH_LOCAL_LLM') {
     const url = message.url;
     const body = message.body;
-    const timeoutMs = Math.max(60000, Number(message.timeoutMs) || 90000);
+    const timeoutMs = Math.max(60000, Number(message.timeoutMs) || 120000);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(message.headers || {})
+    };
     const options = {
       method: body ? 'POST' : 'GET',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       ...(body ? { body: typeof body === 'string' ? body : JSON.stringify(body) } : {}),
       signal: controller.signal
     };

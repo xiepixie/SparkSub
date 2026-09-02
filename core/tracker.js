@@ -311,12 +311,17 @@
         bvid: s.bvid ? String(s.bvid).slice(0, 64) : '',
         latestBvid: s.latestBvid ? String(s.latestBvid).slice(0, 64) : '',
         unreadCount: Math.min(Number(s.unreadCount) || 0, maxHistory),
+        lastReadPubdate: Number(s.lastReadPubdate) || 0,
+        lastReadItemId: String(s.lastReadItemId || '').slice(0, 256),
         items: Array.isArray(s.items) ? s.items.slice(0, maxHistory).map((item) => ({
           ...item,
           id: String(item.id || '').slice(0, 256),
           title: String(item.title || '').slice(0, 500),
           author: String(item.author || '').slice(0, 200),
           url: String(item.url || '').slice(0, 2048),
+          pubdate: Number(item.pubdate) || 0,
+          duration: Number(item.duration) || 0,
+          isRead: Boolean(item.isRead),
           subtitle: item.subtitle ? {
             ...item.subtitle,
             markdown: undefined,
@@ -408,6 +413,8 @@
       latestBvid: subData.latestBvid || prev?.latestBvid || subData.bvid || '',
       subscribedAt: prev ? prev.subscribedAt : (subData.subscribedAt || now),
       lastCheckedAt: subData.lastCheckedAt !== undefined ? subData.lastCheckedAt : (prev ? prev.lastCheckedAt : 0),
+      lastReadPubdate: subData.lastReadPubdate !== undefined ? subData.lastReadPubdate : (prev ? prev.lastReadPubdate : 0),
+      lastReadItemId: subData.lastReadItemId || prev?.lastReadItemId || '',
       lastUpdatedItemId: subData.lastUpdatedItemId || prev?.lastUpdatedItemId || '',
       lastUpdatedTitle: subData.lastUpdatedTitle || prev?.lastUpdatedTitle || '',
       unreadCount: subData.unreadCount !== undefined ? subData.unreadCount : (prev ? prev.unreadCount : 0),
@@ -453,15 +460,32 @@
 
     if (!itemId) {
       sub.unreadCount = 0;
+      const maxPub = (sub.items || []).reduce((max, i) => Math.max(max, Number(i.pubdate) || 0), 0);
+      sub.lastReadPubdate = maxPub || Date.now();
+      sub.lastReadItemId = sub.items?.[0]?.id || '';
+      (sub.items || []).forEach((item) => { item.isRead = true; });
     } else {
+      const item = (sub.items || []).find((i) => i.id === itemId);
+      if (item) item.isRead = true;
       sub.unreadCount = Math.max(0, (sub.unreadCount || 0) - 1);
+      if (sub.unreadCount === 0) {
+        const maxPub = (sub.items || []).reduce((max, i) => Math.max(max, Number(i.pubdate) || 0), 0);
+        sub.lastReadPubdate = maxPub || Date.now();
+        sub.lastReadItemId = sub.items?.[0]?.id || '';
+      }
     }
     await saveSubscriptions(list);
   }
 
   async function markAllAsRead() {
     const list = await getSubscriptions();
-    list.forEach((s) => { s.unreadCount = 0; });
+    list.forEach((s) => {
+      s.unreadCount = 0;
+      const maxPub = (s.items || []).reduce((max, i) => Math.max(max, Number(i.pubdate) || 0), 0);
+      s.lastReadPubdate = maxPub || Date.now();
+      s.lastReadItemId = s.items?.[0]?.id || '';
+      (s.items || []).forEach((item) => { item.isRead = true; });
+    });
     await saveSubscriptions(list);
   }
 
@@ -627,6 +651,7 @@
                       if (!epBvid) continue;
                       epList.push({
                         id: epBvid,
+                        cid: ep.cid || ep.page?.cid || ep.arc?.cid,
                         title: String(ep.title || ep.arc?.title || '').trim(),
                         url: `https://www.bilibili.com/video/${epBvid}`,
                         pubdate: (Number(ep.arc?.pubdate) || 0) * 1000,
@@ -730,8 +755,13 @@
     if (!sub.lastCheckedAt && existingIds.size === 0) {
       sub.items = fetchedItems.slice(0, maxItems);
       sub.lastCheckedAt = Date.now();
+      const maxPub = (fetchedItems || []).reduce((max, i) => Math.max(max, Number(i.pubdate) || 0), 0);
+      sub.lastReadPubdate = maxPub || Date.now();
+      sub.lastReadItemId = fetchedItems[0]?.id || '';
       sub.lastUpdatedItemId = fetchedItems[0]?.id || '';
       sub.lastUpdatedTitle = fetchedItems[0]?.title || '';
+      sub.unreadCount = 0;
+      sub.items.forEach((i) => { i.isRead = true; });
       if (options.persist !== false && sub.id) {
         await updateStoredSubscription(sub);
       }
@@ -754,10 +784,21 @@
         }
       } catch {}
 
+      // 结合已读水位线精确区分新旧内容：早于或等于最后已读时间戳的内容绝不误判为未读
+      const lastRead = Number(sub.lastReadPubdate) || 0;
+      newItems.forEach((item) => {
+        if (lastRead > 0 && item.pubdate && item.pubdate <= lastRead) {
+          item.isRead = true;
+        } else {
+          item.isRead = false;
+        }
+      });
+      const trulyUnread = newItems.filter((item) => !item.isRead);
+
       // 合并并截断为最近 maxItems 条
       const merged = [...newItems, ...(sub.items || [])].slice(0, maxItems);
       sub.items = merged;
-      sub.unreadCount = Math.min(merged.length, (sub.unreadCount || 0) + newItems.length);
+      sub.unreadCount = Math.min(merged.length, (sub.unreadCount || 0) + trulyUnread.length);
       sub.lastUpdatedItemId = newItems[0].id;
       sub.lastUpdatedTitle = newItems[0].title;
       sub.lastCheckedAt = Date.now();
@@ -839,14 +880,38 @@
 
     const bvidMatch = (item.id || item.url || '').match(/BV[a-zA-Z0-9]+/i);
     const bvid = bvidMatch ? bvidMatch[0] : null;
+    const pageMatch = String(item.id || item.url || '').match(/[?&]p=(\d+)|:p(\d+)/i);
+    const pageNum = pageMatch ? parseInt(pageMatch[1] || pageMatch[2], 10) : 1;
+    const ytMatch = (item.id || item.url || '').match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/))([a-zA-Z0-9_-]{11})/);
+    const ytVideoId = ytMatch ? ytMatch[1] : (item.id && /^[a-zA-Z0-9_-]{11}$/.test(item.id) ? item.id : null);
+    const unifiedMediaKey = bvid ? `bili:${bvid}:p${pageNum}` : (ytVideoId ? `yt:${ytVideoId}` : null);
+
+    // 0. 优先命中全局统一持久化字幕缓存 (UnifiedSubtitleCache)
+    if (unifiedMediaKey && !options.force) {
+      try {
+        const cached = await BSE.Utils?.UnifiedSubtitleCache?.get(unifiedMediaKey);
+        if (cached && Array.isArray(cached.cues) && cached.cues.length > 0) {
+          return {
+            status: 'ready',
+            language: cached.language || 'zh',
+            langDoc: cached.langDoc || '字幕',
+            cueCount: cached.cueCount || cached.cues.length,
+            fetchedAt: cached.savedAt || Date.now(),
+            plainText: cached.plainText,
+            markdown: cached.markdown || formatCuesToMarkdown(cached.title || item.title, cached.author || item.author, item.url, cached.cues)
+          };
+        }
+      } catch {}
+    }
 
     if (bvid) {
       try {
         let cid = item.cid;
         let viewTitle = item.title;
+        let knownDuration = Number(item.duration || 0);
 
-        // 1. 若无 cid，请求 view 接口定位 cid
-        if (!cid) {
+        // 1. 调用权威 view 接口校验 CID 归属与真实时长
+        try {
           const viewResp = await BSE.Utils.fetchWithTimeout(
             `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
             { signal },
@@ -857,9 +922,20 @@
             viewTitle = viewJson.data.title || item.title;
             const pageMatch = String(item.id || item.url || '').match(/[?&]p=(\d+)|:p(\d+)/i);
             const pageNum = pageMatch ? parseInt(pageMatch[1] || pageMatch[2], 10) : 1;
-            const targetPage = (viewJson.data.pages || []).find((p) => p.page === pageNum) || viewJson.data.pages?.[0];
-            cid = targetPage?.cid || viewJson.data.cid;
+            const pages = viewJson.data.pages || [];
+            const targetPage = pages.find((p) => p.page === pageNum) || pages[0];
+            const validCids = new Set(pages.map((p) => Number(p.cid)));
+
+            // 强制校验 CID 必须属于当前 BVID 的分 P 拓扑
+            if (!cid || !validCids.has(Number(cid))) {
+              cid = targetPage?.cid || viewJson.data.cid;
+            }
+            if (targetPage?.duration || viewJson.data.duration) {
+              knownDuration = Number(targetPage?.duration || viewJson.data.duration);
+            }
           }
+        } catch (viewErr) {
+          if (viewErr?.name === 'AbortError') throw viewErr;
         }
 
         if (!cid) {
@@ -875,7 +951,9 @@
             5000
           );
           const j1 = await p1.json();
-          if (Array.isArray(j1?.data?.subtitle?.subtitles) && j1.data.subtitle.subtitles.length) {
+          if (j1?.data?.bvid && String(j1.data.bvid).toLowerCase() !== bvid.toLowerCase()) {
+            console.warn(`[BSE Tracker] 拦截跨视频字幕返回：请求 ${bvid}，接口返回 ${j1.data.bvid}`);
+          } else if (Array.isArray(j1?.data?.subtitle?.subtitles) && j1.data.subtitle.subtitles.length) {
             subtitles = j1.data.subtitle.subtitles;
           }
         } catch {}
@@ -890,7 +968,9 @@
               5000
             );
             const playerJson = await playerResp.json();
-            if (Array.isArray(playerJson?.data?.subtitle?.subtitles) && playerJson.data.subtitle.subtitles.length) {
+            if (playerJson?.data?.bvid && String(playerJson.data.bvid).toLowerCase() !== bvid.toLowerCase()) {
+              console.warn(`[BSE Tracker] 拦截跨视频字幕返回(签名)：请求 ${bvid}，接口返回 ${playerJson.data.bvid}`);
+            } else if (Array.isArray(playerJson?.data?.subtitle?.subtitles) && playerJson.data.subtitle.subtitles.length) {
               subtitles = playerJson.data.subtitle.subtitles;
             }
           } catch {}
@@ -940,10 +1020,28 @@
           content: String(b.content || '').trim()
         }));
 
+        // 4. 时长防错与完整度互锁 (Duration & Completeness Guard)
+        const maxCueTo = Number(cues[cues.length - 1]?.to || 0);
+        const finalDuration = knownDuration || Number(item.duration || 0);
+        if (finalDuration > 10 && maxCueTo > finalDuration + 8) {
+            return {
+            status: 'not_found',
+            errorHint: `字幕与视频时长严重不符 (视频 ${finalDuration}s / 字幕 ${Math.round(maxCueTo)}s)`,
+            fetchedAt: Date.now()
+          };
+        }
+        if (finalDuration >= 90 && maxCueTo < finalDuration * 0.35 && cues.length < 20) {
+          return {
+            status: 'not_found',
+            errorHint: `官方字幕残缺 (视频 ${finalDuration}s 但仅覆盖前 ${Math.round(maxCueTo)}s 片头)，建议使用端侧本地转录`,
+            fetchedAt: Date.now()
+          };
+        }
+
         const plainText = cues.map((c) => c.content).join(' ');
         const markdown = formatCuesToMarkdown(viewTitle || item.title, item.author, item.url, cues);
 
-        return {
+        const bResult = {
           status: 'ready',
           language: chosenSub.lan,
           langDoc: chosenSub.lan_doc || '中文',
@@ -952,44 +1050,81 @@
           plainText,
           markdown
         };
+        if (unifiedMediaKey) {
+          BSE.Utils?.UnifiedSubtitleCache?.set(unifiedMediaKey, {
+            title: viewTitle || item.title,
+            author: item.author,
+            language: chosenSub.lan,
+            langDoc: chosenSub.lan_doc || '中文',
+            cues,
+            plainText,
+            markdown
+          }).catch(() => {});
+        }
+        return bResult;
       } catch (err) {
         if (err?.name === 'AbortError') throw err;
         return { status: 'error', errorHint: err?.message || '抓取字幕超时或失败', fetchedAt: Date.now() };
       }
     }
 
-    const ytMatch = (item.id || item.url || '').match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/))([a-zA-Z0-9_-]{11})/);
-    const ytVideoId = ytMatch ? ytMatch[1] : (item.id && /^[a-zA-Z0-9_-]{11}$/.test(item.id) ? item.id : null);
-
     if (ytVideoId) {
       const ytUrl = item.url && item.url.includes('youtube.com') ? item.url : `https://www.youtube.com/watch?v=${ytVideoId}`;
       try {
-        // 1. 优先通过本机服务 Native Host fetchYouTubeCaptions 直取全量字幕
+        // 1. 优先通过本机服务 Native Host fetchYouTubeCaptions 直取全量字幕 (直接调用或跨上下文 Background 消息)
+        let nativeRes = null;
         if (BSE.NativeHost?.fetchYouTubeCaptions) {
           try {
-            const nativeRes = await BSE.NativeHost.fetchYouTubeCaptions({
+            nativeRes = await BSE.NativeHost.fetchYouTubeCaptions({
               jobId: `tracker-${ytVideoId}-${Date.now()}`,
               sourceLanguage: 'auto',
               source: { kind: 'youtube', url: ytUrl }
             }, { signal });
-            if (nativeRes?.cues && nativeRes.cues.length > 0) {
-              const cues = nativeRes.cues;
-              const plainText = cues.map((c) => c.content).join(' ');
-              const markdown = formatCuesToMarkdown(item.title, item.author, ytUrl, cues);
-              return {
-                status: 'ready',
-                language: nativeRes.language || 'zh',
-                langDoc: nativeRes.langDoc || '字幕',
-                cueCount: cues.length,
-                fetchedAt: Date.now(),
-                plainText,
-                markdown
-              };
-            }
           } catch (nativeErr) {
             if (nativeErr?.name === 'AbortError') throw nativeErr;
-            console.warn('[BSE Tracker] 本机服务提取 YouTube 字幕失败，尝试前端通道:', nativeErr);
+            console.warn('[BSE Tracker] 直接调用本机服务提取 YouTube 字幕异常:', nativeErr);
           }
+        }
+        if (!nativeRes && typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+          try {
+            const bgResp = await chrome.runtime.sendMessage({
+              type: 'BSE_FETCH_NATIVE_YOUTUBE_CAPTIONS',
+              payload: {
+                jobId: `tracker-${ytVideoId}-${Date.now()}`,
+                sourceLanguage: 'auto',
+                source: { kind: 'youtube', url: ytUrl }
+              }
+            });
+            if (bgResp?.success && bgResp?.result) {
+              nativeRes = bgResp.result;
+            }
+          } catch {}
+        }
+        if (nativeRes?.cues && nativeRes.cues.length > 0) {
+          const cues = nativeRes.cues;
+          const plainText = cues.map((c) => c.content).join(' ');
+          const markdown = formatCuesToMarkdown(item.title, item.author, ytUrl, cues);
+          const yResult = {
+            status: 'ready',
+            language: nativeRes.language || 'zh',
+            langDoc: nativeRes.langDoc || '字幕',
+            cueCount: cues.length,
+            fetchedAt: Date.now(),
+            plainText,
+            markdown
+          };
+          if (unifiedMediaKey) {
+            BSE.Utils?.UnifiedSubtitleCache?.set(unifiedMediaKey, {
+              title: item.title,
+              author: item.author,
+              language: nativeRes.language || 'zh',
+              langDoc: nativeRes.langDoc || '字幕',
+              cues,
+              plainText,
+              markdown
+            }).catch(() => {});
+          }
+          return yResult;
         }
 
         // 2. 检查是否有打开该视频的 YouTube 标签页，若有直接通过 bridge 获取
@@ -1002,7 +1137,7 @@
                 const cues = tabRes.state.cues;
                 const plainText = cues.map((c) => c.content).join(' ');
                 const markdown = formatCuesToMarkdown(item.title, item.author, ytUrl, cues);
-                return {
+                const tabResult = {
                   status: 'ready',
                   language: tabRes.state.track?.lan || 'zh',
                   langDoc: tabRes.state.track?.lanDoc || '字幕',
@@ -1011,6 +1146,18 @@
                   plainText,
                   markdown
                 };
+                if (unifiedMediaKey) {
+                  BSE.Utils?.UnifiedSubtitleCache?.set(unifiedMediaKey, {
+                    title: item.title,
+                    author: item.author,
+                    language: tabRes.state.track?.lan || 'zh',
+                    langDoc: tabRes.state.track?.lanDoc || '字幕',
+                    cues,
+                    plainText,
+                    markdown
+                  }).catch(() => {});
+                }
+                return tabResult;
               }
             }
           } catch {}
@@ -1214,6 +1361,7 @@
     calculateWbiSign,
     parseYouTubeRssFeed,
     getSubscriptions,
+    saveSubscriptions,
     getSubscription,
     addSubscription,
     removeSubscription,

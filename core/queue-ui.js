@@ -1,8 +1,9 @@
 (() => {
   'use strict';
 
+  const root = /** @type {any} */ (globalThis);
   /** @type {import('../types/bse').BSENamespace} */
-  const BSE = globalThis.BSE = globalThis.BSE || /** @type {any} */ ({});
+  const BSE = root.BSE = root.BSE || /** @type {any} */ ({});
   const ROUTING = BSE.LanguageRouting;
   const SUPPORTED_SOURCE_LANGUAGES = ROUTING?.SUPPORTED_SOURCE_LANGUAGES || Object.freeze(['auto', 'zh', 'yue', 'en']);
   const REQUIRED_I18N_KEYS = Object.freeze([
@@ -58,6 +59,31 @@
     return { key: 'queue_capability_partial' };
   }
 
+  function createCapabilityProbeState() {
+    let revision = 0;
+    /** @type {'idle' | 'checking' | 'settled'} */
+    let phase = 'idle';
+    let capabilities = null;
+    let error = null;
+    return Object.freeze({
+      begin() {
+        revision += 1;
+        phase = 'checking';
+        capabilities = null;
+        error = null;
+        return revision;
+      },
+      commit(probeRevision, result = {}) {
+        if (probeRevision !== revision) return false;
+        phase = 'settled';
+        capabilities = result.capabilities || null;
+        error = result.error || null;
+        return true;
+      },
+      snapshot() { return { phase, capabilities, error, revision }; }
+    });
+  }
+
   async function enqueueWithLanguage({ urls, sourceLanguage, sendMessage }) {
     const options = { sourceLanguage };
     const response = await sendMessage({ type: 'BSE_QUEUE_ENQUEUE', urls, options });
@@ -107,6 +133,7 @@
     safeFailurePresentation,
     componentState,
     capabilityState,
+    createCapabilityProbeState,
     enqueueWithLanguage,
     saveDefaultLanguage,
     loadDefaultLanguage,

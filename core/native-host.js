@@ -1,6 +1,8 @@
 (() => {
   'use strict';
 
+  const BSE = globalThis.BSE = globalThis.BSE || /** @type {any} */ ({});
+
   const HOST_NAME = 'com.sparksub.transcriber';
   const PROTOCOL_VERSION = 1;
   const MAX_MESSAGE_BYTES = 900 * 1024;

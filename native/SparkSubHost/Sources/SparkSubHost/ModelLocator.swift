@@ -221,7 +221,7 @@ final class ModelLocator: CapabilityProviding, @unchecked Sendable {
                     continue
                 }
                 let inputs = (try? decoderInputInspector(decoder)) ?? []
-                guard inputs.contains("k_cache_0") || inputs.contains("cache_k") else {
+                guard inputs.contains("k_cache_0") else {
                     sawIncompatibleDecoder = true
                     continue
                 }
@@ -302,14 +302,17 @@ final class ModelLocator: CapabilityProviding, @unchecked Sendable {
     }
 
     private func isCompleteCompiledModel(at url: URL) -> Bool {
+        let resolved = url.resolvingSymlinksInPath()
         var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+        guard FileManager.default.fileExists(atPath: resolved.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             return false
         }
-        let modelData = url.appendingPathComponent("coremldata.bin")
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: modelData.path),
-              let fileType = attributes[.type] as? FileAttributeType,
-              fileType == .typeRegular,
+        let modelData = resolved.appendingPathComponent("coremldata.bin")
+        guard FileManager.default.fileExists(atPath: modelData.path) else {
+            return false
+        }
+        let resolvedModelData = modelData.resolvingSymlinksInPath()
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: resolvedModelData.path),
               let size = attributes[.size] as? NSNumber else {
             return false
         }
@@ -317,7 +320,8 @@ final class ModelLocator: CapabilityProviding, @unchecked Sendable {
     }
 
     private func isNonemptyJSONVocabulary(at url: URL) -> Bool {
-        guard let data = try? Data(contentsOf: url), !data.isEmpty,
+        let resolved = url.resolvingSymlinksInPath()
+        guard let data = try? Data(contentsOf: resolved), !data.isEmpty,
               let object = try? JSONSerialization.jsonObject(with: data) else {
             return false
         }

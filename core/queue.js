@@ -11,6 +11,17 @@
   const EXECUTION_LEASE_MS = LEASE_DURATION_MS;
   const EXECUTOR_ID = `queue-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   let nativeJobSequence = 0;
+  let diagnosticReporter = null;
+
+  function emitDiagnostic(event) {
+    if (typeof diagnosticReporter === 'function') {
+      diagnosticReporter(event);
+      return;
+    }
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage({ type: 'BSE_DIAGNOSTIC_APPEND', ...event }).catch(() => {});
+    }
+  }
 
   const DEFAULT_SETTINGS = {
     maxConcurrency: 2,
@@ -745,6 +756,7 @@
     };
 
     let result;
+    let expectedEngine = 'parakeet';
     try {
       const titleText = item.title || item.metaCache?.title || '';
       const chineseMatches = titleText.match(/[\u4e00-\u9fa5]/g);
@@ -753,6 +765,7 @@
       const effectiveSourceLanguage = (item.sourceLanguage && item.sourceLanguage !== 'auto')
         ? item.sourceLanguage
         : (inferredLang || 'auto');
+      expectedEngine = BSE.LanguageRouting?.engineFor(effectiveSourceLanguage, inferredLang, source?.kind === 'remote' ? 'remote' : 'local') || (inferredLang === 'zh' ? 'cohere' : 'parakeet');
 
       result = await BSE.NativeHost.transcribe({
         jobId: nextNativeJobId(item, 'asr'),
@@ -769,7 +782,7 @@
     if (!cues.length) {
       throw nativeError('RESULT_INCOMPLETE', '本机转录结果不完整。', '本机服务没有返回有效的字幕内容。');
     }
-    cues.engine = result?.engine || 'parakeet';
+    cues.engine = result?.engine || expectedEngine;
     return cues;
   }
 
@@ -840,7 +853,17 @@
       }, { onProgress, signal });
     } catch (error) {
       if (signal?.aborted || error?.code === 'CANCELLED' || error?.name === 'AbortError') throw error;
-      console.warn('[BSE Queue] 本机服务获取 YouTube 原生字幕失败，回退至本地转录:', error);
+      if (error?.code !== 'CAPTIONS_NOT_FOUND') {
+        emitDiagnostic({
+          scope: 'queue',
+          sessionId: String(item.id || 'queue:active'),
+          level: 'warn',
+          code: 'NATIVE_CAPTION_FALLBACK',
+          stage: '本机字幕回退',
+          message: `${error?.code || 'NATIVE_CAPTION_ERROR'} · ${safeUserHint(error?.message, '本机字幕不可用')}`,
+          context: { jobId: String(item.id || '') }
+        });
+      }
       return null;
     } finally {
       await writeTail;
@@ -1059,6 +1082,15 @@
     if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
       chrome.runtime.sendMessage({ type: 'BSE_QUEUE_UPDATED' }).catch(() => {});
     }
+    if (typeof chrome !== 'undefined' && chrome.tabs?.query) {
+      chrome.tabs.query({}).then((tabs) => {
+        for (const tab of tabs) {
+          if (tab?.id) {
+            chrome.tabs.sendMessage(tab.id, { type: 'BSE_QUEUE_UPDATED' }).catch(() => {});
+          }
+        }
+      }).catch(() => {});
+    }
   }
 
   function notifyOrchestrator() {
@@ -1188,10 +1220,12 @@
       }
       item.author = vData.owner?.name || item.author;
       item.cover = vData.pic || item.cover;
+      item.duration = targetPage?.duration || vData.duration || item.duration;
       item.metaCache = {
         title: item.title,
         author: item.author,
         cover: item.cover,
+        duration: item.duration,
         cid,
         pages: (vData.pages || []).map((p) => ({ page: p.page, cid: p.cid, part: p.part }))
       };
@@ -1214,25 +1248,63 @@
         for (const t of tabs) {
           if (t.url && (t.url.includes(bvid) || (item.url && t.url.includes(item.url)))) {
             const tabState = await chrome.tabs.sendMessage(t.id, { type: 'BSE_GET_STATE' }).catch(() => null);
+            // 严防跨视频污染：必须确保标签页内状态属于当前目标视频
+            const tabMediaKey = String(tabState?.mediaKey || '');
+            const tabBvidMatch = tabMediaKey.match(/bili:(BV[a-zA-Z0-9]+)/i)?.[1]
+              || tabState?.bvid
+              || (tabState?.url ? tabState.url.match(/video\/(BV[a-zA-Z0-9]+)/i)?.[1] : null);
+            if (tabBvidMatch && tabBvidMatch.toLowerCase() !== bvid.toLowerCase()) {
+              continue;
+            }
+            if (tabMediaKey && !tabMediaKey.toLowerCase().includes(bvid.toLowerCase())) {
+              continue;
+            }
+            if (tabState?.status !== 'ready') {
+              continue;
+            }
+
             if (tabState?.cues?.length) {
               cues = normalizeCompleteCues(tabState.cues);
               if (cues.length) {
+                // 媒体时长与完整度一致性防护 (Duration & Completeness Guard)
+                const maxCueTo = Number(cues[cues.length - 1]?.to || 0);
+                const knownDuration = Number(item.duration || item.metaCache?.duration || 0);
+                if (knownDuration > 10 && maxCueTo > knownDuration + 8) {
+                  console.warn(`[SparkSub Queue] 忽略标签页串台字幕：视频时长 ${knownDuration}s，但标签页字幕持续到 ${maxCueTo}s`);
+                  cues = [];
+                  continue;
+                }
+                if (knownDuration >= 90 && maxCueTo < knownDuration * 0.35 && cues.length < 20) {
+                  console.warn(`[SparkSub Queue] 忽略标签页残缺片头字幕：视频时长 ${knownDuration}s，但字幕仅 ${cues.length} 句（覆盖前 ${Math.round(maxCueTo)}s），回退至端侧 ASR`);
+                  cues = [];
+                  continue;
+                }
+
                 captionBody = tabState.cues;
-                subtitles = tabState.tracks || [{
-                  id: 'tab_current',
-                  lan: tabState.currentTrack?.lan || 'zh-CN',
-                  lan_doc: tabState.currentTrack?.lanDoc || '网络字幕',
-                  subtitle_url: ''
-                }];
-                chosenSub = subtitles[0];
+                const activeTrack = tabState.currentTrack || (tabState.tracks?.length ? tabState.tracks[0] : null);
+                subtitles = (Array.isArray(tabState.tracks) && tabState.tracks.length)
+                  ? tabState.tracks
+                  : [{
+                      id: 'tab_current',
+                      lan: activeTrack?.lan || 'zh-CN',
+                      lan_doc: activeTrack?.lanDoc || activeTrack?.lan_doc || '网络字幕',
+                      subtitle_url: ''
+                    }];
+                chosenSub = activeTrack || subtitles[0];
+                const chosenTrackId = captionTrackIdentity(chosenSub) || 'tab_current';
                 item.stageArtifacts = {
                   ...(item.stageArtifacts || {}),
                   captionTracks: subtitles,
                   captionBody,
-                  captionTrackId: 'tab_current',
-                  selectedCaption: { id: 'tab_current', language: 'zh-CN', label: '网络字幕', kind: 'official' }
+                  captionTrackId: chosenTrackId,
+                  selectedCaption: {
+                    id: chosenTrackId,
+                    language: chosenSub?.lan || 'zh-CN',
+                    label: chosenSub?.lanDoc || chosenSub?.lan_doc || '网络字幕',
+                    kind: 'official'
+                  }
                 };
-                await saveItem(item);
+                await enterStage(item, 'postprocessing', 85, '已从打开的网页提取字幕，正在整理格式…');
                 break;
               }
             } else if (Array.isArray(tabState?.tracks) && tabState.tracks.length) {
@@ -1329,6 +1401,19 @@
           const subContentJson = await subContentResp.json();
           const candidateCues = normalizeCompleteCues(subContentJson?.body || []);
           if (!candidateCues.length) continue;
+
+          // 时长防错与完整度互锁 (Duration & Completeness Guard)
+          const maxCueTo = Number(candidateCues[candidateCues.length - 1]?.to || 0);
+          const knownDuration = Number(item.duration || item.metaCache?.duration || 0);
+          if (knownDuration > 10 && maxCueTo > knownDuration + 8) {
+            console.warn(`[SparkSub Queue] 忽略时长严重错配字幕：视频时长 ${knownDuration}s，字幕终点 ${maxCueTo}s`);
+            continue;
+          }
+          if (knownDuration >= 90 && maxCueTo < knownDuration * 0.35 && candidateCues.length < 20) {
+            console.warn(`[SparkSub Queue] 忽略官方残缺片头字幕：视频时长 ${knownDuration}s，字幕仅 ${candidateCues.length} 句（覆盖前 ${Math.round(maxCueTo)}s），回退至端侧 ASR`);
+            continue;
+          }
+
           captionBody = subContentJson.body;
           cues = candidateCues;
           chosenSub = candidate;
@@ -1371,7 +1456,7 @@
       await enterStage(item, 'postprocessing', 85, '正在进行自然段落切分与 Markdown 格式化…');
       setCompletedSubtitle(item, cues, {
         language: chosenSub?.lan || 'auto',
-        langDoc: chosenSub?.lan_doc || chosenSub?.lan || '平台字幕',
+        langDoc: chosenSub?.lan_doc || chosenSub?.lanDoc || chosenSub?.lan || '平台字幕',
         source: 'platform',
         engine: 'bilibili'
       });
@@ -1837,6 +1922,9 @@
   }
 
   BSE.Queue = {
+    setDiagnosticReporter(reporter) {
+      diagnosticReporter = typeof reporter === 'function' ? reporter : null;
+    },
     normalizeVideoUrl,
     getQueue,
     saveQueue,

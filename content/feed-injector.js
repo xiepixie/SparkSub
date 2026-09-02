@@ -153,17 +153,35 @@
   async function syncQueueState() {
     try {
       if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-        const res = await chrome.runtime.sendMessage({ type: 'BSE_QUEUE_GET' });
+        const res = await chrome.runtime.sendMessage({ type: 'BSE_QUEUE_GET' }).catch(() => null);
         if (res?.ok && Array.isArray(res.queue)) {
           queueCache = new Map(res.queue.map((i) => [i.id, i]));
           updateAllButtons();
+          return;
         }
       }
     } catch {}
+
+    if (BSE.Queue?.getQueue) {
+      try {
+        const queue = await BSE.Queue.getQueue();
+        if (Array.isArray(queue)) {
+          queueCache = new Map(queue.map((i) => [i.id, i]));
+          updateAllButtons();
+        }
+      } catch {}
+    }
+  }
+
+  function findQueueItem(itemId) {
+    if (!itemId) return null;
+    return queueCache.get(itemId)
+      || Array.from(queueCache.values()).find((i) => i.id === itemId || i.targetId === itemId || (typeof i.id === 'string' && i.id.startsWith(`${itemId}:`)))
+      || null;
   }
 
   function updateButtonState(btn, itemId) {
-    const item = queueCache.get(itemId);
+    const item = findQueueItem(itemId);
     if (!item) {
       btn.className = 'sparksub-feed-btn';
       btn.innerHTML = '📥 转文字';
@@ -221,7 +239,7 @@
       e.preventDefault();
       e.stopPropagation();
 
-      const currentItem = queueCache.get(itemId);
+      const currentItem = findQueueItem(itemId);
       if (currentItem?.stage === 'done' && (currentItem.subtitle?.markdown || currentItem.subtitle?.plainText)) {
         // One-click copy formatted markdown
         try {
@@ -242,25 +260,36 @@
 
       try {
         let enqueued = false;
+        let returnedItem = null;
         try {
           const res = await chrome.runtime.sendMessage({
             type: 'BSE_QUEUE_ENQUEUE',
             urls: targetUrl,
             options: { title, author, cover }
           });
-          if (res?.ok) enqueued = true;
+          if (res?.ok) {
+            enqueued = true;
+            returnedItem = res.items?.[0] || null;
+          }
         } catch {}
 
         if (!enqueued && BSE.Queue?.addToQueue) {
           // Direct fallback via shared storage
-          await BSE.Queue.addToQueue(targetUrl, { title, author, cover });
+          const added = await BSE.Queue.addToQueue(targetUrl, { title, author, cover });
           enqueued = true;
+          returnedItem = added?.[0] || null;
         }
 
         if (enqueued) {
-          showToast(`📥 已将《${title}》加入后台转录队列`);
-          queueCache.set(itemId, { id: itemId, stage: 'queued', title, author, cover, progress: 0 });
-          updateButtonState(btn, itemId);
+          if (returnedItem?.stage === 'done') {
+            queueCache.set(itemId, returnedItem);
+            updateButtonState(btn, itemId);
+            showToast(`✓ 《${title}》字幕已就绪`);
+          } else {
+            showToast(`📥 已将《${title}》加入后台转录队列`);
+            queueCache.set(itemId, returnedItem || { id: itemId, stage: 'queued', title, author, cover, progress: 0 });
+            updateButtonState(btn, itemId);
+          }
           syncQueueState();
           // Trigger orchestrator notify
           if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
@@ -279,20 +308,20 @@
   }
 
   function scanBilibiliCards() {
-    const cards = document.querySelectorAll('.bili-video-card, .feed-card, .bili-feed-card, .video-card, .small-item, .rank-item');
+    const cards = document.querySelectorAll('.bili-video-card, .feed-card, .bili-feed-card, .video-card, .small-item, .rank-item, .video-list-item, .bili-grid .bili-video-card');
     cards.forEach((card) => {
       if (card.querySelector('.sparksub-feed-btn')) return;
-      const link = card.querySelector('a[href*="/video/BV"]');
+      const link = card.querySelector('a[href*="/video/BV"], a[href*="bilibili.com/video/"], a[href*="BV"]');
       if (!link) return;
 
-      const bvMatch = link.href.match(/BV[a-zA-Z0-9]{10}/i);
+      const bvMatch = (link.href || '').match(/BV[a-zA-Z0-9]{10}/i);
       if (!bvMatch) return;
       const bvid = bvMatch[0];
 
-      const coverContainer = card.querySelector('.bili-video-card__image, .bili-video-card__wrap, .pic-box, .cover-wrap, .img, .bili-video-card__image--wrap') || link;
-      const titleElem = card.querySelector('.bili-video-card__info--tit, .title, a[title]');
+      const coverContainer = card.querySelector('.bili-video-card__image--wrap, .bili-video-card__image, .bili-video-card__wrap, .pic-box, .cover-wrap, .img') || link;
+      const titleElem = card.querySelector('.bili-video-card__info--tit, .title, a[title], h3');
       const title = titleElem?.getAttribute('title') || titleElem?.textContent?.trim() || `B站视频 (${bvid})`;
-      const authorElem = card.querySelector('.bili-video-card__info--author, .up-name, .author, .name');
+      const authorElem = card.querySelector('.bili-video-card__info--author, .up-name, .author, .name, .bili-video-card__info--owner');
       const author = authorElem?.textContent?.trim() || 'UP主';
       const imgElem = card.querySelector('img');
       const cover = imgElem?.src || '';
@@ -364,7 +393,11 @@
 
     if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
       chrome.storage.onChanged.addListener((changes, area) => {
-        if (area === 'local' && changes?.bse_transcription_queue_v1) {
+        if (area !== 'local' || !changes) return;
+        const hasQueueChange = Object.keys(changes).some(
+          (k) => k === 'bse_transcription_queue_v1' || k.startsWith('bse_transcription_queue_v1:item:')
+        );
+        if (hasQueueChange) {
           syncQueueState();
         }
       });

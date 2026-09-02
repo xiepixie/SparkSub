@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const BSE = globalThis.BSE;
+  const BSE = globalThis.BSE = globalThis.BSE || /** @type {any} */ ({});
 
   /**
    * 识别当前视频平台类型
@@ -60,6 +60,7 @@
   function getActiveCidFromDom() {
     try {
       if (typeof document === 'undefined') return null;
+      const currentBvid = getBvid();
       const activeEl = document.querySelector(
         '.bpx-player-ctrl-eplist-menu-item.bpx-state-active, ' +
         '.cur-list li.on, ' +
@@ -68,6 +69,17 @@
         '#multi_page .cur-list li.on'
       );
       if (!activeEl) return null;
+
+      // 严防 SPA 页面跳转残留：若节点自身或链接包含 BVID，必须与当前视频一致
+      if (currentBvid) {
+        const link = activeEl.closest('a') || activeEl.querySelector('a');
+        const href = link?.getAttribute('href') || link?.href || '';
+        const linkBvid = getBvid(href);
+        if (linkBvid && linkBvid.toLowerCase() !== currentBvid.toLowerCase()) {
+          return null;
+        }
+      }
+
       const cid = activeEl.getAttribute('data-cid') || activeEl.dataset.cid || activeEl.getAttribute('cid');
       return cid ? String(cid).trim() : null;
     } catch {
@@ -368,6 +380,64 @@
     return translatedCues;
   }
 
+  const UNIFIED_CACHE_KEY_PREFIX = 'bse_sub_cache_';
+  const UNIFIED_CACHE_INDEX_KEY = 'bse_sub_cache_index';
+  const MAX_UNIFIED_CACHE_ITEMS = 60;
+  const MAX_UNIFIED_CACHE_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+
+  const UnifiedSubtitleCache = {
+    async get(mediaKey) {
+      if (!mediaKey || typeof chrome === 'undefined' || !chrome.storage?.local) return null;
+      try {
+        const cleanKey = String(mediaKey).trim();
+        const key = UNIFIED_CACHE_KEY_PREFIX + cleanKey;
+        const res = await chrome.storage.local.get(key);
+        const data = res[key];
+        if (!data || !Array.isArray(data.cues) || !data.cues.length) return null;
+        if (data.savedAt && Date.now() - data.savedAt > MAX_UNIFIED_CACHE_AGE_MS) {
+          chrome.storage.local.remove(key).catch(() => {});
+          return null;
+        }
+        return data;
+      } catch {
+        return null;
+      }
+    },
+    async set(mediaKey, payload) {
+      if (!mediaKey || !payload || !Array.isArray(payload.cues) || !payload.cues.length || typeof chrome === 'undefined' || !chrome.storage?.local) return;
+      try {
+        const cleanKey = String(mediaKey).trim();
+        const key = UNIFIED_CACHE_KEY_PREFIX + cleanKey;
+        const record = {
+          mediaKey: cleanKey,
+          title: payload.title || '',
+          author: payload.author || '',
+          language: payload.language || payload.lang || 'zh',
+          langDoc: payload.langDoc || '中文',
+          cues: payload.cues,
+          cueCount: payload.cues.length,
+          plainText: payload.plainText || payload.cues.map((c) => c.content).join(' '),
+          markdown: payload.markdown || '',
+          savedAt: Date.now()
+        };
+        await chrome.storage.local.set({ [key]: record });
+
+        const idxRes = await chrome.storage.local.get(UNIFIED_CACHE_INDEX_KEY);
+        let index = Array.isArray(idxRes[UNIFIED_CACHE_INDEX_KEY]) ? idxRes[UNIFIED_CACHE_INDEX_KEY] : [];
+        index = index.filter((k) => k !== key);
+        index.unshift(key);
+        if (index.length > MAX_UNIFIED_CACHE_ITEMS) {
+          const evicted = index.slice(MAX_UNIFIED_CACHE_ITEMS);
+          index = index.slice(0, MAX_UNIFIED_CACHE_ITEMS);
+          chrome.storage.local.remove(evicted).catch(() => {});
+        }
+        await chrome.storage.local.set({ [UNIFIED_CACHE_INDEX_KEY]: index });
+      } catch (err) {
+        console.warn('[UnifiedSubtitleCache] Failed to cache subtitle:', err);
+      }
+    }
+  };
+
   BSE.Utils = Object.freeze({
     detectPlatform,
     isMatchingVideoUrl,
@@ -386,6 +456,7 @@
     downloadTextFile: downloadText,
     downloadBlob,
     translateCues,
-    SessionSnapshotManager
+    SessionSnapshotManager,
+    UnifiedSubtitleCache
   });
 })();

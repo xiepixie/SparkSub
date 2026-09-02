@@ -1,8 +1,8 @@
 (() => {
   'use strict';
 
-  const BSE = globalThis.BSE;
-  const { formatClock } = BSE.Utils;
+  const BSE = globalThis.BSE = globalThis.BSE || {};
+  const formatClock = (seconds) => (BSE.Utils?.formatClock ? BSE.Utils.formatClock(seconds) : `${seconds}`);
 
   /**
    * 将字幕行合并为自然段落文本
@@ -92,11 +92,17 @@
       prompt: `你的任务是将提供的视频转录稿，整理成一份结构严谨、逻辑清晰、适合中高阶学习、复盘或应试备考的高质量专业讲义。
 
 【核心处理原则】：
-1. 去噪与清洗：过滤讲者口误自纠、口头禅、闲聊冗余与机械性代数运算口述；保留关键变形、换元、构造动机与分类依据；
-2. ASR 纠错与符号规范：修正同音错字与语音识别错误；数学/物理公式统一使用标准 LaTeX（行内 $...$，独立块 $$...$$），代码使用规范代码块；
-3. 防幻觉与可信度分级：严禁编造原视频未给出的关键条件与数据；无法确认的信息标注 [原视频未明示/待补充]；
-4. 注重方法动机：遇到关键推导、设参、定理应用或分类讨论时，必须说明“为什么这样做”；
-5. 语言风格：专业、克制、自然，杜绝“秒杀/大招/闭眼套”等营销化夸张表达。
+1. 输出规范：直接输出高质量可排版 Markdown 文本，严禁输出 PPT 大纲、Word/Doc 模板等办公文档占位符；
+2. 去噪与清洗：过滤讲者口误自纠、口头禅、闲聊冗余与机械性代数运算口述；保留关键变形、换元、构造动机与分类依据；
+3. ASR 纠错与 LaTeX 严格排版规范：
+   - 绝对值与模使用 \\lvert ... \\rvert (伸缩 \\left\\lvert ... \\right\\rvert)，禁止手打键盘竖线；
+   - 范数使用 \\lVert ... \\rVert (伸缩 \\left\\lVert ... \\right\\rVert)，禁止手打 ||x||；
+   - 条件符使用 \\mid (如 $P(A \\mid B)$、$\\{x \\in \\mathbb{R} \\mid x > 0\\}$)；
+   - 正体微分算子使用 \\mathrm{d}x、偏导 \\partial；向量/矩阵使用粗斜体 \\boldsymbol{x}、\\boldsymbol{A} (严禁 \\pmb)；
+   - 自然底数使用正体 \\mathrm{e}^x，函数名使用内置算子 \\lim、\\sin、\\cos、\\ln；不等号使用 \\le、\\ge；
+4. 防幻觉与可信度分级：严禁编造原视频未给出的关键条件与数据；无法确认的信息标注 [原视频未明示/待补充]；
+5. 注重方法动机：遇到关键推导、设参、定理应用或分类讨论时，必须说明“为什么这样做”；
+6. 语言风格：专业、克制、自然，杜绝“秒杀/大招/闭眼套”等营销化夸张表达。
 
 【讲义输出结构】：
 # [视频主题 / 核心知识板块]
@@ -335,6 +341,241 @@
   }
 
   /**
+   * 将大模型生成的课程笔记 Markdown 安全渲染为富文本 HTML (含交互式时间轴与图片卡片)
+   * @param {string} markdown
+   * @param {object} [options]
+   * @param {Map<string, {dataUrl: string, timestamp: number}>|object} [options.imagesMap]
+   * @returns {string}
+   */
+  /**
+   * 将大模型生成的课程笔记 Markdown 安全渲染为富文本 HTML (含 KaTeX 高清数学排版、交互式时间轴与图片卡片)
+   * @param {string} markdown
+   * @param {object} [options]
+   * @param {Map<string, {dataUrl: string, timestamp: number}>|object} [options.imagesMap]
+   * @returns {string}
+   */
+  /**
+   * 将大模型生成的课程笔记 Markdown 安全渲染为富文本 HTML (含 KaTeX 高清数学排版、GFM 数据表格、多行代码块、交互式时间轴与图片卡片)
+   * @param {string} markdown
+   * @param {object} [options]
+   * @param {Map<string, {dataUrl: string, timestamp: number}>|object} [options.imagesMap]
+   * @returns {string}
+   */
+  function renderNoteToHtml(markdown, options = {}) {
+    if (!markdown || typeof markdown !== 'string') return '';
+    const imagesMap = options.imagesMap || {};
+
+    // 0. 清理大模型可能输出的转义 \$ 为标准 LaTeX 符号 $
+    let rawText = markdown.replace(/\\\$/g, '$');
+
+    // 1. 提取并替换多行代码块 ```lang ... ``` 为占位符
+    const codeBlocks = [];
+    rawText = rawText.replace(/```([a-zA-Z0-9_-]*)\r?\n([\s\S]*?)```/g, (_match, lang, code) => {
+      const id = `___CODE_BLOCK_${codeBlocks.length}___`;
+      const escapedCode = code
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      const html = `<div class="note-code-wrap"><pre class="note-code-block"><code class="${lang ? `language-${lang}` : ''}">${escapedCode}</code></pre></div>`;
+      codeBlocks.push(html);
+      return `\n\n${id}\n\n`;
+    });
+
+    // 2. 辅助函数：通过 KaTeX 渲染公式或降级为纯文本公式
+    function renderLatex(tex, isDisplay) {
+      let cleanTex = tex.trim()
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>');
+      
+      // 修复 KaTeX 对未转义 % 的 commentAtEnd 警告/报错，将其规范化为 \%
+      cleanTex = cleanTex.replace(/(^|[^\\])%/g, '$1\\%');
+
+      if (typeof globalThis !== 'undefined' && globalThis.katex?.renderToString) {
+        try {
+          return globalThis.katex.renderToString(cleanTex, {
+            displayMode: isDisplay,
+            throwOnError: false,
+            strict: 'ignore'
+          });
+        } catch {}
+      }
+      return isDisplay
+        ? `<div class="math-block" data-math="${encodeURIComponent(cleanTex)}"><span class="math-tex">$$${cleanTex}$$</span></div>`
+        : `<span class="math-inline" data-math="${encodeURIComponent(cleanTex)}">$${cleanTex}$</span>`;
+    }
+
+    // 3. 提取并替换独立块级公式 $$ ... $$ 为占位符
+    const mathBlocks = [];
+    rawText = rawText.replace(/\$\$([\s\S]*?)\$\$/g, (_match, eq) => {
+      const id = `___MATH_BLOCK_${mathBlocks.length}___`;
+      mathBlocks.push(renderLatex(eq, true));
+      return `\n\n${id}\n\n`;
+    });
+
+    // 4. 提取并替换行内公式 $ ... $ 为占位符
+    const mathInlines = [];
+    rawText = rawText.replace(/\$([^\$\n\r]+?)\$/g, (_match, eq) => {
+      const id = `___MATH_INLINE_${mathInlines.length}___`;
+      mathInlines.push(renderLatex(eq, false));
+      return id;
+    });
+
+    // 5. GFM Markdown 表格解析器
+    const tableRegex = /((?:^|\n)\|[^\n]+\|\r?\n\|[ \t]*:?[-]+:?[ \t]*(?:\|[ \t]*:?[-]+:?[ \t]*)+\|\r?\n(?:\|[^\n]+\|\r?\n?)+)/g;
+    rawText = rawText.replace(tableRegex, (match) => {
+      const lines = match.trim().split('\n').map(l => l.trim()).filter(Boolean);
+      if (lines.length < 2) return match;
+      const headerLine = lines[0];
+      const alignLine = lines[1];
+      const bodyLines = lines.slice(2);
+
+      const parseCells = (line) => {
+        const trimmed = line.replace(/^\|/, '').replace(/\|$/, '');
+        return trimmed.split('|').map(c => c.trim());
+      };
+
+      const headers = parseCells(headerLine);
+      const aligns = parseCells(alignLine).map(a => {
+        const left = a.startsWith(':');
+        const right = a.endsWith(':');
+        if (left && right) return 'center';
+        if (right) return 'right';
+        return 'left';
+      });
+
+      const thead = '<thead><tr>' + headers.map((h, i) => `<th style="text-align:${aligns[i] || 'left'}">${h}</th>`).join('') + '</tr></thead>';
+      const tbody = '<tbody>' + bodyLines.map(rowLine => {
+        const cells = parseCells(rowLine);
+        return '<tr>' + cells.map((c, i) => `<td style="text-align:${aligns[i] || 'left'}">${c}</td>`).join('') + '</tr>';
+      }).join('') + '</tbody>';
+
+      return `\n\n<div class="note-table-wrap"><table class="note-table">${thead}${tbody}</table></div>\n\n`;
+    });
+
+    // 6. 转义基础 HTML 字符
+    let html = rawText
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+
+    // 7. 截图占位标签 [SCREENSHOT: MM:SS "说明"] 或 [SCREENSHOT: SS "说明"]
+    html = html.replace(/\[SCREENSHOT:\s*([0-9:]+)(?:\s*["“]([^"”]+)["”])?\]/gi, (match, timeStr, desc) => {
+      const parts = String(timeStr).split(':').map(Number);
+      let seconds = 0;
+      if (parts.length === 3) seconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+      else if (parts.length === 2) seconds = parts[0] * 60 + parts[1];
+      else seconds = Number(parts[0]) || 0;
+
+      const label = desc || `时间点 ${timeStr}`;
+      
+      // 精确或就近模糊匹配（20秒内）已捕获图片
+      let imgEntry = imagesMap[timeStr] || imagesMap[seconds] || imagesMap[String(seconds)];
+      if (!imgEntry) {
+        for (const [key, val] of Object.entries(imagesMap)) {
+          if (val?.timestamp && Math.abs(val.timestamp - seconds) <= 20) {
+            imgEntry = val;
+            break;
+          }
+        }
+      }
+
+      const dataUrl = imgEntry?.dataUrl || imgEntry?.url || (typeof imgEntry === 'string' ? imgEntry : '');
+
+      if (dataUrl) {
+        return `
+<div class="note-image-card" data-timestamp="${seconds}">
+  <div class="note-image-wrap">
+    <img src="${dataUrl}" alt="${label}" class="note-img-thumbnail" loading="lazy" />
+    <button class="note-card-delete-btn" data-seek="${seconds}" data-timestr="${timeStr}" title="删除此截图">✕</button>
+    <button class="note-jump-btn" data-seek="${seconds}" title="跳转到 ${timeStr} 播放">
+      <span class="note-jump-icon">▶</span>
+      <span class="note-jump-time">${timeStr}</span>
+    </button>
+  </div>
+  <div class="note-image-caption">📸 ${label}</div>
+</div>`;
+      }
+
+      return `
+<div class="note-image-placeholder" data-timestamp="${seconds}" data-time-str="${timeStr}" data-label="${label}">
+  <div class="note-placeholder-inner">
+    <span class="placeholder-icon">📸</span>
+    <span class="placeholder-text">${label} (${timeStr})</span>
+    <button class="btn-capture-slot" data-seek="${seconds}" data-timestr="${timeStr}">立即截取</button>
+  </div>
+</div>`;
+    });
+
+    // 8. 传统 Markdown 图片 ![alt](url)
+    html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_match, alt, url) => {
+      return `
+<div class="note-image-card">
+  <div class="note-image-wrap">
+    <img src="${url}" alt="${alt}" class="note-img-thumbnail" loading="lazy" />
+  </div>
+  ${alt ? `<div class="note-image-caption">${alt}</div>` : ''}
+</div>`;
+    });
+
+    // 9. 分割线
+    html = html.replace(/^(?:---|===|\*\*\*|___)\s*$/gm, '<hr class="note-hr" />');
+
+    // 10. 标题 (# 至 ######)
+    html = html
+      .replace(/^###### (.*$)/gim, '<h6 class="note-h6">$1</h6>')
+      .replace(/^##### (.*$)/gim, '<h5 class="note-h5">$1</h5>')
+      .replace(/^#### (.*$)/gim, '<h4 class="note-h4">$1</h4>')
+      .replace(/^### (.*$)/gim, '<h3 class="note-h3">$1</h3>')
+      .replace(/^## (.*$)/gim, '<h2 class="note-h2">$1</h2>')
+      .replace(/^# (.*$)/gim, '<h1 class="note-h1">$1</h1>');
+
+    // 11. 引用块 (> ...)
+    html = html.replace(/^\> (.*$)/gim, '<blockquote class="note-quote">$1</blockquote>');
+
+    // 12. 粗体、斜体、删除线、行内代码
+    html = html
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.*?)\*/g, '<em>$1</em>')
+      .replace(/~~(.*?)~~/g, '<del>$1</del>')
+      .replace(/`([^`]+)`/g, '<code class="note-inline-code">$1</code>');
+
+    // 13. 列表项
+    html = html
+      .replace(/^\s*[-*]\s+(.*$)/gim, '<li class="note-list-item">$1</li>')
+      .replace(/^\s*(\d+)\.\s+(.*$)/gim, '<li class="note-ordered-item" data-num="$1">$1. $2</li>');
+
+    // 14. 换行与段落清洗，防止块级标签被包裹在 <p> 中引发浏览器非预期提前闭合
+    html = html.replace(/\n\n+/g, '</p><p class="note-p">');
+    html = `<div class="note-rendered-content"><p class="note-p">${html}</p></div>`;
+    html = html
+      .replace(/<p class="note-p">\s*(<(?:h[1-6]|div|blockquote|hr|table|ul|ol)[^>]*>)/gi, '$1')
+      .replace(/(<\/(?:h[1-6]|div|blockquote|hr|table|ul|ol)>)\s*<\/p>/gi, '$1')
+      .replace(/<p class="note-p">\s*<\/p>/gi, '');
+
+    // 15. 还原表格占位符中的 HTML 实体反转义
+    html = html.replace(/&lt;div class="note-table-wrap"&gt;[\s\S]*?&lt;\/div&gt;/g, (escaped) => {
+      return escaped
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&');
+    });
+
+    // 16. 还原公式与代码块占位符
+    mathBlocks.forEach((blockHtml, i) => {
+      html = html.replace(`___MATH_BLOCK_${i}___`, blockHtml);
+    });
+    mathInlines.forEach((inlineHtml, i) => {
+      html = html.replace(`___MATH_INLINE_${i}___`, inlineHtml);
+    });
+    codeBlocks.forEach((codeHtml, i) => {
+      html = html.replace(`___CODE_BLOCK_${i}___`, codeHtml);
+    });
+
+    return html;
+  }
+
+  /**
    * 格式化统一分发函数
    * @param {string} type
    * @param {Array<import('../types/bse').Cue>} cues
@@ -357,6 +598,7 @@
     buildBatchManifest,
     AI_PROMPTS,
     generateAiPrompt,
+    renderNoteToHtml,
     format
   });
 })();

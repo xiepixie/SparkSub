@@ -26,6 +26,7 @@
     cues: [],
     activeIndex: -1,
     currentTime: 0,
+    diagnosticSessionId: '',
     diagnostics: []
   };
 
@@ -44,11 +45,17 @@
   let initialized = false;
   let pendingLoad = null;
   let diagnosticPublishTimer = null;
+  const mediaDiagnostics = BSE.Diagnostics.createMediaSession({ platform, limit: 100 });
+
+  function syncDiagnostics() {
+    state.diagnosticSessionId = mediaDiagnostics.sessionId;
+    state.diagnostics = mediaDiagnostics.events();
+  }
 
   function diagnostic(stage, message) {
-    const time = new Date().toLocaleTimeString();
-    state.diagnostics.push(`[${time}] ${stage}：${message}`);
-    if (state.diagnostics.length > 80) state.diagnostics.shift();
+    if (!mediaDiagnostics.sessionId) mediaDiagnostics.begin(state.mediaKey || BSE.Utils.getMediaKey(platform) || 'unknown');
+    mediaDiagnostics.report(stage, message);
+    syncDiagnostics();
     if (initialized && !diagnosticPublishTimer) {
       diagnosticPublishTimer = setTimeout(() => {
         diagnosticPublishTimer = null;
@@ -80,8 +87,8 @@
   function commitError(stage, error) {
     const fault = classifyError(error, stage);
     state.lastError = fault;
-    diagnostic('错误定位', `${fault.stage} · ${fault.code} · ${fault.message}`);
-    diagnostic('处理建议', fault.hint);
+    mediaDiagnostics.recordFault(fault);
+    syncDiagnostics();
     return fault;
   }
 
@@ -111,7 +118,7 @@
                 const match = text.match(/window\.__INITIAL_STATE__\s*=\s*(\{.+?\});/s) || text.match(/__INITIAL_STATE__\s*=\s*(\{.+?\});?/s);
                 if (match && match[1]) {
                   const parsed = JSON.parse(match[1]);
-                  if (parsed?.videoData && (!bvid || parsed.videoData.bvid === bvid)) {
+                  if (parsed?.videoData && bvid && String(parsed.videoData.bvid).toLowerCase() === String(bvid).toLowerCase()) {
                     domData = parsed.videoData;
                     break;
                   }
@@ -283,7 +290,7 @@
         state.activeIndex = -1;
       }
       state.isRefreshing = false;
-      if (payload.error) commitError(payload.stage || '执行阶段', payload.error);
+      if (payload.fault) state.lastError = payload.fault;
     } else if (status === 'ready') {
       state.lastError = null;
       state.isRefreshing = false;
@@ -366,29 +373,49 @@
     try {
       let cues = readCachedBody(cacheKey);
       if (!cues || options.force) {
-        const adapter = platform === BSE.PLATFORM.YOUTUBE ? BSE.YouTube : BSE.Bilibili;
-        const onIntermediateCues = (intermediateCues) => {
-          if (ownGeneration !== trackGeneration || options.mediaGeneration !== generation) return;
-          if (intermediateCues?.length) {
-            diagnostic('快速呈现', `源语言已读取 ${intermediateCues.length} 条字幕，先行动态显示并后台翻译`);
-            transitionTo('ready', {
-              message: `${intermediateCues.length} 条 · 原文已就绪，正在后台机翻…`,
-              cues: intermediateCues,
-              selectedTrackId: track.id
-            });
-            panel?.render(publicState());
-            panel?.syncLayout();
-          }
-        };
-        cues = await adapter.loadTrack(track, { signal: controller.signal, diagnostic, onIntermediateCues });
-        if (cues.length) cacheBody(cacheKey, cues);
+        if (!options.force) {
+          try {
+            const unifiedCached = await BSE.Utils?.UnifiedSubtitleCache?.get(state.mediaKey);
+            if (unifiedCached?.cues?.length) {
+              cues = unifiedCached.cues;
+              diagnostic('全局缓存', `秒级复用扩展统一持久化字幕缓存（共 ${cues.length} 条）`);
+            }
+          } catch {}
+        }
+        if (!cues) {
+          const adapter = platform === BSE.PLATFORM.YOUTUBE ? BSE.YouTube : BSE.Bilibili;
+          const onIntermediateCues = (intermediateCues) => {
+            if (ownGeneration !== trackGeneration || options.mediaGeneration !== generation) return;
+            if (intermediateCues?.length) {
+              diagnostic('快速呈现', `源语言已读取 ${intermediateCues.length} 条字幕，先行动态显示并后台翻译`);
+              transitionTo('ready', {
+                message: `${intermediateCues.length} 条 · 原文已就绪，正在后台机翻…`,
+                cues: intermediateCues,
+                selectedTrackId: track.id
+              });
+              publish(true);
+              panel?.syncLayout();
+            }
+          };
+          cues = await adapter.loadTrack(track, { signal: controller.signal, diagnostic, onIntermediateCues });
+        }
+        if (cues && cues.length) {
+          cacheBody(cacheKey, cues);
+          BSE.Utils?.UnifiedSubtitleCache?.set(state.mediaKey, {
+            title: state.title || getTitle(),
+            author: getAuthorInfo()?.name || '',
+            language: track.lan || 'zh',
+            langDoc: track.lanDoc || '中文',
+            cues
+          }).catch(() => {});
+        }
       } else {
         diagnostic('本地缓存', `复用已读取的 ${cues.length} 条字幕`);
       }
 
       if (ownGeneration !== trackGeneration || options.mediaGeneration !== generation) return;
       state.title = getTitle();
-      if (cues.length) {
+      if (cues && cues.length) {
         retryCount = 0;
         diagnostic('字幕呈现', `成功加载 ${cues.length} 条字幕并同步显示`);
         transitionTo('ready', {
@@ -402,6 +429,13 @@
           selectedTrackId: track.id,
           cues: state.cues
         });
+        BSE.Utils?.UnifiedSubtitleCache?.set(state.mediaKey, {
+          title: state.title,
+          author: getAuthorInfo()?.name || '',
+          language: track.lan || 'zh',
+          langDoc: track.lanDoc || '中文',
+          cues: state.cues
+        }).catch(() => {});
         if (platform === BSE.PLATFORM.BILIBILI) {
           scheduleNextEpisodePrefetch(ownGeneration);
         }
@@ -423,8 +457,7 @@
       const fault = commitError('字幕内容', error);
       transitionTo('error', {
         message: `[${fault.code}] ${fault.message}`,
-        error,
-        stage: '字幕内容'
+        fault
       });
       if (!options.force && retryCount < 1 && retryMediaKey === state.mediaKey) {
         retryCount += 1;
@@ -468,6 +501,10 @@
       diagnostic('忽略重复', `${reason} 任务已在运行，不重复请求 (${state.status})`);
       return;
     }
+    if (!sameMedia || !mediaDiagnostics.sessionId) {
+      mediaDiagnostics.begin(mediaKey);
+      syncDiagnostics();
+    }
 
     // Step 1: Instant snapshot hydration
     let hydratedFromSnapshot = false;
@@ -500,7 +537,6 @@
     state.url = location.href;
     state.title = getTitle();
     state.authorInfo = getAuthorInfo();
-    state.diagnostics = [];
     diagnostic('启动加载', `${reason}${force ? ' (强制刷新)' : ''}`);
     diagnostic('环境信息', `扩展 v${state.version} · ${platform} · 网络: ${navigator.onLine ? '已连接' : '未连接'} · 视频: ${mediaKey}`);
 
@@ -558,8 +594,7 @@
       const fault = commitError('轨道发现', error);
       transitionTo('error', {
         message: `[${fault.code}] ${fault.message}`,
-        error,
-        stage: '轨道发现'
+        fault
       });
       if (!force && retryCount < 1 && retryMediaKey === state.mediaKey) {
         retryCount += 1;
@@ -627,9 +662,8 @@
           state.cueRevision = (state.cueRevision || 0) + 1;
           state.revision = (state.revision || 0) + 1;
           diagnostic('端侧字幕加载', `成功载入端侧转录字幕 · 共 ${cues.length} 条`);
-          panel?.render(publicState());
-          panel?.syncLayout();
           publish(true);
+          panel?.syncLayout();
           sendResponse({ ok: true });
           return false;
         }
@@ -640,6 +674,19 @@
         }
         if (message?.type === 'BSE_GET_STATE') {
           sendResponse(publicState());
+          return false;
+        }
+        if (message?.type === 'BSE_CAPTURE_FRAME') {
+          const timestamp = typeof message.timestamp === 'number' ? message.timestamp : null;
+          const options = message.options || {};
+          if (timestamp !== null && Number.isFinite(timestamp)) {
+            BSE.Media?.captureVideoFrameAt(timestamp, options)
+              .then((result) => sendResponse({ ok: result.success, frame: result }))
+              .catch((err) => sendResponse({ ok: false, error: err.message }));
+            return true;
+          }
+          const result = BSE.Media?.captureVideoFrame(null, options) || { success: false, error: 'CAPTURE_UNAVAILABLE' };
+          sendResponse({ ok: result.success, frame: result });
           return false;
         }
         if (message?.type === 'BSE_RESOLVE_YOUTUBE_IN_TAB') {

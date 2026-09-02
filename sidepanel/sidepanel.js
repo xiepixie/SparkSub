@@ -56,6 +56,42 @@
     transcript: document.querySelector('#transcript'),
     aiSection: document.querySelector('#ai-section'),
     aiTitle: document.querySelector('#ai-title'),
+    aiSettingsToggle: document.querySelector('#ai-settings-toggle'),
+    aiSettingsDrawer: document.querySelector('#ai-settings-drawer'),
+    aiModelBadge: document.querySelector('#ai-model-badge'),
+    aiInputEndpoint: document.querySelector('#ai-input-endpoint'),
+    aiInputApiKey: document.querySelector('#ai-input-apikey'),
+    aiInputModel: document.querySelector('#ai-input-model'),
+    aiBtnTestConn: document.querySelector('#ai-btn-test-conn'),
+    aiBtnSaveSettings: document.querySelector('#ai-btn-save-settings'),
+    aiTestStatus: document.querySelector('#ai-test-status'),
+    aiStatusDot: document.querySelector('#ai-status-dot'),
+    aiModelName: document.querySelector('#ai-model-name'),
+    aiBtnGenerate: document.querySelector('#ai-btn-generate'),
+    aiBtnGenerateText: document.querySelector('#ai-btn-generate-text'),
+    aiBtnSnipFrame: document.querySelector('#ai-btn-snip-frame'),
+    aiBtnCopyNote: document.querySelector('#ai-btn-copy-note'),
+    aiBtnExportZip: document.querySelector('#ai-btn-export-zip'),
+    aiManualTray: document.querySelector('#ai-manual-tray'),
+    aiManualTrayCount: document.querySelector('#ai-manual-tray-count'),
+    aiManualTrayList: document.querySelector('#ai-manual-tray-list'),
+    btnClearManualTray: document.querySelector('#btn-clear-manual-tray'),
+    btnCopyStitchedTray: document.querySelector('#btn-copy-stitched-tray'),
+    btnDownloadTrayImages: document.querySelector('#btn-download-tray-images'),
+    aiBtnCopyPlanPrompt: document.querySelector('#ai-btn-copy-plan-prompt'),
+    aiBtnCopySynthPrompt: document.querySelector('#ai-btn-copy-synth-prompt'),
+    aiBtnOpenImportModal: document.querySelector('#ai-btn-open-import-modal'),
+    aiImportModal: document.querySelector('#ai-import-modal'),
+    aiBtnCloseImportModal: document.querySelector('#ai-btn-close-import-modal'),
+    aiBtnCancelImport: document.querySelector('#ai-btn-cancel-import'),
+    aiBtnConfirmImport: document.querySelector('#ai-btn-confirm-import'),
+    aiImportTextarea: document.querySelector('#ai-import-textarea'),
+    aiProgressBox: document.querySelector('#ai-progress-box'),
+    aiProgressText: document.querySelector('#ai-progress-text'),
+    aiNotePlaceholder: document.querySelector('#ai-note-placeholder'),
+    aiNoteContent: document.querySelector('#ai-note-content'),
+    aiPromptsGrid: document.querySelector('#ai-prompts-grid'),
+    aiActionToolbar: document.querySelector('#ai-action-toolbar'),
     aiCardSummary: document.querySelector('#ai-card-summary'),
     aiCardKeypoints: document.querySelector('#ai-card-keypoints'),
     aiCardNotes: document.querySelector('#ai-card-notes'),
@@ -65,15 +101,15 @@
     emptyActions: document.querySelector('#empty-actions'),
     emptyTranscribe: document.querySelector('#empty-transcribe-btn'),
     diagnosticsPanel: document.querySelector('#diagnostics'),
-    diagTitle: document.querySelector('#diag-title'),
-    diagnosticSummary: document.querySelector('#diagnostic-summary'),
-    diagAlert: document.querySelector('#diag-alert'),
-    diagnosticCode: document.querySelector('#diagnostic-code'),
-    diagnosticHint: document.querySelector('#diagnostic-hint'),
+    diagnosticStatusTitle: document.querySelector('#diagnostic-status-title'),
+    diagnosticStatusDetail: document.querySelector('#diagnostic-status-detail'),
+    diagnosticActivity: document.querySelector('#diagnostic-activity'),
+    diagnosticTimeline: document.querySelector('#diagnostic-timeline'),
+    diagnosticTechnicalLabel: document.querySelector('#diagnostic-technical-label'),
+    diagnosticTechnicalCount: document.querySelector('#diagnostic-technical-count'),
     diagnostics: document.querySelector('#diagnostic-text'),
     copyDiagnostic: document.querySelector('#copy-diagnostic-button'),
     toast: document.querySelector('#toast'),
-    prefSelect: document.querySelector('#pref-select'),
     // Batch Modal Elements
     batchOverlay: document.querySelector('#batch-overlay'),
     batchModalTitle: document.querySelector('#batch-modal-title'),
@@ -179,24 +215,85 @@
     sidepanelToastTimer = setTimeout(() => elements.toast.classList.remove('show'), 2200);
   }
 
-  let sidepanelDiagnostics = [];
-  function appendDiagnostic(stage, msg) {
-    const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    const line = `[${timestamp}] ${stage}：${msg}`;
-    if (!sidepanelDiagnostics.includes(line)) {
-      sidepanelDiagnostics.push(line);
-      if (sidepanelDiagnostics.length > 500) {
-        sidepanelDiagnostics.splice(0, sidepanelDiagnostics.length - 500);
-      }
-    }
-    if (elements.diagnostics) elements.diagnostics.textContent = sidepanelDiagnostics.join('\n');
-    if (elements.diagnosticSummary) {
-      const fault = state?.lastError;
-      elements.diagnosticSummary.textContent = fault
-        ? `${fault.stage} · ${fault.code}`
-        : `${sidepanelDiagnostics.length} 条记录`;
-    }
+  const diagnosticsPresenter = BSE.DiagnosticPresenter.create({ limit: 500 });
+  const diagnosticSessions = {
+    native: `native:${Date.now()}`,
+    queue: 'queue:active',
+    batch: `batch:${Date.now()}`
+  };
+  let diagnosticSessionSequence = 0;
+
+  function rotateDiagnosticSession(scope, operation) {
+    diagnosticSessionSequence += 1;
+    const sessionId = `${scope}:${operation}:${Date.now()}:${diagnosticSessionSequence}`;
+    diagnosticSessions[scope] = sessionId;
+    return sessionId;
   }
+
+  function inferDiagnosticScope(stage) {
+    if (/本机服务/.test(stage)) return 'native';
+    if (/AI|讲义|大模型|视频规划|视觉证据|多模态|文本精修/i.test(stage)) return 'ai';
+    if (/转录队列|端侧 ASR|音频准备/.test(stage)) return 'queue';
+    if (/批量|合集/.test(stage)) return 'batch';
+    return 'media';
+  }
+
+  function renderDiagnostics() {
+    const status = diagnosticsPresenter.summarizeState(state || {});
+    const events = diagnosticsPresenter.activityEvents(state || {});
+    const technicalEvents = diagnosticsPresenter.technicalEvents();
+    if (elements.diagnosticsPanel) elements.diagnosticsPanel.setAttribute('data-tone', status.tone);
+    if (elements.diagnosticStatusTitle) elements.diagnosticStatusTitle.textContent = status.title;
+    if (elements.diagnosticStatusDetail) elements.diagnosticStatusDetail.textContent = status.detail;
+    if (elements.diagnosticActivity) elements.diagnosticActivity.toggleAttribute('hidden', events.length === 0);
+    if (elements.diagnosticTimeline) {
+      elements.diagnosticTimeline.replaceChildren(...events.map((event) => {
+        const item = diagnosticsPresenter.statusItem(event);
+        const row = document.createElement('li');
+        row.className = 'diag-timeline-item';
+        row.dataset.tone = item.tone;
+        const marker = document.createElement('span');
+        marker.className = 'diag-timeline-marker';
+        marker.setAttribute('aria-hidden', 'true');
+        const copy = document.createElement('div');
+        copy.className = 'diag-timeline-copy';
+        const title = document.createElement('strong');
+        title.textContent = item.title;
+        const detail = document.createElement('span');
+        detail.textContent = item.detail;
+        const time = document.createElement('time');
+        time.textContent = item.time;
+        time.dateTime = event.timestamp;
+        copy.append(title, detail);
+        row.append(marker, copy, time);
+        return row;
+      }));
+    }
+    if (elements.diagnostics) {
+      elements.diagnostics.textContent = technicalEvents.length
+        ? technicalEvents.map((event) => BSE.Diagnostics.formatEvent(event)).join('\n')
+        : (BSE.I18n?.t('no_error') || '暂无诊断信息');
+    }
+    if (elements.diagnosticTechnicalCount) elements.diagnosticTechnicalCount.textContent = `· ${technicalEvents.length}`;
+  }
+
+  function appendDiagnostic(stage, msg, options = {}) {
+    const scope = options.scope || inferDiagnosticScope(stage);
+    diagnosticsPresenter.append({
+      scope,
+      sessionId: options.sessionId || diagnosticSessions[scope] || `${scope}:active`,
+      level: options.level || BSE.Diagnostics.classifyLegacy(stage, msg),
+      code: options.code,
+      stage,
+      message: msg,
+      context: options.context
+    });
+    renderDiagnostics();
+  }
+
+  BSE.Queue?.setDiagnosticReporter?.((event) => {
+    appendDiagnostic(event?.stage || '转录队列', event?.message || '', event || {});
+  });
 
   async function command(commandName, payload = {}) {
     return await chrome.runtime.sendMessage({
@@ -270,7 +367,7 @@
       document.querySelector('.toolbar')?.setAttribute('hidden', 'true');
       document.querySelector('.video-bar')?.setAttribute('hidden', 'true');
       loadAndRenderQueue();
-      if (!nativeCapabilitiesCache) loadNativeCapabilities(false);
+      if (nativeCapabilityProbe.snapshot().phase === 'idle') loadNativeCapabilities(false);
     } else if (tabId === 'tracker') {
       elements.transcript.hidden = true;
       elements.aiSection.hidden = true;
@@ -286,6 +383,7 @@
       if (elements.queueView) elements.queueView.hidden = true;
       document.querySelector('.toolbar')?.setAttribute('hidden', 'true');
       document.querySelector('.video-bar')?.setAttribute('hidden', 'true');
+      restoreNoteFromCache(state?.mediaKey);
     } else {
       elements.transcript.hidden = false;
       elements.aiSection.hidden = true;
@@ -321,6 +419,47 @@
       renderTrackerList();
       updateTrackerCountsAndBadge();
       await updateQuickSubscribeBar();
+
+      // 自动静默自愈：排查并清理历史遗留的时长严重错配的污染字幕
+      let hasHealedMismatches = false;
+      for (const sub of subscriptionsCache) {
+        for (const item of (sub.items || [])) {
+          if (item.subtitle?.status === 'ready' && Number(item.duration) > 10) {
+            const timeMatches = String(item.subtitle.markdown || '').match(/###\s*\[(\d+):(\d+)(?::(\d+))?\s*-\s*(\d+):(\d+)(?::(\d+))?\]/g);
+            let lastSec = 0;
+            if (timeMatches && timeMatches.length) {
+              const lastHeader = timeMatches[timeMatches.length - 1];
+              const parts = lastHeader.match(/-\s*(\d+):(\d+)(?::(\d+))?/);
+              if (parts) {
+                if (parts[3] !== undefined) {
+                  lastSec = Number(parts[1]) * 3600 + Number(parts[2]) * 60 + Number(parts[3]);
+                } else {
+                  lastSec = Number(parts[1]) * 60 + Number(parts[2]);
+                }
+              }
+            }
+            const isMismatchedLong = lastSec > Number(item.duration) + 8;
+            const isIncompleteBumper = Number(item.duration) >= 90 && lastSec < Number(item.duration) * 0.35 && (item.subtitle.cueCount || 0) < 20;
+            if (isMismatchedLong || isIncompleteBumper) {
+              console.warn(`[BSE Tracker] 自动自愈异常字幕: ${item.id} (视频 ${item.duration}s, 字幕到 ${lastSec}s, 共 ${item.subtitle.cueCount || 0} 句)`);
+              item.subtitle = {
+                status: 'not_found',
+                errorHint: isMismatchedLong
+                  ? `历史提取字幕时长与视频不符已自动重置 (原字幕 ${lastSec}s / 视频 ${item.duration}s)`
+                  : `官方字幕残缺已自动重置 (仅覆盖前 ${lastSec}s 片头)，建议使用端侧转录`,
+                fetchedAt: Date.now()
+              };
+              item.hasSubtitle = false;
+              hasHealedMismatches = true;
+            }
+          }
+        }
+      }
+      if (hasHealedMismatches && BSE.Tracker?.saveSubscriptions) {
+        await BSE.Tracker.saveSubscriptions(subscriptionsCache);
+        renderTrackerList();
+        updateTrackerCountsAndBadge();
+      }
 
       // 自动静默修复：如果存在剧集列表为空的订阅，后台轮询一次补齐
       const emptySubs = subscriptionsCache.filter((s) => !s.items || s.items.length === 0);
@@ -641,10 +780,10 @@
     }
 
     return `
-      <div class="tracker-item-row${isUnread ? ' is-unread' : ''}">
+      <div class="tracker-item-row${isUnread ? ' is-unread' : ''}" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}">
         <div class="tracker-item-top">
           <div class="tracker-item-title-wrap">
-            ${isUnread ? `<span class="tracker-item-unread-dot" aria-label="${t('tracker_tag_unread', { n: 1 })}"></span>` : ''}
+            ${isUnread ? `<span class="tracker-item-unread-dot" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}" title="点击标为已读" aria-label="${t('tracker_tag_unread', { n: 1 })}"></span>` : ''}
             <span class="tracker-item-title" title="${BSE.Utils.escapeHtml(item.title)}">${BSE.Utils.escapeHtml(item.title)}</span>
           </div>
           <span class="tracker-item-time">${formatTrackerTime(item.pubdate)}</span>
@@ -653,7 +792,7 @@
           ${badge}
           <div class="tracker-item-actions">
             ${actions}
-            ${item.url ? `<button class="tracker-item-act-btn tracker-btn-watch" data-url="${BSE.Utils.escapeHtml(item.url)}" title="打开视频播放页">${t('tracker_btn_watch')}</button>` : ''}
+            ${item.url ? `<button class="tracker-item-act-btn tracker-btn-watch" data-url="${BSE.Utils.escapeHtml(item.url)}" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}" title="打开视频播放页">${t('tracker_btn_watch')}</button>` : ''}
           </div>
         </div>
         ${preview}
@@ -747,7 +886,10 @@
             <button class="tracker-card-del-btn tracker-btn-del" data-id="${BSE.Utils.escapeHtml(sub.id)}" data-title="${BSE.Utils.escapeHtml(sub.title)}" title="${t('tracker_btn_untrack')}">✕</button>
           </div>
         </div>
-        <div class="tracker-items">${visibleItems.map((item, itemIndex) => renderTrackerItem(sub, item, `tracker-preview-${subIndex}-${itemIndex}`, itemIndex < unreadCount)).join('')}</div>
+        <div class="tracker-items">${visibleItems.map((item, itemIndex) => {
+          const isItemUnread = unreadCount > 0 && (item.isRead === false || (item.isRead === undefined && itemIndex < unreadCount));
+          return renderTrackerItem(sub, item, `tracker-preview-${subIndex}-${itemIndex}`, isItemUnread);
+        }).join('')}</div>
         ${items.length > visibleCount ? `<button class="tracker-expand-btn" data-id="${BSE.Utils.escapeHtml(sub.id)}">${t('tracker_btn_expand_more', { n: items.length - visibleCount })}</button>` : (expanded && items.length > 1 ? `<button class="tracker-expand-btn" data-id="${BSE.Utils.escapeHtml(sub.id)}">${t('tracker_btn_collapse_more')}</button>` : '')}`;
       fragment.appendChild(card);
     });
@@ -756,8 +898,7 @@
 
   // === Queue (Background Transcription) State & Methods ===
   let queueCache = [];
-  let nativeCapabilitiesCache = null;
-  let nativeCapabilitiesError = null;
+  const nativeCapabilityProbe = BSE.QueueUI.createCapabilityProbeState();
 
   function queueLanguageLabel(code) {
     const t = (key) => BSE.I18n?.t(key) || key;
@@ -795,18 +936,21 @@
   function renderNativeCapabilities() {
     if (!BSE.QueueUI || !elements.queueCapabilityPanel || !elements.queueCapabilityStatus || !elements.queueCapabilityDetails) return;
     const t = (key) => BSE.I18n?.t(key) || key;
+    const snapshot = nativeCapabilityProbe.snapshot();
     BSE.QueueUI.renderCapabilityPanel(
       /** @type {HTMLElement} */ (elements.queueCapabilityPanel),
       /** @type {HTMLElement} */ (elements.queueCapabilityStatus),
       /** @type {HTMLElement} */ (elements.queueCapabilityDetails),
-      nativeCapabilitiesCache,
-      nativeCapabilitiesError,
+      snapshot.capabilities,
+      snapshot.error,
       t
     );
   }
 
   async function loadNativeCapabilities(force = false) {
     if (!elements.queueCapabilityPanel) return;
+    const probeRevision = nativeCapabilityProbe.begin();
+    rotateDiagnosticSession('native', 'capabilities');
     const t = (key) => BSE.I18n?.t(key) || key;
     elements.queueCapabilityPanel.hidden = false;
     elements.queueCapabilityPanel.dataset.state = 'checking';
@@ -816,29 +960,41 @@
     try {
       const response = await chrome.runtime.sendMessage({ type: 'BSE_NATIVE_CAPABILITIES', force });
       if (!response?.ok || !response.capabilities) {
-        nativeCapabilitiesCache = null;
-        nativeCapabilitiesError = response?.error || { code: 'NATIVE_HOST_DISCONNECTED' };
-        appendDiagnostic('本机服务', `探测返回错误：${nativeCapabilitiesError.code || 'UNKNOWN'} · ${nativeCapabilitiesError.message || ''} (提示: ${nativeCapabilitiesError.hint || '无'})`);
+        const capabilityError = response?.error || { code: 'NATIVE_HOST_DISCONNECTED' };
+        if (!nativeCapabilityProbe.commit(probeRevision, { capabilities: null, error: capabilityError })) return;
+        appendDiagnostic('本机服务', `探测返回错误：${capabilityError.code || 'UNKNOWN'} · ${capabilityError.message || ''}`);
       } else {
-        nativeCapabilitiesCache = response.capabilities;
-        nativeCapabilitiesError = null;
         const caps = response.capabilities;
-        appendDiagnostic('本机服务', `探测成功：hostReady=${caps.hostReady} · ytDLP=${caps.ytDLP?.available} (${caps.ytDLP?.detail || ''}) · Parakeet=${caps.models?.parakeet?.available} (${caps.models?.parakeet?.detail || ''}) · Cohere=${caps.models?.cohere?.available} (${caps.models?.cohere?.detail || ''})`);
+        if (!nativeCapabilityProbe.commit(probeRevision, { capabilities: caps, error: null })) return;
+        const ready = BSE.QueueUI.capabilityState(caps, null).key === 'queue_capability_ready';
+        appendDiagnostic('本机服务', ready ? '本机服务已就绪' : '本机服务部分能力不可用', {
+          scope: 'native',
+          sessionId: diagnosticSessions.native,
+          level: ready ? 'info' : 'warn',
+          code: ready ? 'NATIVE_READY' : 'NATIVE_PARTIAL'
+        });
+        appendDiagnostic('本机服务详情', `hostReady=${caps.hostReady} · ytDLP=${caps.ytDLP?.available} (${caps.ytDLP?.detail || ''}) · Parakeet=${caps.models?.parakeet?.available} (${caps.models?.parakeet?.detail || ''}) · Cohere=${caps.models?.cohere?.available} (${caps.models?.cohere?.detail || ''})`, {
+          scope: 'native',
+          sessionId: diagnosticSessions.native,
+          level: 'debug',
+          code: 'NATIVE_CAPABILITIES'
+        });
       }
     } catch (error) {
-      nativeCapabilitiesCache = null;
-      nativeCapabilitiesError = {
+      const capabilityError = {
         code: error?.code || 'NATIVE_HOST_DISCONNECTED',
         message: error?.message || ''
       };
+      if (!nativeCapabilityProbe.commit(probeRevision, { capabilities: null, error: capabilityError })) return;
       appendDiagnostic('本机服务', `通信异常：${error?.code || 'ERROR'} · ${error?.message || error}`);
     } finally {
-      renderNativeCapabilities();
-      if (elements.queueCapabilityRefresh) elements.queueCapabilityRefresh.disabled = false;
+      if (nativeCapabilityProbe.snapshot().revision === probeRevision) {
+        renderNativeCapabilities();
+        if (elements.queueCapabilityRefresh) elements.queueCapabilityRefresh.disabled = false;
+      }
     }
   }
 
-  const lastLoggedQueueStates = new Map();
   async function loadAndRenderQueue() {
     if (!BSE.Queue) return;
     try {
@@ -846,15 +1002,10 @@
       renderQueueList();
       updateQueueBadge();
       for (const item of queueCache) {
-        const last = lastLoggedQueueStates.get(item.id);
-        const currentSig = `${item.stage}:${Math.floor(item.progress || 0)}:${item.stageHint || ''}`;
-        if (last !== currentSig) {
-          lastLoggedQueueStates.set(item.id, currentSig);
-          const stageName = item.stage === 'fetching_audio' ? '音频准备' : (item.stage === 'transcribing' ? '端侧 ASR' : (item.stage === 'done' ? '转录完成' : (item.stage === 'failed' ? '转录失败' : item.stage)));
-          const progressTag = item.stage === 'done' ? '100%' : (item.stage === 'failed' ? '终止' : `总进度 ${Math.floor(item.progress || 0)}%`);
-          appendDiagnostic('转录队列', `[${item.title || item.id}] ${stageName} (${progressTag}) · ${item.stageHint || '执行中'}`);
-        }
+        const event = diagnosticsPresenter.observeQueueItem(item);
+        if (event) diagnosticsPresenter.append(event);
       }
+      renderDiagnostics();
       const hasPending = queueCache.some((i) => !['done', 'failed'].includes(i.stage));
       if (hasPending) {
         if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
@@ -1282,26 +1433,13 @@
     
     // Diagnostic info rendering
     const fault = state?.lastError;
-    if (elements.diagAlert) elements.diagAlert.hidden = !fault;
-    if (Array.isArray(state?.diagnostics)) {
-      for (const line of state.diagnostics) {
-        if (!sidepanelDiagnostics.includes(line)) {
-          sidepanelDiagnostics.push(line);
-        }
-      }
-    }
-    if (elements.diagnosticSummary) {
-      elements.diagnosticSummary.textContent = fault
-        ? `${fault.stage} · ${fault.code}`
-        : (sidepanelDiagnostics.length ? `${sidepanelDiagnostics.length} 条记录` : (BSE.I18n?.t('status_ready') || '就绪'));
-    }
-    if (elements.diagnosticCode) elements.diagnosticCode.textContent = fault ? `${fault.stage} / ${fault.code}` : (BSE.I18n?.t('no_error') || '尚无错误');
-    if (elements.diagnosticHint) elements.diagnosticHint.textContent = fault?.hint || (BSE.I18n?.t('diagnostic_hint') || '提取过程会在这里显示每个请求阶段。');
-    if (elements.diagnostics) {
-      elements.diagnostics.textContent = sidepanelDiagnostics.length
-        ? sidepanelDiagnostics.join('\n')
-        : (BSE.I18n?.t('no_error') || '暂无诊断信息');
-    }
+    diagnosticsPresenter.activateMedia({
+      tabId: activeTabId,
+      sessionId: state?.diagnosticSessionId || `legacy:${activeTabId || 'tab'}:${state?.mediaKey || 'unknown'}`,
+      mediaKey: state?.mediaKey
+    });
+    diagnosticsPresenter.ingestMedia(state?.diagnostics || []);
+    renderDiagnostics();
     if (state?.status === 'error' && elements.diagnosticsPanel) elements.diagnosticsPanel.open = true;
     
     renderTracks();
@@ -1460,8 +1598,16 @@
       updatePlayback(message.activeIndex);
     } else if (message?.type === 'BSE_QUEUE_UPDATED') {
       loadAndRenderQueue();
+    } else if (message?.type === 'BSE_TRACKER_SUBSCRIPTIONS_UPDATED') {
+      loadAndRenderTracker().catch(() => {});
     } else if (message?.type === 'BSE_DIAGNOSTIC_APPEND') {
-      appendDiagnostic(message.stage || '端侧大模型', message.message || '');
+      appendDiagnostic(message.stage || '端侧大模型', message.message || '', {
+        scope: message.scope,
+        sessionId: message.sessionId,
+        level: message.level,
+        code: message.code,
+        context: message.context
+      });
     }
   });
 
@@ -1472,15 +1618,22 @@
         if (hasQueueChanges) {
           loadAndRenderQueue();
         }
+        if (changes && changes['bse_tracker_subscriptions']) {
+          loadAndRenderTracker().catch(() => {});
+        }
       }
     });
   }
 
   window.addEventListener('focus', () => {
     loadInitialState();
+    loadAndRenderTracker().catch(() => {});
   });
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) loadInitialState();
+    if (!document.hidden) {
+      loadInitialState();
+      loadAndRenderTracker().catch(() => {});
+    }
   });
 
   function applyI18nAndTheme() {
@@ -1528,8 +1681,11 @@
     if (elements.copyText) elements.copyText.textContent = t('copy_full_text');
     if (elements.download) elements.download.title = t('export');
     if (elements.exportText) elements.exportText.textContent = t('export');
-    if (elements.diagTitle) elements.diagTitle.textContent = t('diagnostics_title');
-    if (elements.copyDiagnostic) elements.copyDiagnostic.textContent = t('copy_diagnostics');
+    if (elements.copyDiagnostic) {
+      elements.copyDiagnostic.title = t('copy_diagnostics');
+      elements.copyDiagnostic.setAttribute('aria-label', t('copy_diagnostics'));
+    }
+    if (elements.diagnosticTechnicalLabel) elements.diagnosticTechnicalLabel.textContent = t('diagnostic_technical_details');
     if (elements.emptyMessage) elements.emptyMessage.textContent = t('empty_cue_list');
     if (elements.followText) elements.followText.textContent = following ? t('follow') : t('resume_follow');
     if (elements.tabTimestamp) elements.tabTimestamp.textContent = t('tab_timestamp');
@@ -1547,7 +1703,7 @@
     if (elements.queueSourceLanguage) populateQueueLanguageOptions(elements.queueSourceLanguage.value || 'auto');
     if (elements.queueCapabilityTitle) elements.queueCapabilityTitle.textContent = t('queue_capabilities_title');
     if (elements.queueCapabilityRefresh) elements.queueCapabilityRefresh.title = t('queue_capability_refresh');
-    if (nativeCapabilitiesCache || nativeCapabilitiesError) renderNativeCapabilities();
+    if (nativeCapabilityProbe.snapshot().phase === 'settled') renderNativeCapabilities();
     if (elements.queueEmptyTitle) elements.queueEmptyTitle.textContent = t('queue_empty_title');
     if (elements.queueEmptyDesc) elements.queueEmptyDesc.textContent = t('queue_empty_desc');
     if (elements.batchBtnText) elements.batchBtnText.textContent = t('btn_batch_export');
@@ -1859,6 +2015,7 @@
     await BSE.Tracker?.markAllAsRead?.();
     await loadAndRenderTracker();
     chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'BSE_TRACKER_SUBSCRIPTIONS_UPDATED' }).catch(() => {});
     toast(t('tracker_toast_marked_all_read'));
   });
 
@@ -2000,9 +2157,31 @@
       return;
     }
 
+    const unreadDot = e.target.closest('.tracker-item-unread-dot');
+    if (unreadDot) {
+      const subId = unreadDot.dataset.subId;
+      const itemId = unreadDot.dataset.itemId;
+      if (subId && itemId) {
+        await BSE.Tracker?.markAsRead?.(subId, itemId);
+        await loadAndRenderTracker();
+        chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
+        chrome.runtime.sendMessage({ type: 'BSE_TRACKER_SUBSCRIPTIONS_UPDATED' }).catch(() => {});
+      }
+      return;
+    }
+
     const watchBtn = e.target.closest('.tracker-btn-watch');
     if (watchBtn) {
       const url = watchBtn.dataset.url;
+      const subId = watchBtn.dataset.subId;
+      const itemId = watchBtn.dataset.itemId;
+      if (subId && itemId) {
+        BSE.Tracker?.markAsRead?.(subId, itemId).then(() => {
+          loadAndRenderTracker();
+          chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
+          chrome.runtime.sendMessage({ type: 'BSE_TRACKER_SUBSCRIPTIONS_UPDATED' }).catch(() => {});
+        }).catch(() => {});
+      }
       if (url) chrome.tabs.create({ url });
       return;
     }
@@ -2013,6 +2192,7 @@
         await BSE.Tracker?.markAsRead?.(id);
         await loadAndRenderTracker();
         chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
+        chrome.runtime.sendMessage({ type: 'BSE_TRACKER_SUBSCRIPTIONS_UPDATED' }).catch(() => {});
         toast(t('tracker_toast_marked_read'));
       }
       return;
@@ -2025,6 +2205,7 @@
         await BSE.Tracker?.removeSubscription?.(id);
         await loadAndRenderTracker();
         chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
+        chrome.runtime.sendMessage({ type: 'BSE_TRACKER_SUBSCRIPTIONS_UPDATED' }).catch(() => {});
         toast(t('tracker_toast_untracked', { name: title }));
       }
       return;
@@ -2095,19 +2276,988 @@
     }
   });
 
-  // AI Prompt cards
-  document.querySelectorAll('.ai-prompt-card').forEach((card) => {
-    card.addEventListener('click', async () => {
-      if (!state?.cues?.length) {
-        toast('暂无字幕内容可供总结', true);
+  // === AI Workbench & Visual Course Breakdown Note Generator ===
+  let currentAiMode = 'course_notes';
+  let currentGeneratedNote = {
+    markdown: '',
+    imagesMap: {}, // key: timestamp (number/string), value: { dataUrl, timestamp, timeStr, label }
+    mode: 'course_notes',
+    title: '',
+    mediaKey: ''
+  };
+
+  /**
+   * 向当前活动视频标签页安全发送消息
+   */
+  async function sendTabMessage(message) {
+    if (typeof chrome === 'undefined' || !chrome.tabs) return null;
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) throw new Error('未找到当前活跃的视频标签页');
+    return await chrome.tabs.sendMessage(tab.id, message);
+  }
+
+  async function saveCurrentNoteToCache() {
+    if (!state?.mediaKey || !currentGeneratedNote?.markdown || typeof chrome === 'undefined' || !chrome.storage?.local) return;
+    const key = `bse_ai_note_${state.mediaKey}`;
+    try {
+      await chrome.storage.local.set({ [key]: { ...currentGeneratedNote, mediaKey: state.mediaKey } });
+    } catch {}
+  }
+
+  async function restoreNoteFromCache(mediaKey) {
+    if (!mediaKey || typeof chrome === 'undefined' || !chrome.storage?.local) return;
+    const key = `bse_ai_note_${mediaKey}`;
+    try {
+      const res = await chrome.storage.local.get(key);
+      const cached = res[key];
+      if (cached && cached.markdown) {
+        currentGeneratedNote = cached;
+        const html = BSE.Formatters?.renderNoteToHtml?.(cached.markdown, { imagesMap: cached.imagesMap || {} }) || cached.markdown;
+        if (elements.aiNoteContent) {
+          elements.aiNoteContent.innerHTML = html;
+          elements.aiNoteContent.hidden = false;
+        }
+        if (elements.aiNotePlaceholder) elements.aiNotePlaceholder.hidden = true;
+        if (elements.aiBtnCopyNote) elements.aiBtnCopyNote.disabled = false;
+        if (elements.aiBtnExportZip) elements.aiBtnExportZip.disabled = false;
+      }
+    } catch {}
+  }
+
+  async function loadAiConfigToUi() {
+    const config = await BSE.Ai?.getAiSettings?.() || BSE.Ai?.DEFAULT_CONFIG || {};
+    if (elements.aiInputEndpoint) elements.aiInputEndpoint.value = config.endpoint || '';
+    if (elements.aiInputApiKey) elements.aiInputApiKey.value = config.apiKey || '';
+    if (elements.aiInputModel) elements.aiInputModel.value = config.model || '';
+    if (elements.aiModelName) elements.aiModelName.textContent = config.model || 'Gemini 3.7 Flash Thinking';
+    checkAiStatus(config.endpoint, config.apiKey);
+  }
+
+  async function checkAiStatus(endpoint, apiKey) {
+    if (!elements.aiStatusDot) return;
+    elements.aiStatusDot.className = 'badge-dot';
+    try {
+      const probe = await BSE.Ai?.probeLlm?.(endpoint, apiKey);
+      if (probe?.available) {
+        elements.aiStatusDot.className = 'badge-dot online';
+        if (elements.aiModelName && probe.model) {
+          elements.aiModelName.textContent = probe.model;
+        }
+      } else {
+        elements.aiStatusDot.className = 'badge-dot offline';
+      }
+    } catch {
+      elements.aiStatusDot.className = 'badge-dot offline';
+    }
+  }
+
+  function setupAiWorkbench() {
+    loadAiConfigToUi();
+
+    // Toggle AI Settings Panel
+    const toggleAiSettings = () => {
+      if (!elements.aiSettingsDrawer) return;
+      const isHidden = !elements.aiSettingsDrawer.hidden;
+      elements.aiSettingsDrawer.hidden = isHidden;
+      elements.aiSettingsToggle?.classList.toggle('active', !isHidden);
+    };
+
+    if (elements.aiSettingsToggle) {
+      elements.aiSettingsToggle.addEventListener('click', toggleAiSettings);
+    }
+    if (elements.aiModelBadge) {
+      elements.aiModelBadge.addEventListener('click', toggleAiSettings);
+    }
+
+    // Save Settings
+    if (elements.aiBtnSaveSettings) {
+      elements.aiBtnSaveSettings.addEventListener('click', async () => {
+        const endpoint = elements.aiInputEndpoint?.value.trim() || '';
+        const apiKey = elements.aiInputApiKey?.value.trim() || '';
+        const model = elements.aiInputModel?.value.trim() || '';
+        await BSE.Ai?.saveAiSettings?.({ endpoint, apiKey, model });
+        toast('✓ AI 配置已保存');
+        if (elements.aiSettingsDrawer) elements.aiSettingsDrawer.hidden = true;
+        checkAiStatus(endpoint, apiKey);
+      });
+    }
+
+    // Test Connection
+    if (elements.aiBtnTestConn) {
+      elements.aiBtnTestConn.addEventListener('click', async () => {
+        const endpoint = elements.aiInputEndpoint?.value.trim() || '';
+        const apiKey = elements.aiInputApiKey?.value.trim() || '';
+        if (elements.aiTestStatus) elements.aiTestStatus.textContent = '⏳ 正在测试连接…';
+        try {
+          const probe = await BSE.Ai?.probeLlm?.(endpoint, apiKey);
+          if (probe?.available) {
+            if (elements.aiTestStatus) elements.aiTestStatus.textContent = `🟢 连接成功！协议: ${probe.protocol} · 默认模型: ${probe.model}`;
+            if (elements.aiModelName) elements.aiModelName.textContent = probe.model || '在线';
+            if (elements.aiStatusDot) elements.aiStatusDot.className = 'badge-dot online';
+          } else {
+            if (elements.aiTestStatus) elements.aiTestStatus.textContent = `🔴 连接失败: ${probe?.error || '服务未响应'}`;
+            if (elements.aiStatusDot) elements.aiStatusDot.className = 'badge-dot offline';
+          }
+        } catch (err) {
+          if (elements.aiTestStatus) elements.aiTestStatus.textContent = `🔴 测试异常: ${err.message}`;
+        }
+      });
+    }
+
+    // Mode Selector
+    document.querySelectorAll('.ai-mode-pill').forEach((pill) => {
+      pill.addEventListener('click', () => {
+        document.querySelectorAll('.ai-mode-pill').forEach((p) => p.classList.remove('active'));
+        pill.classList.add('active');
+        currentAiMode = pill.dataset.mode || 'course_notes';
+
+        if (currentAiMode === 'prompts') {
+          if (elements.aiPromptsGrid) elements.aiPromptsGrid.hidden = false;
+          if (elements.aiActionToolbar) elements.aiActionToolbar.hidden = true;
+          if (elements.aiNoteResultContainer) elements.aiNoteResultContainer.hidden = true;
+        } else {
+          if (elements.aiPromptsGrid) elements.aiPromptsGrid.hidden = true;
+          if (elements.aiActionToolbar) elements.aiActionToolbar.hidden = false;
+          if (elements.aiNoteResultContainer) elements.aiNoteResultContainer.hidden = false;
+
+          const modeTexts = {
+            course_notes: '生成图文课程讲义',
+            summary: '生成核心主旨脉络',
+            deep_qa: '生成难点辨析自测'
+          };
+          if (elements.aiBtnGenerateText) {
+            elements.aiBtnGenerateText.textContent = modeTexts[currentAiMode] || '开始 AI 深度分解';
+          }
+        }
+      });
+    });
+
+    // Pre-generation Manual Frames Buffer & Tray Management
+    let manualFrames = [];
+
+    // 将 base64 DataURL 同步转为原生 File 对象（供 HTML5 跨窗口直接拖入外部网页 AI）
+    function dataUrlToFile(dataUrl, filename) {
+      try {
+        const parts = dataUrl.split(',');
+        const mime = parts[0].match(/:(.*?);/)?.[1] || 'image/png';
+        const bstr = atob(parts[1]);
+        let n = bstr.length;
+        const u8arr = new Uint8Array(n);
+        while (n--) {
+          u8arr[n] = bstr.charCodeAt(n);
+        }
+        return new File([u8arr], filename, { type: mime });
+      } catch (err) {
+        console.error('dataUrlToFile 转换失败:', err);
+        return null;
+      }
+    }
+
+    function renderManualTray() {
+      if (!elements.aiManualTray || !elements.aiManualTrayList) return;
+      if (!manualFrames.length) {
+        elements.aiManualTray.hidden = true;
         return;
       }
-      const promptId = card.dataset.prompt;
-      const text = BSE.Formatters.generateAiPrompt(promptId, state.cues, false, { title: state.title });
-      await navigator.clipboard.writeText(text);
-      toast(BSE.I18n?.t('ai_copied_toast') || '✓ 已复制 AI 提示词与文稿');
+      elements.aiManualTray.hidden = false;
+      if (elements.aiManualTrayCount) {
+        elements.aiManualTrayCount.textContent = String(manualFrames.length);
+      }
+      elements.aiManualTrayList.innerHTML = manualFrames.map((frame, idx) => `
+        <div class="ai-tray-card" draggable="true" data-index="${idx}" data-seek="${frame.timestamp}" title="按住可直接拖入左侧网页 AI · 点击跳转至 ${frame.timeStr}">
+          <img src="${frame.dataUrl}" alt="${frame.timeStr}" draggable="false" />
+          <span class="ai-tray-card-time">${frame.timeStr}</span>
+          <button class="btn-delete-tray-card" data-index="${idx}" title="移除此截图">✕</button>
+        </div>
+      `).join('');
+    }
+
+    // 支持将单张截图直接从托盘拖入网页版 AI (ChatGPT / Claude / DeepSeek)
+    if (elements.aiManualTrayList) {
+      elements.aiManualTrayList.addEventListener('dragstart', (e) => {
+        const card = e.target.closest('.ai-tray-card');
+        if (!card) return;
+        const idx = Number(card.dataset.index);
+        const frame = manualFrames[idx];
+        if (frame && e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          const safeTime = (frame.timeStr || `frame_${idx + 1}`).replace(/[:：]/g, '-');
+          const file = dataUrlToFile(frame.dataUrl, `frame_${idx + 1}_${safeTime}.png`);
+          if (file && e.dataTransfer.items) {
+            e.dataTransfer.items.add(file);
+          }
+        }
+      });
+    }
+
+    // 支持将全部截图一次性拖入网页版 AI
+    const btnDragAllTray = document.querySelector('#btn-drag-all-tray');
+    if (btnDragAllTray) {
+      btnDragAllTray.addEventListener('dragstart', (e) => {
+        if (!manualFrames.length) {
+          e.preventDefault();
+          return;
+        }
+        e.dataTransfer.effectAllowed = 'copy';
+        let addedCount = 0;
+        manualFrames.forEach((frame, idx) => {
+          const safeTime = (frame.timeStr || `frame_${idx + 1}`).replace(/[:：]/g, '-');
+          const file = dataUrlToFile(frame.dataUrl, `frame_${idx + 1}_${safeTime}.png`);
+          if (file && e.dataTransfer.items) {
+            e.dataTransfer.items.add(file);
+            addedCount++;
+          }
+        });
+        e.dataTransfer.setData('text/plain', `SparkSub 已附加 ${addedCount} 张高清原画截图`);
+        toast(`🖐️ 正在拖拽全部 ${addedCount} 张原画，在网页 AI 输入框松手即可上传！`);
+      });
+    }
+
+    if (elements.aiManualTray) {
+      elements.aiManualTray.addEventListener('click', (e) => {
+        const delBtn = e.target.closest('.btn-delete-tray-card');
+        if (delBtn) {
+          e.stopPropagation();
+          const idx = Number(delBtn.dataset.index);
+          if (idx >= 0 && idx < manualFrames.length) {
+            const removed = manualFrames.splice(idx, 1)[0];
+            renderManualTray();
+            toast(`已移除 ${removed?.timeStr || ''} 预选截图`);
+          }
+          return;
+        }
+
+        const clearBtn = e.target.closest('#btn-clear-manual-tray');
+        if (clearBtn) {
+          e.stopPropagation();
+          manualFrames = [];
+          renderManualTray();
+          toast('已清空预选截图');
+          return;
+        }
+
+        const trayCard = e.target.closest('.ai-tray-card');
+        if (trayCard && trayCard.dataset.seek) {
+          const sec = Number(trayCard.dataset.seek);
+          if (Number.isFinite(sec)) {
+            command('SEEK', { time: sec });
+            toast(`▶ 已跳转至 ${BSE.Utils?.formatClock ? BSE.Utils.formatClock(sec) : sec}`);
+          }
+        }
+      });
+    }
+
+    // 将多张已截帧画面垂直拼接为一张带时间戳分割的高清长图
+    async function stitchFramesToBlob(frames) {
+      if (!Array.isArray(frames) || !frames.length) return null;
+      const loaded = await Promise.all(frames.map((f, idx) => {
+        return new Promise((resolve) => {
+          const img = new Image();
+          img.onload = () => resolve({ img, frame: f, index: idx });
+          img.onerror = () => resolve(null);
+          img.src = f.dataUrl;
+        });
+      }));
+      const valid = loaded.filter(Boolean);
+      if (!valid.length) return null;
+
+      const targetWidth = 1280;
+      const headerHeight = 36;
+      let totalHeight = 0;
+      const heights = valid.map(({ img }) => {
+        const h = Math.round((targetWidth / img.width) * img.height);
+        totalHeight += (h + headerHeight + 8);
+        return h;
+      });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = targetWidth;
+      canvas.height = totalHeight;
+      const ctx = canvas.getContext('2d');
+
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      let currentY = 0;
+      valid.forEach(({ img, frame }, idx) => {
+        const h = heights[idx];
+        // 绘制标题头栏
+        ctx.fillStyle = '#1e293b';
+        ctx.fillRect(0, currentY, targetWidth, headerHeight);
+
+        ctx.fillStyle = '#38bdf8';
+        ctx.font = 'bold 16px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+        const titleText = `【画面 ${idx + 1}】时间戳: ${frame.timeStr || frame.timestamp + 's'}  ${frame.label || ''}`;
+        ctx.fillText(titleText, 16, currentY + 24);
+
+        // 绘制截图画面
+        ctx.drawImage(img, 0, currentY + headerHeight, targetWidth, h);
+        currentY += (headerHeight + h + 8);
+      });
+
+      return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    }
+
+    // 复制拼接长图（一次性将多张截图以一张长图形式写入系统剪切板，去网页端可直接 Ctrl+V 粘贴）
+    if (elements.btnCopyStitchedTray) {
+      elements.btnCopyStitchedTray.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!manualFrames.length) {
+          toast('当前暂无截图可供拼接复制', true);
+          return;
+        }
+        toast(`🖼️ 正在拼接 ${manualFrames.length} 张板书原画…`);
+        try {
+          const blob = await stitchFramesToBlob(manualFrames);
+          if (!blob) {
+            toast('长图生成失败', true);
+            return;
+          }
+          await navigator.clipboard.write([
+            new ClipboardItem({ 'image/png': blob })
+          ]);
+          toast(`🖼️ 已将全部 ${manualFrames.length} 张截图拼成长图并复制！去网页版 AI 按 Ctrl+V 即可直接粘贴！`);
+        } catch (err) {
+          console.error('[SparkSub] 复制长图异常:', err);
+          toast(`复制长图失败: ${err.message}`, true);
+        }
+      });
+    }
+
+    // 打包下载全部截图为 ZIP（方便在网页端 AI 一次性拖拽上传多张图片附件）
+    if (elements.btnDownloadTrayImages) {
+      elements.btnDownloadTrayImages.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!manualFrames.length) {
+          toast('当前暂无截图可供打包', true);
+          return;
+        }
+        if (!BSE.JSZip) {
+          toast('JSZip 依赖未就绪', true);
+          return;
+        }
+        toast(`📦 正在打包 ${manualFrames.length} 张高清原画…`);
+        try {
+          const zip = new BSE.JSZip();
+          manualFrames.forEach((frame, idx) => {
+            const base64Data = (frame.dataUrl || '').replace(/^data:image\/\w+;base64,/, '');
+            const safeTime = (frame.timeStr || `frame_${idx + 1}`).replace(/[:：]/g, '-');
+            const fileName = `${String(idx + 1).padStart(2, '0')}_${safeTime}.webp`;
+            zip.file(fileName, base64Data, { base64: true });
+          });
+          const blob = await zip.generateAsync({ type: 'blob' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          const safeTitle = (state?.title || '视频截图').replace(/[/\\?%*:|"<>]/g, '_').slice(0, 30);
+          a.href = url;
+          a.download = `${safeTitle}_${manualFrames.length}张关键帧.zip`;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 5000);
+          toast(`📦 已成功下载截图包！解压后可直接批量拖入网页版 AI`);
+        } catch (err) {
+          toast(`打包下载失败: ${err.message}`, true);
+        }
+      });
+    }
+
+    // Copy External Planning Prompt for Web-based AI (ChatGPT / DeepSeek / Claude)
+    if (elements.aiBtnCopyPlanPrompt) {
+      elements.aiBtnCopyPlanPrompt.addEventListener('click', async () => {
+        if (!state?.cues?.length) {
+          toast('暂无字幕内容可供提取提示词', true);
+          return;
+        }
+        const promptText = BSE.Ai?.buildPlanningPrompt?.({
+          title: state.title,
+          author: state.author,
+          cues: state.cues,
+          manualFrames
+        }) || '';
+        if (!promptText) {
+          toast('构建提示词失败', true);
+          return;
+        }
+        await navigator.clipboard.writeText(promptText);
+        toast('📋 已复制阶段一规划词！可直接粘贴至网页版 ChatGPT/DeepSeek/Claude 获取截图点位');
+      });
+    }
+
+    // Copy External Synthesis Prompt (Stage 2) with already-captured screenshot tags
+    if (elements.aiBtnCopySynthPrompt) {
+      elements.aiBtnCopySynthPrompt.addEventListener('click', async () => {
+        if (!state?.cues?.length) {
+          toast('暂无字幕内容可供生成讲义', true);
+          return;
+        }
+
+        // 收集当前所有已截帧画面（包含 manualFrames 与 imagesMap 中的帧）
+        const capturedFrames = [...manualFrames];
+        if (currentGeneratedNote?.imagesMap) {
+          for (const key of Object.keys(currentGeneratedNote.imagesMap)) {
+            const entry = currentGeneratedNote.imagesMap[key];
+            if (entry && typeof entry === 'object' && entry.dataUrl) {
+              if (!capturedFrames.some(f => Math.abs(f.timestamp - entry.timestamp) <= 1)) {
+                capturedFrames.push(entry);
+              }
+            }
+          }
+        }
+
+        const promptText = BSE.Ai?.buildCourseNotePrompt?.({
+          title: state.title,
+          author: state.author,
+          cues: state.cues,
+          capturedFrames,
+          mode: currentAiMode || 'course_notes'
+        }) || '';
+
+        if (!promptText) {
+          toast('构建讲义合成提示词失败', true);
+          return;
+        }
+
+        await navigator.clipboard.writeText(promptText);
+        if (capturedFrames.length > 0) {
+          toast(`📝 已复制阶段二讲义合成词（已内置 ${capturedFrames.length} 处画面截图锚点）！可发给网页版 AI`);
+        } else {
+          toast('📝 已复制阶段二讲义合成词！可发给网页版 AI（建议先导入规划截取板书画面效果更佳）');
+        }
+      });
+    }
+
+    // Open & Close Import Modal
+    function openImportModal() {
+      if (elements.aiImportModal) {
+        elements.aiImportModal.hidden = false;
+        if (elements.aiImportTextarea) {
+          elements.aiImportTextarea.value = '';
+          setTimeout(() => elements.aiImportTextarea.focus(), 50);
+        }
+      }
+    }
+
+    function closeImportModal() {
+      if (elements.aiImportModal) {
+        elements.aiImportModal.hidden = true;
+      }
+    }
+
+    if (elements.aiBtnOpenImportModal) {
+      elements.aiBtnOpenImportModal.addEventListener('click', openImportModal);
+    }
+    if (elements.aiBtnCloseImportModal) {
+      elements.aiBtnCloseImportModal.addEventListener('click', closeImportModal);
+    }
+    if (elements.aiBtnCancelImport) {
+      elements.aiBtnCancelImport.addEventListener('click', closeImportModal);
+    }
+
+    // Confirm & Process External Import (JSON or Markdown)
+    if (elements.aiBtnConfirmImport) {
+      elements.aiBtnConfirmImport.addEventListener('click', async () => {
+        const rawText = (elements.aiImportTextarea?.value || '').trim();
+        if (!rawText) {
+          toast('请先粘贴内容', true);
+          return;
+        }
+
+        // 1. 尝试解析为 JSON 规划
+        const parsedJson = BSE.Ai?.extractJsonFromText?.(rawText);
+        if (parsedJson && (parsedJson.visualRequests || parsedJson.visualEvidence || parsedJson.chapters)) {
+          closeImportModal();
+          appendDiagnostic('AI外部导入', `成功解析外部规划 JSON · 提取 ${parsedJson.chapters?.length || 0} 个章节 · ${parsedJson.visualRequests?.length || parsedJson.visualEvidence?.length || 0} 处视觉需求`, { scope: 'ai', level: 'info' });
+
+          const visualRequests = Array.isArray(parsedJson.visualRequests)
+            ? parsedJson.visualRequests
+            : (Array.isArray(parsedJson.visualEvidence) ? parsedJson.visualEvidence : []);
+
+          const videoDuration = state.duration || Infinity;
+          const visualEvidence = BSE.VisualDetector?.resolveRequestTimestamps
+            ? BSE.VisualDetector.resolveRequestTimestamps(visualRequests, videoDuration)
+            : visualRequests.map((req, idx) => ({
+                ...req,
+                id: req.id || `VR_${idx + 1}`,
+                timestamp: req.targetSec || req.timestamp || (idx + 1) * 60,
+                timeStr: req.timeStr || `${Math.round(req.targetSec || req.timestamp || (idx + 1) * 60)}s`,
+                label: req.label || req.evidenceGoal || `视觉检查点 ${idx + 1}`,
+                reason: req.reason || '重要板书/演示'
+              }));
+
+          if (visualEvidence.length > 0) {
+            if (elements.aiProgressBox) elements.aiProgressBox.hidden = false;
+            if (elements.aiProgressText) elements.aiProgressText.textContent = `正在根据导入的规划定向截取高清原画 (0/${visualEvidence.length})…`;
+
+            let doneCount = 0;
+            for (const ev of visualEvidence) {
+              try {
+                const targetTime = Number.isFinite(ev.optimalSec) ? ev.optimalSec : ev.timestamp;
+                const existingManual = manualFrames.find(mf => Math.abs(mf.timestamp - targetTime) <= 3);
+                if (existingManual) {
+                  doneCount++;
+                  continue;
+                }
+                const res = await sendTabMessage({
+                  type: 'BSE_CAPTURE_FRAME',
+                  timestamp: targetTime,
+                  options: { restoreTime: true, quality: 0.85, maxWidth: 1280 }
+                });
+                if (res?.ok && res.frame?.dataUrl) {
+                  const sec = targetTime;
+                  const timeStr = ev.timeStr || (BSE.Utils?.formatClock ? BSE.Utils.formatClock(sec) : `${Math.round(sec)}s`);
+                  const frameObj = {
+                    dataUrl: res.frame.dataUrl,
+                    timestamp: sec,
+                    timeStr,
+                    label: ev.label || ev.reason || ev.evidenceGoal,
+                    reason: ev.reason || ev.evidenceGoal
+                  };
+                  manualFrames.push(frameObj);
+                  renderManualTray();
+                  appendDiagnostic('AI视觉证据', `外部规划截帧成功 (${doneCount + 1}/${visualEvidence.length}) · ${timeStr} · ${frameObj.label}`, { scope: 'ai', level: 'info' });
+                }
+              } catch (err) {
+                console.warn('[SparkSub AI] 外部规划截帧失败:', ev, err);
+              }
+              doneCount++;
+              if (elements.aiProgressText) elements.aiProgressText.textContent = `正在根据导入的规划定向截取高清原画 (${doneCount}/${visualEvidence.length})…`;
+            }
+            if (elements.aiProgressBox) elements.aiProgressBox.hidden = true;
+            toast(`✨ 成功截取 ${manualFrames.length} 张高清画面！已加入托盘，可随时点击生成或导出讲义`);
+          } else {
+            toast('✓ 已识别章节大纲（未包含截图点位）');
+          }
+          return;
+        }
+
+        // 2. 若不是规划 JSON，直接作为最终 Markdown 讲义渲染
+        closeImportModal();
+        const imagesMap = currentGeneratedNote?.imagesMap || {};
+        for (const mf of manualFrames) {
+          imagesMap[mf.timestamp] = mf;
+          imagesMap[String(mf.timestamp)] = mf;
+          imagesMap[mf.timeStr] = mf;
+        }
+        currentGeneratedNote = {
+          markdown: rawText,
+          imagesMap,
+          mode: 'course_notes',
+          title: state?.title || '导入讲义',
+          mediaKey: state?.mediaKey || ''
+        };
+        const html = BSE.Formatters?.renderNoteToHtml?.(rawText, { imagesMap }) || rawText;
+        if (elements.aiNoteContent) {
+          elements.aiNoteContent.innerHTML = html;
+          elements.aiNoteContent.hidden = false;
+        }
+        if (elements.aiNotePlaceholder) elements.aiNotePlaceholder.hidden = true;
+        if (elements.aiBtnCopyNote) elements.aiBtnCopyNote.disabled = false;
+        if (elements.aiBtnExportZip) elements.aiBtnExportZip.disabled = false;
+        await saveCurrentNoteToCache();
+        toast('✨ 讲义 Markdown 已导入并完成图文渲染！');
+      });
+    }
+
+    // Generate AI Notes (两阶段视频证据规划与多模态合成流水线)
+    if (elements.aiBtnGenerate) {
+      elements.aiBtnGenerate.addEventListener('click', async () => {
+        if (!state?.cues?.length) {
+          toast('暂无字幕内容可供分解', true);
+          return;
+        }
+
+        const activeConfig = await BSE.Ai?.getAiSettings?.() || BSE.Ai?.DEFAULT_CONFIG || {};
+        const activeModelName = activeConfig.model || '大模型';
+
+        elements.aiBtnGenerate.disabled = true;
+        if (elements.aiProgressBox) elements.aiProgressBox.hidden = false;
+        if (elements.aiNotePlaceholder) elements.aiNotePlaceholder.hidden = true;
+
+        const updateProgress = (txt) => {
+          if (elements.aiProgressText) elements.aiProgressText.textContent = txt;
+        };
+
+        const startTime = performance.now();
+        let step3Timer = null;
+        try {
+          const imagesMap = {};
+          const capturedScreenshots = [];
+          let plannedEvidence = [];
+
+          let aiResult;
+          if (currentAiMode === 'course_notes') {
+            // 阶段一：大模型规划 Video Understanding IR 与视觉检查请求（附带用户已手动标记的截帧）
+            appendDiagnostic('AI视频规划', `正在向大模型发起章节结构与视觉检查需求规划 (字幕: ${state.cues.length} 条 · 手动预选: ${manualFrames.length} 张 · 模型: ${activeModelName})…`, { scope: 'ai', level: 'info' });
+            updateProgress(`1/3 正在由 ${activeModelName} 规划视频章节结构与视觉检查窗口 (IR Planning)…`);
+            const planResult = await BSE.Ai?.planVisualEvidence?.({
+              title: state.title,
+              author: state.author,
+              cues: state.cues,
+              manualFrames,
+              videoDuration: state.duration || Infinity,
+              endpoint: activeConfig.endpoint,
+              apiKey: activeConfig.apiKey,
+              model: activeConfig.model
+            });
+
+            plannedEvidence = planResult?.visualEvidence || [];
+            appendDiagnostic('AI视频规划', `规划完成 · 提取 ${planResult?.chapters?.length || 0} 个章节 · 发起 ${plannedEvidence.length} 处视觉检查需求 (策略: ${planResult?.strategy || 'llm'})`, { scope: 'ai', level: 'info' });
+
+            // 阶段二：定向精准截取目标帧稳定代表帧原画，并将用户手动截取的关键帧无缝并入证据流
+            const capturedFrames = [...manualFrames];
+            for (const mf of manualFrames) {
+              imagesMap[mf.timestamp] = mf;
+              imagesMap[String(mf.timestamp)] = mf;
+              imagesMap[mf.timeStr] = mf;
+              capturedScreenshots.push(mf.dataUrl);
+            }
+
+            if (plannedEvidence.length > 0) {
+              updateProgress(`2/3 正在根据大模型规划定位稳定画面代表帧 (0/${plannedEvidence.length})…`);
+              let doneCount = 0;
+              for (const ev of plannedEvidence) {
+                try {
+                  const targetTime = Number.isFinite(ev.optimalSec) ? ev.optimalSec : ev.timestamp;
+                  // 若用户已预先截取过该时间附近（3秒内）的画面，直接复用，避免重复寻道
+                  const existingManual = manualFrames.find(mf => Math.abs(mf.timestamp - targetTime) <= 3);
+                  if (existingManual) {
+                    imagesMap[targetTime] = existingManual;
+                    imagesMap[String(targetTime)] = existingManual;
+                    imagesMap[ev.timeStr || `${Math.round(targetTime)}s`] = existingManual;
+                    doneCount++;
+                    updateProgress(`2/3 正在根据大模型规划定位稳定画面代表帧 (${doneCount}/${plannedEvidence.length})…`);
+                    continue;
+                  }
+
+                  const res = await sendTabMessage({
+                    type: 'BSE_CAPTURE_FRAME',
+                    timestamp: targetTime,
+                    options: { restoreTime: true, quality: 0.85, maxWidth: 1280 }
+                  });
+                  if (res?.ok && res.frame?.dataUrl) {
+                    const sec = targetTime;
+                    const timeStr = ev.timeStr || (BSE.Utils?.formatClock ? BSE.Utils.formatClock(sec) : `${Math.round(sec)}s`);
+                    const frameObj = {
+                      dataUrl: res.frame.dataUrl,
+                      timestamp: sec,
+                      timeStr,
+                      label: ev.label || ev.reason || ev.evidenceGoal,
+                      reason: ev.reason || ev.evidenceGoal
+                    };
+                    imagesMap[sec] = frameObj;
+                    imagesMap[String(sec)] = frameObj;
+                    imagesMap[timeStr] = frameObj;
+                    capturedScreenshots.push(res.frame.dataUrl);
+                    capturedFrames.push(frameObj);
+                    appendDiagnostic('AI视觉证据', `成功截取代表帧 (${doneCount + 1}/${plannedEvidence.length}) · ${timeStr} · ${frameObj.label}`, { scope: 'ai', level: 'info' });
+                  } else {
+                    appendDiagnostic('AI视觉证据', `代表帧截取受限 (${ev.timeStr || targetTime + 's'}): ${res?.error || '画面未就绪'}`, { scope: 'ai', level: 'warn' });
+                  }
+                } catch (err) {
+                  console.warn('[SparkSub AI] 截帧失败:', ev, err);
+                  appendDiagnostic('AI视觉证据', `代表帧截取异常: ${err.message}`, { scope: 'ai', level: 'warn' });
+                }
+                doneCount++;
+                updateProgress(`2/3 正在根据大模型规划定位稳定画面代表帧 (${doneCount}/${plannedEvidence.length})…`);
+              }
+            }
+
+            // 阶段三：基于 Video Understanding IR 与真实画面进行多模态讲义合成
+            appendDiagnostic('AI多模态合成', `正在向多模态大模型上传 ${capturedFrames.length} 张画面与结构化知识大纲 (模型: ${activeModelName})…`, { scope: 'ai', level: 'info' });
+            let elapsedSec = 0;
+            updateProgress(`3/3 正在由多模态大模型组织结构化知识与图文讲义排版… (已耗时 0s)`);
+            step3Timer = setInterval(() => {
+              elapsedSec++;
+              updateProgress(`3/3 正在由多模态大模型组织结构化知识与图文讲义排版… (已耗时 ${elapsedSec}s)`);
+            }, 1000);
+
+            aiResult = await BSE.Ai?.generateCourseNotes?.({
+              title: state.title,
+              author: state.author,
+              cues: state.cues,
+              screenshots: capturedScreenshots,
+              capturedFrames,
+              videoIR: planResult,
+              mode: currentAiMode,
+              endpoint: activeConfig.endpoint,
+              apiKey: activeConfig.apiKey,
+              model: activeConfig.model,
+              onProgress: (p) => updateProgress(p)
+            });
+          } else {
+            appendDiagnostic('AI文本精修', `正在由大模型深度提炼文本 (模式: ${currentAiMode} · 模型: ${activeModelName})…`, { scope: 'ai', level: 'info' });
+            updateProgress(`正在由 ${activeModelName} 深度提炼…`);
+            aiResult = await BSE.Ai?.generateCourseNotes?.({
+              title: state.title,
+              author: state.author,
+              cues: state.cues,
+              screenshots: [],
+              capturedFrames: [],
+              visualEvidence: [],
+              mode: currentAiMode,
+              endpoint: activeConfig.endpoint,
+              apiKey: activeConfig.apiKey,
+              model: activeConfig.model,
+              onProgress: updateProgress
+            });
+          }
+
+          if (step3Timer) {
+            clearInterval(step3Timer);
+            step3Timer = null;
+          }
+
+          const markdown = aiResult?.markdown || '';
+          const totalDurationSec = ((performance.now() - startTime) / 1000).toFixed(1);
+          appendDiagnostic('AI多模态合成', `讲义生成成功 (总耗时 ${totalDurationSec}s · Markdown ${markdown.length} 字符 · 渲染 ${Object.keys(imagesMap).length} 张图文证据)`, { scope: 'ai', level: 'info' });
+
+          currentGeneratedNote = {
+            markdown,
+            imagesMap,
+            mode: currentAiMode,
+            title: state.title || '课程笔记',
+            mediaKey: state.mediaKey || ''
+          };
+
+          // Render Markdown with Interactive Image Cards
+          const html = BSE.Formatters?.renderNoteToHtml?.(markdown, { imagesMap }) || markdown;
+          if (elements.aiNoteContent) {
+            elements.aiNoteContent.innerHTML = html;
+            elements.aiNoteContent.hidden = false;
+          }
+
+          if (elements.aiBtnCopyNote) elements.aiBtnCopyNote.disabled = false;
+          if (elements.aiBtnExportZip) elements.aiBtnExportZip.disabled = false;
+          await saveCurrentNoteToCache();
+          toast('✨ 图文课程讲义生成成功！');
+        } catch (err) {
+          if (step3Timer) {
+            clearInterval(step3Timer);
+            step3Timer = null;
+          }
+          appendDiagnostic('AI生成异常', `生成失败: ${err.message}`, { scope: 'ai', level: 'error' });
+          const is401 = String(err.message).includes('401') || String(err.message).includes('invalid_api_key');
+          if (is401) {
+            toast('⚠️ AI 认证失败：请在右上角 ⚙️ 输入并保存 API Key', true);
+            if (elements.aiSettingsDrawer) elements.aiSettingsDrawer.hidden = false;
+            if (elements.aiInputApiKey) elements.aiInputApiKey.focus();
+          } else {
+            toast(`生成失败: ${err.message}`, true);
+          }
+          if (elements.aiNotePlaceholder) elements.aiNotePlaceholder.hidden = false;
+        } finally {
+          if (step3Timer) {
+            clearInterval(step3Timer);
+            step3Timer = null;
+          }
+          elements.aiBtnGenerate.disabled = false;
+          if (elements.aiProgressBox) elements.aiProgressBox.hidden = true;
+        }
+      });
+    }
+
+    // Snip Current Frame Button (支持预选截图托盘与实时讲义追加)
+    if (elements.aiBtnSnipFrame) {
+      elements.aiBtnSnipFrame.addEventListener('click', async () => {
+        try {
+          const res = await sendTabMessage({
+            type: 'BSE_CAPTURE_FRAME',
+            options: { quality: 0.85, maxWidth: 1280 }
+          });
+          if (res?.ok && res.frame?.dataUrl) {
+            const time = Math.round(res.frame.timestamp || 0);
+            const timeStr = BSE.Utils?.formatClock ? BSE.Utils.formatClock(time) : `${time}s`;
+            const frameObj = {
+              dataUrl: res.frame.dataUrl,
+              timestamp: time,
+              timeStr,
+              label: `重点画面 (${timeStr})`,
+              reason: '用户手动标记的关键画面'
+            };
+
+            // 1. 保存至预选截图托盘（供稍后点击生成讲义时一并传给 AI）
+            const existingIdx = manualFrames.findIndex(f => Math.abs(f.timestamp - time) <= 1);
+            if (existingIdx >= 0) {
+              manualFrames[existingIdx] = frameObj;
+            } else {
+              manualFrames.push(frameObj);
+            }
+            renderManualTray();
+
+            // 2. 若当前已处于讲义展示状态，同步向现有讲义中插入卡片
+            if (currentGeneratedNote?.markdown) {
+              currentGeneratedNote.imagesMap[timeStr] = frameObj;
+              currentGeneratedNote.imagesMap[time] = frameObj;
+              const extraTag = `\n\n[SCREENSHOT: ${timeStr} "重点画面截图"]\n`;
+              currentGeneratedNote.markdown += extraTag;
+
+              const html = BSE.Formatters?.renderNoteToHtml?.(currentGeneratedNote.markdown, { imagesMap: currentGeneratedNote.imagesMap }) || currentGeneratedNote.markdown;
+              if (elements.aiNoteContent) {
+                elements.aiNoteContent.innerHTML = html;
+                elements.aiNoteContent.hidden = false;
+              }
+              if (elements.aiNotePlaceholder) elements.aiNotePlaceholder.hidden = true;
+              if (elements.aiBtnCopyNote) elements.aiBtnCopyNote.disabled = false;
+              if (elements.aiBtnExportZip) elements.aiBtnExportZip.disabled = false;
+              await saveCurrentNoteToCache();
+              toast(`📸 已截取 ${timeStr} 画面并加入笔记！`);
+            } else {
+              toast(`📸 已截取 ${timeStr} 画面（已加入预选，生成讲义时将一并传给 AI）！`);
+            }
+          } else {
+            toast('截帧失败，请确认当前视频正在播放', true);
+          }
+        } catch (err) {
+          toast(`截帧异常: ${err.message}`, true);
+        }
+      });
+    }
+
+    // Click handler for jump-to-time buttons, slot capture, and image deletion inside note
+    if (elements.aiNoteContent) {
+      elements.aiNoteContent.addEventListener('click', async (e) => {
+        // 1. 删除图片按钮
+        const deleteBtn = e.target.closest('.note-card-delete-btn');
+        if (deleteBtn) {
+          e.stopPropagation();
+          e.preventDefault();
+          const timeStr = deleteBtn.dataset.timestr;
+          const sec = Number(deleteBtn.dataset.seek);
+          if (currentGeneratedNote?.imagesMap) {
+            delete currentGeneratedNote.imagesMap[timeStr];
+            delete currentGeneratedNote.imagesMap[sec];
+            delete currentGeneratedNote.imagesMap[String(sec)];
+          }
+          if (currentGeneratedNote?.markdown) {
+            const regex = new RegExp(`\\[SCREENSHOT:\\s*${timeStr}[^\\]]*\\]\\n?`, 'gi');
+            currentGeneratedNote.markdown = currentGeneratedNote.markdown.replace(regex, '');
+            const html = BSE.Formatters?.renderNoteToHtml?.(currentGeneratedNote.markdown, { imagesMap: currentGeneratedNote.imagesMap }) || currentGeneratedNote.markdown;
+            elements.aiNoteContent.innerHTML = html;
+            await saveCurrentNoteToCache();
+            toast(`🗑️ 已删除 ${timeStr} 截图`);
+          }
+          return;
+        }
+
+        // 2. 跳转播放按钮
+        const jumpBtn = e.target.closest('.note-jump-btn') || e.target.closest('.note-image-card');
+        if (jumpBtn && jumpBtn.dataset.seek) {
+          const sec = Number(jumpBtn.dataset.seek);
+          if (Number.isFinite(sec)) {
+            command('SEEK', { time: sec });
+            toast(`▶ 已跳转至 ${BSE.Utils?.formatClock ? BSE.Utils.formatClock(sec) : sec}`);
+          }
+          return;
+        }
+
+        // 3. 立即补截插槽按钮
+        const slotBtn = e.target.closest('.btn-capture-slot');
+        if (slotBtn) {
+          const sec = Number(slotBtn.dataset.seek);
+          const timeStr = slotBtn.dataset.timestr;
+          toast(`📸 正在截取 ${timeStr} 画面…`);
+          const res = await sendTabMessage({
+            type: 'BSE_CAPTURE_FRAME',
+            timestamp: sec,
+            options: { restoreTime: true, quality: 0.85, maxWidth: 1280 }
+          });
+          if (res?.ok && res.frame?.dataUrl) {
+            currentGeneratedNote.imagesMap[timeStr] = {
+              dataUrl: res.frame.dataUrl,
+              timestamp: sec,
+              timeStr,
+              label: `板书画面 (${timeStr})`
+            };
+            currentGeneratedNote.imagesMap[sec] = currentGeneratedNote.imagesMap[timeStr];
+            const html = BSE.Formatters?.renderNoteToHtml?.(currentGeneratedNote.markdown, { imagesMap: currentGeneratedNote.imagesMap }) || currentGeneratedNote.markdown;
+            elements.aiNoteContent.innerHTML = html;
+            await saveCurrentNoteToCache();
+            toast(`✓ 成功嵌入 ${timeStr} 板书截图`);
+          }
+        }
+      });
+    }
+
+    // Copy Note Markdown
+    if (elements.aiBtnCopyNote) {
+      elements.aiBtnCopyNote.addEventListener('click', async () => {
+        if (!currentGeneratedNote.markdown) return;
+        await navigator.clipboard.writeText(currentGeneratedNote.markdown);
+        toast('📋 已复制图文笔记 Markdown 全文');
+      });
+    }
+
+    // Export Note with Images as ZIP Package (For Obsidian / Notion) (去重打包)
+    if (elements.aiBtnExportZip) {
+      elements.aiBtnExportZip.addEventListener('click', async () => {
+        if (!currentGeneratedNote.markdown || !BSE.JSZip) {
+          toast('无可用笔记或打包模块未加载', true);
+          return;
+        }
+        try {
+          toast('📦 正在打包图文 Markdown 笔记压缩包…');
+          const zip = new BSE.JSZip();
+          const safeTitle = (state?.title || 'Course_Notes').replace(/[\/\\?%*:|"<>]/g, '_').slice(0, 40);
+
+          // 去重收集唯一的图像
+          const uniqueImageMap = new Map();
+          for (const [key, item] of Object.entries(currentGeneratedNote.imagesMap || {})) {
+            if (!item || !item.dataUrl) continue;
+            const dataUrl = item.dataUrl;
+            if (!uniqueImageMap.has(dataUrl)) {
+              uniqueImageMap.set(dataUrl, item);
+            }
+          }
+
+          let exportedMd = currentGeneratedNote.markdown;
+          let imgIndex = 1;
+
+          for (const [dataUrl, item] of uniqueImageMap.entries()) {
+            const timeStr = String(item.timeStr || item.timestamp || imgIndex).replace(/:/g, '_');
+            const imgFilename = `screenshot_${timeStr}_${imgIndex++}.webp`;
+
+            const base64Data = dataUrl.replace(/^data:image\/[^;]+;base64,/, '');
+            const binaryStr = atob(base64Data);
+            const bytes = new Uint8Array(binaryStr.length);
+            for (let i = 0; i < binaryStr.length; i++) {
+              bytes[i] = binaryStr.charCodeAt(i);
+            }
+            zip.file(`images/${imgFilename}`, bytes);
+
+            const tagRegexTimestamp = new RegExp(`\\[SCREENSHOT:\\s*${item.timestamp}(?:\\s*["“]([^"”]+)["”])?\\]`, 'gi');
+            exportedMd = exportedMd.replace(tagRegexTimestamp, (_m, desc) => `![${desc || item.label || '板书截图'}](images/${imgFilename})`);
+
+            if (item.timeStr) {
+              const tagRegexTimeStr = new RegExp(`\\[SCREENSHOT:\\s*${item.timeStr}(?:\\s*["“]([^"”]+)["”])?\\]`, 'gi');
+              exportedMd = exportedMd.replace(tagRegexTimeStr, (_m, desc) => `![${desc || item.label || '板书截图'}](images/${imgFilename})`);
+            }
+          }
+
+          zip.file(`${safeTitle}.md`, exportedMd);
+          const blob = await zip.generateAsync({ type: 'blob' });
+          BSE.Utils?.downloadBlob?.(blob, `${safeTitle}_图文讲义.zip`);
+          toast('✓ 已成功导出图文 Markdown 压缩包！');
+        } catch (err) {
+          toast(`导出失败: ${err.message}`, true);
+        }
+      });
+    }
+
+    // Legacy AI Prompt cards
+    document.querySelectorAll('.ai-prompt-card').forEach((card) => {
+      card.addEventListener('click', async () => {
+        if (!state?.cues?.length) {
+          toast('暂无字幕内容可供总结', true);
+          return;
+        }
+        const promptId = card.dataset.prompt;
+        const text = BSE.Formatters.generateAiPrompt(promptId, state.cues, false, { title: state.title });
+        await navigator.clipboard.writeText(text);
+        toast(BSE.I18n?.t('ai_copied_toast') || '✓ 已复制 AI 提示词与文稿');
+      });
     });
-  });
+  }
+
+  setupAiWorkbench();
 
   if (elements.settingsToggle) {
     elements.settingsToggle.addEventListener('click', () => {
@@ -2252,17 +3402,17 @@
     toast(BSE.I18n?.t('copied_full_text') || '已复制字幕全文');
   });
 
-  elements.copyDiagnostic.addEventListener('click', async () => {
+  elements.copyDiagnostic.addEventListener('click', async (event) => {
+    event.stopPropagation();
     const fault = state?.lastError;
     const header = [
       `扩展版本：${state?.version || '未知'}`,
       `平台：${state?.platform || '未知'}`,
       `媒体：${state?.mediaKey || '未知'}`,
       `状态：${state?.status || '未知'} / ${state?.message || ''}`,
-      `错误：${fault ? `${fault.stage} / ${fault.code} / ${fault.message}` : '无'}`,
-      `建议：${fault?.hint || '无'}`
+      `错误：${fault ? `${fault.stage} / ${fault.code} / ${fault.message}` : '无'}`
     ].join('\n');
-    await navigator.clipboard.writeText(`${header}\n\n${sidepanelDiagnostics.join('\n') || '暂无诊断信息'}`);
+    await navigator.clipboard.writeText(diagnosticsPresenter.copyTechnical(header));
     toast(BSE.I18n?.t('copied_diagnostics') || '已复制诊断信息');
   });
 
@@ -2468,9 +3618,13 @@
       elements.batchStartBtn.hidden = false;
       elements.batchPauseBtn.hidden = true;
       elements.batchCancelBtn.hidden = true;
+      rotateDiagnosticSession('batch', 'export');
 
       toast('正在分析合集与分P架构…');
-      const diagLogger = (stage, msg) => appendDiagnostic(stage, msg);
+      const diagLogger = (stage, msg) => appendDiagnostic(stage, msg, {
+        scope: 'batch',
+        sessionId: diagnosticSessions.batch
+      });
 
       if (isYouTube) {
         const cachedSub = subscriptionsCache.find((s) => s.id === targetId || s.targetId === targetId);
@@ -2530,14 +3684,18 @@
           return false;
         });
         if (matchingSub) {
-          const episodes = currentTree.items.map((it) => ({
-            id: it.videoId || it.bvid || `${bvid}:p${it.page}`,
-            title: String(it.part || it.title || '').trim(),
-            url: it.sourceUrl || `https://www.bilibili.com/video/${it.bvid || bvid}${it.page && it.page > 1 ? `?p=${it.page}` : ''}`,
-            pubdate: it.pubdate ? (it.pubdate > 1e11 ? it.pubdate : it.pubdate * 1000) : Date.now(),
-            duration: Number(it.duration) || 0,
-            author: currentTree.title || matchingSub.title
-          }));
+          const episodes = currentTree.items.map((it) => {
+            const isMultiP = Boolean(it.page && it.page > 1);
+            const epId = isMultiP ? `${bvid || it.bvid}:p${it.page}` : (it.videoId || it.bvid || `${bvid || ytId || 'ep'}:p1`);
+            return {
+              id: epId,
+              title: String(it.part || it.title || '').trim(),
+              url: it.sourceUrl || `https://www.bilibili.com/video/${it.bvid || bvid}${it.page && it.page > 1 ? `?p=${it.page}` : ''}`,
+              pubdate: it.pubdate ? (it.pubdate > 1e11 ? it.pubdate : it.pubdate * 1000) : Date.now(),
+              duration: Number(it.duration) || 0,
+              author: currentTree.title || matchingSub.title
+            };
+          });
           matchingSub.items = episodes;
           if (bvid) matchingSub.bvid = bvid;
           matchingSub.latestBvid = episodes[0]?.id || bvid || ytId;
@@ -2729,7 +3887,10 @@
     elements.batchCancelBtn.hidden = false;
     elements.batchProgressBox.hidden = false;
 
-    const diagLogger = (stage, msg) => appendDiagnostic(stage, msg);
+    const diagLogger = (stage, msg) => appendDiagnostic(stage, msg, {
+      scope: 'batch',
+      sessionId: diagnosticSessions.batch
+    });
 
     try {
       const runner = currentTree?.kind === 'youtube_playlist' ? BSE.YouTube?.runBatchExport : BSE.Bilibili?.runBatchExport;
