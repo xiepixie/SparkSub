@@ -119,6 +119,12 @@ enum YouTubeCaptionKind: String, Codable, Equatable, Sendable {
     case translated
 }
 
+enum YouTubeCaptionPreference: String, Codable, Equatable, Sendable {
+    case manualFirst = "manual-first"
+    case manualOnly = "manual-only"
+    case aiFirst = "ai-first"
+}
+
 struct YouTubeCaptionMetadata: Equatable, Sendable {
     let language: String
     let langDoc: String
@@ -166,17 +172,28 @@ enum NativeRequestType: String, Codable, Sendable {
     case cancel
 }
 
+struct NativeASRContext: Decodable, Sendable {
+    let topic: String?
+    let terms: [String]?
+}
+
 struct NativeRequest: Decodable, Sendable {
-    static let protocolVersion = 1
+    static let legacyProtocolVersion = 1
+    static let currentProtocolVersion = 2
+    static let supportedProtocolVersions: Set<Int> = [legacyProtocolVersion, currentProtocolVersion]
+    static let contractIdentifier = "sparkscribe.browser-native/2"
 
     let type: NativeRequestType
     let requestId: String
     let protocolVersion: Int
     let jobId: String?
     let sourceLanguage: String?
+    let subtitlePreference: YouTubeCaptionPreference?
     let title: String?
     let duration: Double?
     let platformLanguage: String?
+    let mediaKey: String?
+    let asrContext: NativeASRContext?
     let source: SourceDescriptor?
 
     static func decodeAndValidate(_ data: Data) throws -> NativeRequest {
@@ -193,9 +210,9 @@ struct NativeRequest: Decodable, Sendable {
         case .cancel:
             allowedKeys = baseKeys.union(["jobId"])
         case .transcribe:
-            allowedKeys = baseKeys.union(["jobId", "sourceLanguage", "title", "duration", "platformLanguage", "source"])
+            allowedKeys = baseKeys.union(["jobId", "sourceLanguage", "title", "duration", "platformLanguage", "mediaKey", "asrContext", "source"])
         case .youtubeCaptions:
-            allowedKeys = baseKeys.union(["jobId", "sourceLanguage", "source"])
+            allowedKeys = baseKeys.union(["jobId", "sourceLanguage", "subtitlePreference", "source"])
         }
         guard Set(object.keys).isSubset(of: allowedKeys) else { throw AppError.invalidRequest }
 
@@ -205,7 +222,7 @@ struct NativeRequest: Decodable, Sendable {
         } catch {
             throw AppError.invalidRequest
         }
-        guard request.protocolVersion == protocolVersion else { throw AppError.protocolMismatch }
+        guard supportedProtocolVersions.contains(request.protocolVersion) else { throw AppError.protocolMismatch }
         guard !request.requestId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AppError.invalidRequest
         }
@@ -231,6 +248,24 @@ struct NativeRequest: Decodable, Sendable {
             }
             if request.type == .youtubeCaptions, source.kind != .youtube { throw AppError.invalidRequest }
             if let duration = request.duration, !duration.isFinite || duration < 0 { throw AppError.invalidRequest }
+            if let mediaKey = request.mediaKey {
+                guard !mediaKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      mediaKey.count <= 160 else { throw AppError.invalidRequest }
+            }
+            if let context = request.asrContext {
+                let contextObject = object["asrContext"] as? [String: Any]
+                guard request.type == .transcribe,
+                      let contextObject,
+                      Set(contextObject.keys).isSubset(of: ["topic", "terms"]) else {
+                    throw AppError.invalidRequest
+                }
+                if let topic = context.topic, topic.count > 80 { throw AppError.invalidRequest }
+                let terms = context.terms ?? []
+                guard terms.count <= 6,
+                      terms.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.count <= 24 }) else {
+                    throw AppError.invalidRequest
+                }
+            }
         }
         return request
     }

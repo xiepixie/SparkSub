@@ -1,11 +1,11 @@
 /**
  * SparkSub Recommendation Feed & Video Card Injector
- * Injects "📥 转文字" action button onto Bilibili & YouTube video cards
+ * Injects a transcript action button onto Bilibili & YouTube video cards
  */
 (() => {
   'use strict';
 
-  const BSE = globalThis.BSE = globalThis.BSE || {};
+  const BSE = globalThis.BSE;
 
   // Inject feed styles once
   function ensureFeedStyles() {
@@ -149,8 +149,11 @@
   }
 
   let queueCache = new Map();
+  let queueSyncPromise = null;
+  let queueSyncFollowUpRequested = false;
+  let queueSyncTimer = null;
 
-  async function syncQueueState() {
+  async function performQueueSync() {
     try {
       if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
         const res = await chrome.runtime.sendMessage({ type: 'BSE_QUEUE_GET' }).catch(() => null);
@@ -173,6 +176,31 @@
     }
   }
 
+  async function syncQueueState() {
+    if (queueSyncPromise) {
+      queueSyncFollowUpRequested = true;
+      return queueSyncPromise;
+    }
+    queueSyncPromise = performQueueSync();
+    try {
+      await queueSyncPromise;
+    } finally {
+      queueSyncPromise = null;
+      if (queueSyncFollowUpRequested) {
+        queueSyncFollowUpRequested = false;
+        scheduleQueueSync();
+      }
+    }
+  }
+
+  function scheduleQueueSync() {
+    if (queueSyncTimer) clearTimeout(queueSyncTimer);
+    queueSyncTimer = setTimeout(() => {
+      queueSyncTimer = null;
+      syncQueueState().catch(() => {});
+    }, 35);
+  }
+
   function findQueueItem(itemId) {
     if (!itemId) return null;
     return queueCache.get(itemId)
@@ -184,32 +212,32 @@
     const item = findQueueItem(itemId);
     if (!item) {
       btn.className = 'sparksub-feed-btn';
-      btn.innerHTML = '📥 转文字';
+      btn.textContent = '转文字';
       btn.title = '加入 SparkSub 后台转录队列 (无需打开视频)';
       return;
     }
 
     if (item.stage === 'done') {
       btn.className = 'sparksub-feed-btn is-done';
-      btn.innerHTML = '✓ 已就绪';
+      btn.textContent = '已就绪';
       btn.title = `已提取 ${item.subtitle?.cueCount || 0} 句字幕 · 点击复制 Markdown`;
     } else if (item.stage === 'failed') {
       btn.className = 'sparksub-feed-btn is-failed';
-      btn.innerHTML = '✕ 失败重试';
+      btn.textContent = '失败重试';
       btn.title = `转录失败：${item.error || '未知错误'} · 点击重试`;
     } else if (item.stage === 'queued') {
       btn.className = 'sparksub-feed-btn is-active';
-      btn.innerHTML = '⏳ 排队中';
+      btn.textContent = '排队中';
       btn.title = '正在后台排队中…';
     } else {
       btn.className = 'sparksub-feed-btn is-processing';
-      btn.innerHTML = `⚡ 转录中 ${item.progress || 0}%`;
+      btn.textContent = `转录中 ${item.progress || 0}%`;
       btn.title = item.stageHint || '正在后台提取转录中…';
     }
   }
 
   function updateAllButtons() {
-    const buttons = document.querySelectorAll('.sparksub-feed-btn');
+    const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('button.sparksub-feed-btn'));
     buttons.forEach((btn) => {
       const itemId = btn.dataset.itemId;
       if (itemId) updateButtonState(btn, itemId);
@@ -245,8 +273,8 @@
         try {
           const textToCopy = currentItem.subtitle.markdown || currentItem.subtitle.plainText;
           await navigator.clipboard.writeText(textToCopy);
-          showToast(`✓ 已复制《${currentItem.title}》转录字幕`);
-          btn.innerHTML = '✓ 已复制';
+          showToast(`已复制《${currentItem.title}》转录字幕`);
+          btn.textContent = '已复制';
           setTimeout(() => updateButtonState(btn, itemId), 1500);
         } catch {
           showToast('复制失败，请在侧边栏中查看');
@@ -256,7 +284,7 @@
 
       // Enqueue / retry
       btn.className = 'sparksub-feed-btn is-active';
-      btn.innerHTML = '⏳ 排队中';
+      btn.textContent = '排队中';
 
       try {
         let enqueued = false;
@@ -284,9 +312,9 @@
           if (returnedItem?.stage === 'done') {
             queueCache.set(itemId, returnedItem);
             updateButtonState(btn, itemId);
-            showToast(`✓ 《${title}》字幕已就绪`);
+            showToast(`《${title}》字幕已就绪`);
           } else {
-            showToast(`📥 已将《${title}》加入后台转录队列`);
+            showToast(`已将《${title}》加入后台转录队列`);
             queueCache.set(itemId, returnedItem || { id: itemId, stage: 'queued', title, author, cover, progress: 0 });
             updateButtonState(btn, itemId);
           }
@@ -307,11 +335,31 @@
     coverContainer.appendChild(btn);
   }
 
-  function scanBilibiliCards() {
-    const cards = document.querySelectorAll('.bili-video-card, .feed-card, .bili-feed-card, .video-card, .small-item, .rank-item, .video-list-item, .bili-grid .bili-video-card');
+  const BILIBILI_CARD_SELECTOR = '.bili-video-card, .feed-card, .bili-feed-card, .video-card, .small-item, .rank-item, .video-list-item, .bili-grid .bili-video-card';
+  const YOUTUBE_CARD_SELECTOR = 'ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, ytd-reel-item-renderer, yt-lockup-view-model, .ytLockupViewModelHost';
+
+  /**
+   * 收集一个变更节点自身、其最近卡片祖先和内部新卡片，避免每次 DOM 变化都扫描整页。
+   * @param {ParentNode} root
+   * @param {string} selector
+   * @returns {Element[]}
+   */
+  function collectAffectedCards(root, selector) {
+    const cards = new Set();
+    if (root instanceof Element) {
+      if (root.matches(selector)) cards.add(root);
+      const owner = root.closest(selector);
+      if (owner) cards.add(owner);
+    }
+    root.querySelectorAll?.(selector).forEach((card) => cards.add(card));
+    return [...cards];
+  }
+
+  function scanBilibiliCards(root = document) {
+    const cards = collectAffectedCards(root, BILIBILI_CARD_SELECTOR);
     cards.forEach((card) => {
       if (card.querySelector('.sparksub-feed-btn')) return;
-      const link = card.querySelector('a[href*="/video/BV"], a[href*="bilibili.com/video/"], a[href*="BV"]');
+      const link = /** @type {HTMLAnchorElement | null} */ (card.querySelector('a[href*="/video/BV"], a[href*="bilibili.com/video/"], a[href*="BV"]'));
       if (!link) return;
 
       const bvMatch = (link.href || '').match(/BV[a-zA-Z0-9]{10}/i);
@@ -323,18 +371,18 @@
       const title = titleElem?.getAttribute('title') || titleElem?.textContent?.trim() || `B站视频 (${bvid})`;
       const authorElem = card.querySelector('.bili-video-card__info--author, .up-name, .author, .name, .bili-video-card__info--owner');
       const author = authorElem?.textContent?.trim() || 'UP主';
-      const imgElem = card.querySelector('img');
+      const imgElem = /** @type {HTMLImageElement | null} */ (card.querySelector('img'));
       const cover = imgElem?.src || '';
 
       attachButtonToCard(coverContainer, link.href, title, author, cover, bvid);
     });
   }
 
-  function scanYouTubeCards() {
-    const cards = document.querySelectorAll('ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, ytd-reel-item-renderer, yt-lockup-view-model, .ytLockupViewModelHost');
+  function scanYouTubeCards(root = document) {
+    const cards = collectAffectedCards(root, YOUTUBE_CARD_SELECTOR);
     cards.forEach((card) => {
       if (card.querySelector('.sparksub-feed-btn')) return;
-      const link = card.querySelector('a.ytLockupViewModelContentImage, a#thumbnail[href*="/watch?v="], a[href*="/watch?v="], a[href*="/shorts/"]');
+      const link = /** @type {HTMLAnchorElement | null} */ (card.querySelector('a.ytLockupViewModelContentImage, a#thumbnail[href*="/watch?v="], a[href*="/watch?v="], a[href*="/shorts/"]'));
       if (!link) return;
 
       const match = link.href.match(/(?:watch\?.*v=|shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/i);
@@ -346,30 +394,46 @@
       const title = titleElem?.getAttribute('title') || titleElem?.getAttribute('aria-label') || titleElem?.textContent?.trim() || `YouTube 视频 (${videoId})`;
       const authorElem = card.querySelector('.ytAttributedStringLinkCallToActionColor, ytd-channel-name, #channel-name, #text.ytd-channel-name');
       const author = authorElem?.textContent?.trim() || 'YouTube 频道';
-      const imgElem = card.querySelector('img');
+      const imgElem = /** @type {HTMLImageElement | null} */ (card.querySelector('img'));
       const cover = imgElem?.src || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
 
       attachButtonToCard(coverContainer, link.href, title, author, cover, videoId);
     });
   }
 
-  function scanAllCards() {
+  function scanAllCards(root = document) {
     ensureFeedStyles();
     if (location.hostname.includes('bilibili.com')) {
-      scanBilibiliCards();
+      scanBilibiliCards(root);
     } else if (location.hostname.includes('youtube.com')) {
-      scanYouTubeCards();
+      scanYouTubeCards(root);
     }
   }
 
-  // MutationObserver with 180ms throttling
+  const pendingScanRoots = new Set();
   let scanTimer = null;
-  const observer = new MutationObserver(() => {
-    if (!scanTimer) {
-      scanTimer = setTimeout(() => {
-        scanTimer = null;
-        scanAllCards();
-      }, 180);
+  function scheduleCardScan(root) {
+    if (root instanceof Element) pendingScanRoots.add(root);
+    if (scanTimer) return;
+    scanTimer = setTimeout(() => {
+      scanTimer = null;
+      const roots = [...pendingScanRoots];
+      pendingScanRoots.clear();
+      // Mutation bursts can contain hundreds of tiny nodes. In that case one full
+      // scan is cheaper than hundreds of overlapping subtree queries.
+      if (roots.length > 40) {
+        scanAllCards(document);
+        return;
+      }
+      roots.forEach((scanRoot) => scanAllCards(scanRoot));
+    }, 80);
+  }
+
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      record.addedNodes.forEach((node) => {
+        if (node instanceof Element) scheduleCardScan(node);
+      });
     }
   });
 
@@ -386,7 +450,7 @@
     if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
       chrome.runtime.onMessage.addListener((message) => {
         if (message?.type === 'BSE_QUEUE_UPDATED') {
-          syncQueueState();
+          scheduleQueueSync();
         }
       });
     }
@@ -398,7 +462,7 @@
           (k) => k === 'bse_transcription_queue_v1' || k.startsWith('bse_transcription_queue_v1:item:')
         );
         if (hasQueueChange) {
-          syncQueueState();
+          scheduleQueueSync();
         }
       });
     }

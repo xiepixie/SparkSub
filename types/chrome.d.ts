@@ -40,6 +40,7 @@ declare namespace chrome.runtime {
   export function sendMessage(message: any): Promise<any>;
   export function sendMessage(extensionId: string, message: any): Promise<any>;
   export function connectNative(application: string): Port;
+  export function getURL(path: string): string;
 }
 
 declare namespace chrome.tabs {
@@ -59,8 +60,9 @@ declare namespace chrome.tabs {
     height?: number;
     sessionId?: string;
   }
-  export function query(queryInfo: { active?: boolean; currentWindow?: boolean; url?: string | string[] }): Promise<Tab[]>;
+  export function query(queryInfo: { active?: boolean; currentWindow?: boolean; lastFocusedWindow?: boolean; url?: string | string[] }): Promise<Tab[]>;
   export function get(tabId: number): Promise<Tab>;
+  export function create(createProperties: { url?: string; active?: boolean; windowId?: number; index?: number }): Promise<Tab>;
   export function sendMessage(tabId: number, message: any, options?: any): Promise<any>;
   export const onRemoved: {
     addListener(callback: (tabId: number, removeInfo: { windowId: number; isWindowClosing: boolean }) => void): void;
@@ -113,12 +115,66 @@ declare namespace chrome.scripting {
   export function executeScript(injection: ScriptInjection): Promise<any[]>;
 }
 
+declare namespace chrome.contextMenus {
+  export interface OnClickData {
+    menuItemId: string | number;
+    linkUrl?: string;
+    pageUrl?: string;
+    srcUrl?: string;
+  }
+  export const onClicked: {
+    addListener(callback: (info: OnClickData, tab?: chrome.tabs.Tab) => void | Promise<void>): void;
+  };
+  export function removeAll(callback?: () => void): Promise<void> | void;
+  export function create(createProperties: { id?: string | number; title: string; contexts?: string[] }): string | number;
+}
+
+declare namespace chrome.notifications {
+  export function create(options: {
+    type: 'basic';
+    iconUrl: string;
+    title: string;
+    message: string;
+    priority?: number;
+  }, callback?: (notificationId: string) => void): Promise<string> | void;
+}
+
+declare namespace chrome.action {
+  export function setBadgeText(details: { text: string; tabId?: number }): Promise<void>;
+  export function setBadgeBackgroundColor(details: { color: string | number[]; tabId?: number }): Promise<void>;
+}
+
+declare namespace chrome.alarms {
+  export interface Alarm { name: string; scheduledTime: number; periodInMinutes?: number; }
+  export const onAlarm: { addListener(callback: (alarm: Alarm) => void | Promise<void>): void; };
+  export function create(name: string, alarmInfo: { delayInMinutes?: number; periodInMinutes?: number; when?: number }): Promise<void> | void;
+  export function clear(name: string): Promise<boolean>;
+}
+
+declare namespace chrome.declarativeNetRequest {
+  export function updateDynamicRules(options: { removeRuleIds?: number[]; addRules?: any[] }): Promise<void>;
+}
+
+declare namespace chrome.downloads {
+  export function download(options: {
+    url: string;
+    filename?: string;
+    saveAs?: boolean;
+    conflictAction?: 'uniquify' | 'overwrite' | 'prompt';
+    headers?: Array<{ name: string; value: string }>;
+  }, callback?: (downloadId: number) => void): Promise<number> | void;
+}
+
 declare namespace chrome.storage {
   export interface StorageArea {
     get(keys?: string | string[] | Record<string, any> | null): Promise<Record<string, any>>;
+    get(keys: string | string[] | Record<string, any> | null, callback: (items: Record<string, any>) => void): void;
     set(items: Record<string, any>): Promise<void>;
+    set(items: Record<string, any>, callback: () => void): void;
     remove(keys: string | string[]): Promise<void>;
+    remove(keys: string | string[], callback: () => void): void;
     clear(): Promise<void>;
+    clear(callback: () => void): void;
   }
   export const sync: StorageArea;
   export const local: StorageArea;

@@ -42,7 +42,7 @@ manifest_dirs=()
 if ((remove_chrome)); then manifest_dirs+=("$APP_SUPPORT/Google/Chrome/NativeMessagingHosts"); fi
 if ((remove_chromium)); then manifest_dirs+=("$APP_SUPPORT/Chromium/NativeMessagingHosts"); fi
 
-owned_paths=("$SPARKSUB_ROOT/SparkSubHost" "$SPARKSUB_ROOT/bin/yt-dlp_macos" "$SPARKSUB_ROOT/bin/yt-dlp_macos.version")
+owned_paths=("$SPARKSUB_ROOT/SparkSubHost" "$SPARKSUB_ROOT/bin/yt-dlp_macos" "$SPARKSUB_ROOT/bin/yt-dlp_macos.zip" "$SPARKSUB_ROOT/bin/yt-dlp_macos.version")
 for manifest_dir in "${manifest_dirs[@]}"; do
   owned_paths+=("$manifest_dir/$HOST_NAME.json")
 done

@@ -72,23 +72,45 @@ final class NativeProtocolTests: XCTestCase {
         }
     }
 
-    func testRequestDecoderRequiresProtocolV1AndExactCorrelationFields() throws {
-        let data = Data(#"{"type":"transcribe","requestId":"request-7","protocolVersion":1,"jobId":"job-9","sourceLanguage":"en","source":{"kind":"youtube","url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}}"#.utf8)
-        let request = try NativeRequest.decodeAndValidate(data)
+    func testRequestDecoderSupportsV1AndV2WithExactCorrelationFields() throws {
+        for protocolVersion in [NativeRequest.legacyProtocolVersion, NativeRequest.currentProtocolVersion] {
+            let json = "{\"type\":\"transcribe\",\"requestId\":\"request-7\",\"protocolVersion\":\(protocolVersion),\"jobId\":\"job-9\",\"sourceLanguage\":\"en\",\"source\":{\"kind\":\"youtube\",\"url\":\"https://www.youtube.com/watch?v=dQw4w9WgXcQ\"}}"
+            let request = try NativeRequest.decodeAndValidate(Data(json.utf8))
 
-        XCTAssertEqual(request.requestId, "request-7")
-        XCTAssertEqual(request.jobId, "job-9")
-        XCTAssertEqual(request.type, .transcribe)
-        XCTAssertEqual(request.source?.kind, .youtube)
+            XCTAssertEqual(request.requestId, "request-7")
+            XCTAssertEqual(request.jobId, "job-9")
+            XCTAssertEqual(request.type, .transcribe)
+            XCTAssertEqual(request.protocolVersion, protocolVersion)
+            XCTAssertEqual(request.source?.kind, .youtube)
+        }
+    }
+
+    func testTranscriptionRequestAcceptsBoundedV2MediaIdentityAndASRContext() throws {
+        let data = Data(#"{"type":"transcribe","requestId":"context-1","protocolVersion":2,"jobId":"job-1","sourceLanguage":"zh","mediaKey":"bili:BV1TEST:cid42","asrContext":{"topic":"CRC循环冗余检验","terms":["CRC","生成多项式","模2除法"]},"source":{"kind":"remote","url":"https://a.bilivideo.com/audio.m4a","headers":{"Referer":"https://www.bilibili.com/","User-Agent":"SparkSub"}}}"#.utf8)
+        let request = try NativeRequest.decodeAndValidate(data)
+        XCTAssertEqual(request.mediaKey, "bili:BV1TEST:cid42")
+        XCTAssertEqual(request.asrContext?.topic, "CRC循环冗余检验")
+        XCTAssertEqual(request.asrContext?.terms ?? [], ["CRC", "生成多项式", "模2除法"])
+
+        let oversized = Data("{\"type\":\"transcribe\",\"requestId\":\"context-2\",\"protocolVersion\":2,\"jobId\":\"job-2\",\"sourceLanguage\":\"zh\",\"asrContext\":{\"topic\":\"\(String(repeating: "x", count: 81))\"},\"source\":{\"kind\":\"youtube\",\"url\":\"https://www.youtube.com/watch?v=dQw4w9WgXcQ\"}}".utf8)
+        XCTAssertThrowsError(try NativeRequest.decodeAndValidate(oversized)) { error in
+            XCTAssertEqual((error as? AppError)?.code, "INVALID_REQUEST")
+        }
     }
 
     func testYouTubeCaptionRequestAllowsOnlyCanonicalCaptionFields() throws {
-        let data = Data(#"{"type":"youtubeCaptions","requestId":"caption-7","protocolVersion":1,"jobId":"job-9","sourceLanguage":"yue","source":{"kind":"youtube","url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}}"#.utf8)
+        let data = Data(#"{"type":"youtubeCaptions","requestId":"caption-7","protocolVersion":1,"jobId":"job-9","sourceLanguage":"yue","subtitlePreference":"ai-first","source":{"kind":"youtube","url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}}"#.utf8)
         let request = try NativeRequest.decodeAndValidate(data)
 
         XCTAssertEqual(request.type, .youtubeCaptions)
         XCTAssertEqual(request.sourceLanguage, "yue")
+        XCTAssertEqual(request.subtitlePreference, .aiFirst)
         XCTAssertEqual(request.source?.kind, .youtube)
+
+        let invalidPreference = Data(#"{"type":"youtubeCaptions","requestId":"caption-7","protocolVersion":1,"jobId":"job-9","sourceLanguage":"yue","subtitlePreference":"anything","source":{"kind":"youtube","url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}}"#.utf8)
+        XCTAssertThrowsError(try NativeRequest.decodeAndValidate(invalidPreference)) { error in
+            XCTAssertEqual((error as? AppError)?.code, "INVALID_REQUEST")
+        }
 
         let injected = Data(#"{"type":"youtubeCaptions","requestId":"caption-7","protocolVersion":1,"jobId":"job-9","sourceLanguage":"yue","title":"not-allowed","source":{"kind":"youtube","url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}}"#.utf8)
         XCTAssertThrowsError(try NativeRequest.decodeAndValidate(injected)) { error in
@@ -97,7 +119,7 @@ final class NativeProtocolTests: XCTestCase {
     }
 
     func testRequestDecoderRejectsMismatchedProtocolVersion() {
-        let data = Data(#"{"type":"ping","requestId":"request-7","protocolVersion":2}"#.utf8)
+        let data = Data(#"{"type":"ping","requestId":"request-7","protocolVersion":3}"#.utf8)
         XCTAssertThrowsError(try NativeRequest.decodeAndValidate(data)) { error in
             XCTAssertEqual((error as? AppError)?.code, "PROTOCOL_MISMATCH")
         }
@@ -166,20 +188,32 @@ final class NativeProtocolTests: XCTestCase {
             capabilityProvider: StaticCapabilityProvider(),
             workspaceManager: JobWorkspaceManager(rootURL: FileManager.default.temporaryDirectory)
         )
-        let request = Data(#"{"type":"capabilities","requestId":"cap-1","protocolVersion":1}"#.utf8)
 
-        await controller.handlePayload(request)
+        await controller.handlePayload(Data(#"{"type":"capabilities","requestId":"cap-v2","protocolVersion":2}"#.utf8))
+        await controller.handlePayload(Data(#"{"type":"capabilities","requestId":"cap-v1","protocolVersion":1}"#.utf8))
 
         let mediaDownloads = await media.downloadCount
         let transcriptions = await engine.transcriptionCount
         XCTAssertEqual(mediaDownloads, 0)
         XCTAssertEqual(transcriptions, 0)
-        let messages = writer.messages
-        XCTAssertEqual(messages.count, 1)
-        let response = try decodeObject(messages[0])
-        XCTAssertEqual(response["type"] as? String, "response")
-        XCTAssertEqual(response["requestId"] as? String, "cap-1")
-        XCTAssertEqual(response["ok"] as? Bool, true)
+        let messages = try writer.messages.map(decodeObject)
+        XCTAssertEqual(messages.count, 2)
+
+        let v2 = try XCTUnwrap(messages.first { $0["requestId"] as? String == "cap-v2" })
+        let v2Result = try XCTUnwrap(v2["result"] as? [String: Any])
+        XCTAssertEqual(v2Result["protocolVersion"] as? Int, 2)
+        XCTAssertEqual(v2Result["contract"] as? String, NativeRequest.contractIdentifier)
+        let features = try XCTUnwrap(v2Result["features"] as? [String: Any])
+        XCTAssertNotNil(features["localASR"])
+        XCTAssertNotNil(features["youtubeCaptions"])
+        XCTAssertNotNil(features["remoteMedia"])
+        XCTAssertNil(features["parakeet"], "v2 capabilities must not expose concrete model names")
+        XCTAssertNil(features["cohere"], "v2 capabilities must not expose concrete model names")
+
+        let v1 = try XCTUnwrap(messages.first { $0["requestId"] as? String == "cap-v1" })
+        let v1Result = try XCTUnwrap(v1["result"] as? [String: Any])
+        XCTAssertEqual(v1Result["protocolVersion"] as? Int, 1)
+        XCTAssertNotNil(v1Result["models"], "v1 stays available during the migration window")
     }
 
     func testControllerCancelIsJobScopedSuppressesResultsAndCleansWorkspace() async throws {
@@ -437,6 +471,7 @@ private actor SuccessfulYouTubeCaptionFetcher: YouTubeCaptionFetching {
     func fetch(
         source: SourceDescriptor,
         sourceLanguage: String,
+        subtitlePreference: YouTubeCaptionPreference,
         workspace: URL,
         cancellation: CancellationToken,
         onProgress: @escaping @Sendable (Double) -> Void
@@ -559,7 +594,6 @@ private actor BlockingMediaAcquirer: MediaAcquiring {
 private struct StaticCapabilityProvider: CapabilityProviding {
     func capabilities() -> HostCapabilities {
         HostCapabilities(
-            protocolVersion: 1,
             ytDLP: ComponentCapability(available: false, detail: "not installed"),
             parakeet: ComponentCapability(available: false, detail: "not found"),
             cohere: ComponentCapability(available: false, detail: "not found")

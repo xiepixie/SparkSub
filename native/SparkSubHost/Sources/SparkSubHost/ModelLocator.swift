@@ -9,17 +9,60 @@ struct ComponentCapability: Codable, Equatable, Sendable {
 }
 
 struct HostCapabilities: Codable, Equatable, Sendable {
-    let protocolVersion: Int
     let ytDLP: ComponentCapability
     let parakeet: ComponentCapability
     let cohere: ComponentCapability
 
+    private static let europeanLanguageCodes = [
+        "en", "es", "fr", "de", "it", "pt", "ro", "nl", "da", "sv", "fi",
+        "hu", "et", "lv", "lt", "mt", "pl", "cs", "sk", "sl", "hr", "bs",
+        "ru", "uk", "be", "bg", "sr", "el",
+    ]
+
+    /// Current diagnostic representation uses the capability-driven v2 shape.
     var jsonObject: [String: Any] {
-        [
-            "protocolVersion": protocolVersion,
-            "hostReady": ytDLP.available && (parakeet.available || cohere.available),
-            "ytDLP": ytDLP.jsonObject,
-            "models": ["parakeet": parakeet.jsonObject, "cohere": cohere.jsonObject],
+        jsonObject(forProtocolVersion: NativeRequest.currentProtocolVersion)
+    }
+
+    func jsonObject(forProtocolVersion requestedVersion: Int) -> [String: Any] {
+        if requestedVersion == NativeRequest.legacyProtocolVersion {
+            return [
+                "protocolVersion": NativeRequest.legacyProtocolVersion,
+                "hostReady": ytDLP.available && (parakeet.available || cohere.available),
+                "ytDLP": ytDLP.jsonObject,
+                "models": ["parakeet": parakeet.jsonObject, "cohere": cohere.jsonObject],
+            ]
+        }
+
+        var languages: [String] = []
+        if parakeet.available { languages.append(contentsOf: Self.europeanLanguageCodes) }
+        if cohere.available { languages.append("zh") }
+        languages = Array(Set(languages)).sorted()
+        let localASRAvailable = !languages.isEmpty
+
+        return [
+            "protocolVersion": NativeRequest.currentProtocolVersion,
+            "contract": NativeRequest.contractIdentifier,
+            "features": [
+                "localASR": [
+                    "available": localASRAvailable,
+                    "supportsAutoLanguage": localASRAvailable,
+                    "languages": languages,
+                ],
+                "youtubeCaptions": [
+                    "available": ytDLP.available,
+                    "preferences": ["manual-first", "manual-only", "ai-first"],
+                ],
+                "remoteMedia": [
+                    "youtube": ytDLP.available,
+                    "bilibili": true,
+                ],
+                "cancellation": ["available": true],
+                "chunkedResults": [
+                    "available": true,
+                    "maxMessageBytes": NativeFrameCodec.maximumOutputBytes - 1,
+                ],
+            ],
         ]
     }
 }
@@ -148,7 +191,6 @@ final class ModelLocator: CapabilityProviding, @unchecked Sendable {
             FileManager.default.isExecutableFile(atPath: $0.path) && $0.lastPathComponent == "yt-dlp_macos"
         } ?? false
         return HostCapabilities(
-            protocolVersion: NativeRequest.protocolVersion,
             ytDLP: ComponentCapability(
                 available: ytDLPAvailable,
                 detail: ytDLPAvailable

@@ -300,6 +300,18 @@ private final class RestrictedRedirectDelegate: NSObject, URLSessionTaskDelegate
     }
 }
 
+private final class LockedProcessOutput: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ chunk: Data) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        data.append(chunk)
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+}
+
 final class YTDLPProcessExecutor: YTDLPExecuting, @unchecked Sendable {
     static func classifyFailure(exitCode: Int32, output: String) -> AppError {
         _ = exitCode
@@ -352,8 +364,7 @@ final class YTDLPProcessExecutor: YTDLPExecuting, @unchecked Sendable {
         return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             let pipe = Pipe()
-            let outputLock = NSLock()
-            var outputData = Data()
+            let output = LockedProcessOutput()
             var environment = ProcessInfo.processInfo.environment
             let homebrewPaths = "/opt/homebrew/bin:/usr/local/bin:/opt/homebrew/sbin:/usr/local/sbin"
             let existingPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -369,26 +380,20 @@ final class YTDLPProcessExecutor: YTDLPExecuting, @unchecked Sendable {
                     handle.readabilityHandler = nil
                     return
                 }
-                outputLock.lock()
-                outputData.append(data)
-                let snapshot = String(data: outputData, encoding: .utf8) ?? ""
-                outputLock.unlock()
+                let snapshot = output.append(data)
                 if let latest = Self.progressFractions(in: snapshot).last { onProgress(latest) }
             }
             process.terminationHandler = { terminated in
                 pipe.fileHandleForReading.readabilityHandler = nil
                 let trailingData = pipe.fileHandleForReading.readDataToEndOfFile()
-                outputLock.lock()
-                outputData.append(trailingData)
-                let output = String(data: outputData, encoding: .utf8) ?? ""
-                outputLock.unlock()
+                let capturedOutput = output.append(trailingData)
                 if cancellation.isCancelled {
                     continuation.resume(throwing: AppError.cancelled)
                     return
                 }
                 guard terminated.terminationStatus == 0 else {
                     continuation.resume(throwing: Self.classifyFailure(
-                        exitCode: terminated.terminationStatus, output: output
+                        exitCode: terminated.terminationStatus, output: capturedOutput
                     ))
                     return
                 }
@@ -414,6 +419,29 @@ final class YTDLPProcessExecutor: YTDLPExecuting, @unchecked Sendable {
 
 struct JobWorkspaceManager: Sendable {
     let rootURL: URL
+
+    func sweepStaleWorkspaces(olderThan maxAge: TimeInterval = 24 * 60 * 60, now: Date = Date()) throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        let canonicalRoot = rootURL.resolvingSymlinksInPath().standardizedFileURL
+        let candidates = try fileManager.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey, .creationDateKey],
+            options: [.skipsHiddenFiles]
+        )
+        let cutoff = now.addingTimeInterval(-max(0, maxAge))
+
+        for candidate in candidates {
+            guard UUID(uuidString: candidate.lastPathComponent) != nil else { continue }
+            let values = try candidate.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey, .creationDateKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else { continue }
+            let parent = candidate.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+            guard parent == canonicalRoot else { continue }
+            let timestamp = values.contentModificationDate ?? values.creationDate ?? .distantFuture
+            guard timestamp <= cutoff else { continue }
+            try? fileManager.removeItem(at: candidate)
+        }
+    }
 
     func withWorkspace<T>(_ operation: (URL) async throws -> T) async throws -> T {
         let workspace = rootURL.appendingPathComponent(UUID().uuidString, isDirectory: true)

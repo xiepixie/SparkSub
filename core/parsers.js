@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const BSE = globalThis.BSE = globalThis.BSE || /** @type {any} */ ({});
+  const BSE = globalThis.BSE;
 
   /**
    * 规范化与去重字幕条目

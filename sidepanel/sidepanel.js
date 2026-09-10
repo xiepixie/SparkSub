@@ -4,6 +4,7 @@
   const BSE = globalThis.BSE;
   /** @type {import('../types/bse').AppState | null} */
   let state = null;
+  let stateTabId = null;
   let activeTabId = null;
   let activeIndex = -1;
   let following = true;
@@ -11,10 +12,12 @@
   let query = '';
 
   // Batch Export state
+  /** @type {import('../types/bse').BatchMediaTree | null} */
   let currentTree = null;
+  /** @type {import('../types/bse').BatchControlTask | null} */
   let batchControlTask = null;
 
-  const elements = {
+  const elements = /** @type {import('../types/bse').SidepanelElements} */ ({
     title: document.querySelector('#video-title'),
     statusDot: document.querySelector('#status-dot'),
     statusText: document.querySelector('#status-text'),
@@ -23,6 +26,9 @@
     settingsToggle: document.querySelector('#settings-toggle'),
     settingsDrawer: document.querySelector('#settings-drawer'),
     settingsTitle: document.querySelector('#settings-title'),
+    settingsGeneralTitle: document.querySelector('#settings-general-title'),
+    settingsTrackerTitle: document.querySelector('#settings-tracker-title'),
+    settingsDataTitle: document.querySelector('#settings-data-title'),
     labelTheme: document.querySelector('#label-theme'),
     labelLang: document.querySelector('#label-lang'),
     labelPref: document.querySelector('#label-pref'),
@@ -62,6 +68,7 @@
     aiInputEndpoint: document.querySelector('#ai-input-endpoint'),
     aiInputApiKey: document.querySelector('#ai-input-apikey'),
     aiInputModel: document.querySelector('#ai-input-model'),
+    aiModelOptions: document.querySelector('#ai-model-options'),
     aiBtnTestConn: document.querySelector('#ai-btn-test-conn'),
     aiBtnSaveSettings: document.querySelector('#ai-btn-save-settings'),
     aiTestStatus: document.querySelector('#ai-test-status'),
@@ -91,6 +98,7 @@
     aiNotePlaceholder: document.querySelector('#ai-note-placeholder'),
     aiNoteContent: document.querySelector('#ai-note-content'),
     aiPromptsGrid: document.querySelector('#ai-prompts-grid'),
+    aiPromptsToggle: document.querySelector('#ai-prompts-toggle'),
     aiActionToolbar: document.querySelector('#ai-action-toolbar'),
     aiCardSummary: document.querySelector('#ai-card-summary'),
     aiCardKeypoints: document.querySelector('#ai-card-keypoints'),
@@ -126,6 +134,7 @@
     batchQuickEnd: document.querySelector('#batch-quick-end'),
     batchQuickApplyBtn: document.querySelector('#batch-quick-apply-btn'),
     batchFormatRow: document.querySelector('#batch-format-row'),
+    batchFormatLabel: document.querySelector('#batch-format-label'),
     batchTimestampRow: document.querySelector('#batch-timestamp-row'),
     batchProgressBox: document.querySelector('#batch-progress-box'),
     batchProgressText: document.querySelector('#batch-progress-text'),
@@ -197,19 +206,54 @@
     queueCountPill: document.querySelector('#queue-count-pill'),
     queueList: document.querySelector('#queue-list'),
     queueEmpty: document.querySelector('#queue-empty')
-  };
+  });
+
+  /**
+   * Keep DOM narrowing at one seam instead of scattering unchecked casts through
+   * delegated event handlers and batch-tree queries.
+   * @param {Event} event
+   * @returns {Element | null}
+   */
+  function eventTargetElement(event) {
+    return event.target instanceof Element ? event.target : null;
+  }
+
+  /**
+   * @param {Event} event
+   * @param {string} selector
+   * @returns {HTMLElement | null}
+   */
+  function closestHtml(event, selector) {
+    const match = eventTargetElement(event)?.closest(selector) || null;
+    return match instanceof HTMLElement ? match : null;
+  }
+
+  /**
+   * @param {Event} event
+   * @param {string} selector
+   * @returns {HTMLButtonElement | null}
+   */
+  function closestButton(event, selector) {
+    const match = closestHtml(event, selector);
+    return match instanceof HTMLButtonElement ? match : null;
+  }
+
+  /**
+   * @param {ParentNode} root
+   * @param {string} selector
+   * @returns {HTMLInputElement[]}
+   */
+  function queryInputs(root, selector) {
+    return Array.from(root.querySelectorAll(selector)).filter((node) => node instanceof HTMLInputElement);
+  }
 
   let sidepanelToastTimer = null;
   function toast(message, error = false) {
-    const isError = error || message.includes('失败') || message.includes('错误');
-    const isSuccess = !isError && (message.includes('✓') || message.includes('已复制') || message.includes('完成') || message.includes('OK'));
+    const text = String(message || '').replace(/^(?:\p{Extended_Pictographic}\uFE0F?|\p{Emoji_Presentation}|\s)+/gu, '');
+    const isError = error || text.includes('失败') || text.includes('错误');
+    const isSuccess = !isError && (text.includes('已复制') || text.includes('完成') || text.includes('成功') || text.includes('OK'));
 
-    let icon = 'ℹ️';
-    if (isSuccess) icon = '✓';
-    else if (isError) icon = '⚠️';
-
-    const cleanText = message.replace(/^[✓⚠️ℹ️🤖📦📋\s]+/, '');
-    elements.toast.innerHTML = `<span style="font-weight:700; color:${isError ? '#ff8b83' : (isSuccess ? '#20c978' : 'var(--primary)')}; font-size:12px;">${icon}</span> <span>${cleanText}</span>`;
+    elements.toast.textContent = text;
     elements.toast.className = `toast show ${isError ? 'error' : (isSuccess ? 'success' : 'info')}`;
     clearTimeout(sidepanelToastTimer);
     sidepanelToastTimer = setTimeout(() => elements.toast.classList.remove('show'), 2200);
@@ -397,97 +441,132 @@
   }
 
   // === Tracker State & Methods ===
+  const TRACKER_VISIBLE_ITEMS = 3;
   let trackerFilter = 'all';
   let trackerSearchQuery = '';
   let trackerSort = 'activity';
   let trackerLoading = false;
+  let trackerLoadPromise = null;
+  let trackerSummaryPromise = null;
+  let trackerRefreshTimer = null;
+  const trackerRepairAttempts = new Set();
   const expandedTrackerCards = new Set();
   let subscriptionsCache = [];
-  let trackerStorageStats = null;
   let currentAuthorInfo = null;
+  let currentAuthorInfoKey = '';
+  let currentAuthorInfoLoad = null;
 
-  async function loadAndRenderTracker() {
-    if (!BSE.Tracker) return;
-    trackerLoading = true;
-    const t = (k, p) => BSE.I18n?.t(k, p) || k;
-    if (elements.trackerList) elements.trackerList.setAttribute('aria-busy', 'true');
-    if (elements.trackerStatusLine) elements.trackerStatusLine.textContent = t('tracker_status_loading');
+  function getCurrentAuthorInfoKey() {
+    const author = state?.authorInfo || {};
+    return [
+      state?.mediaKey || '',
+      state?.url || '',
+      state?.title || '',
+      author.targetId || author.mid || author.channelId || '',
+      author.seasonId || '',
+      author.name || '',
+      BSE.I18n?.getLocale?.() || 'zh-CN'
+    ].join('|');
+  }
+
+  async function getCachedCurrentVideoAuthorInfo() {
+    const key = getCurrentAuthorInfoKey();
+    if (currentAuthorInfoKey === key) return currentAuthorInfo;
+    if (currentAuthorInfoLoad?.key === key) return currentAuthorInfoLoad.promise;
+
+    const promise = detectCurrentVideoAuthorInfo();
+    currentAuthorInfoLoad = { key, promise };
     try {
-      subscriptionsCache = await BSE.Tracker.getSubscriptions();
-      trackerStorageStats = BSE.Tracker.getStorageStats?.(subscriptionsCache) || null;
-      trackerLoading = false;
-      renderTrackerList();
-      updateTrackerCountsAndBadge();
-      await updateQuickSubscribeBar();
-
-      // 自动静默自愈：排查并清理历史遗留的时长严重错配的污染字幕
-      let hasHealedMismatches = false;
-      for (const sub of subscriptionsCache) {
-        for (const item of (sub.items || [])) {
-          if (item.subtitle?.status === 'ready' && Number(item.duration) > 10) {
-            const timeMatches = String(item.subtitle.markdown || '').match(/###\s*\[(\d+):(\d+)(?::(\d+))?\s*-\s*(\d+):(\d+)(?::(\d+))?\]/g);
-            let lastSec = 0;
-            if (timeMatches && timeMatches.length) {
-              const lastHeader = timeMatches[timeMatches.length - 1];
-              const parts = lastHeader.match(/-\s*(\d+):(\d+)(?::(\d+))?/);
-              if (parts) {
-                if (parts[3] !== undefined) {
-                  lastSec = Number(parts[1]) * 3600 + Number(parts[2]) * 60 + Number(parts[3]);
-                } else {
-                  lastSec = Number(parts[1]) * 60 + Number(parts[2]);
-                }
-              }
-            }
-            const isMismatchedLong = lastSec > Number(item.duration) + 8;
-            const isIncompleteBumper = Number(item.duration) >= 90 && lastSec < Number(item.duration) * 0.35 && (item.subtitle.cueCount || 0) < 20;
-            if (isMismatchedLong || isIncompleteBumper) {
-              console.warn(`[BSE Tracker] 自动自愈异常字幕: ${item.id} (视频 ${item.duration}s, 字幕到 ${lastSec}s, 共 ${item.subtitle.cueCount || 0} 句)`);
-              item.subtitle = {
-                status: 'not_found',
-                errorHint: isMismatchedLong
-                  ? `历史提取字幕时长与视频不符已自动重置 (原字幕 ${lastSec}s / 视频 ${item.duration}s)`
-                  : `官方字幕残缺已自动重置 (仅覆盖前 ${lastSec}s 片头)，建议使用端侧转录`,
-                fetchedAt: Date.now()
-              };
-              item.hasSubtitle = false;
-              hasHealedMismatches = true;
-            }
-          }
-        }
+      const info = await promise;
+      if (getCurrentAuthorInfoKey() === key) {
+        currentAuthorInfo = info;
+        currentAuthorInfoKey = key;
+        return info;
       }
-      if (hasHealedMismatches && BSE.Tracker?.saveSubscriptions) {
-        await BSE.Tracker.saveSubscriptions(subscriptionsCache);
+      return getCachedCurrentVideoAuthorInfo();
+    } finally {
+      if (currentAuthorInfoLoad?.promise === promise) currentAuthorInfoLoad = null;
+    }
+  }
+
+  function getTrackerUnreadItems(sub) {
+    if (BSE.Tracker?.getUnreadItems) return BSE.Tracker.getUnreadItems(sub);
+    const items = Array.isArray(sub?.items) ? sub.items : [];
+    const legacyUnreadCount = Math.max(0, Number(sub?.unreadCount) || 0);
+    return items.filter((item, index) => item?.isRead === false || (item?.isRead === undefined && index < legacyUnreadCount));
+  }
+
+  function getTrackerUnreadCount(sub) {
+    return getTrackerUnreadItems(sub).length;
+  }
+
+  function loadTrackerSummary() {
+    if (!BSE.Tracker) return Promise.resolve();
+    if (trackerSummaryPromise) return trackerSummaryPromise;
+    trackerSummaryPromise = BSE.Tracker.getSubscriptions()
+      .then((subscriptions) => {
+        subscriptionsCache = subscriptions;
+        updateTrackerCountsAndBadge();
+      })
+      .catch(() => {})
+      .finally(() => { trackerSummaryPromise = null; });
+    return trackerSummaryPromise;
+  }
+
+  function loadAndRenderTracker() {
+    if (!BSE.Tracker) return Promise.resolve();
+    if (trackerLoadPromise) return trackerLoadPromise;
+    trackerLoadPromise = (async () => {
+      trackerLoading = true;
+      const t = (k, p) => BSE.I18n?.t(k, p) || k;
+      if (elements.trackerList) elements.trackerList.setAttribute('aria-busy', 'true');
+      if (elements.trackerStatusLine) elements.trackerStatusLine.textContent = t('tracker_status_loading');
+      try {
+        subscriptionsCache = await BSE.Tracker.getSubscriptions();
         renderTrackerList();
         updateTrackerCountsAndBadge();
-      }
+        await updateQuickSubscribeBar();
 
-      // 自动静默修复：如果存在剧集列表为空的订阅，后台轮询一次补齐
-      const emptySubs = subscriptionsCache.filter((s) => !s.items || s.items.length === 0);
-      if (emptySubs.length > 0) {
-        const activeBvid = (BSE.Utils && BSE.Utils.getBvid)
-          ? (BSE.Utils.getBvid(state?.url || '') || (state?.mediaKey ? state.mediaKey.match(/bili:(BV[a-zA-Z0-9]+)/i)?.[1] : ''))
-          : '';
-        Promise.allSettled(emptySubs.map((s) => BSE.Tracker.checkSubscriptionUpdates(s, { activeBvid }))).then(() => {
-          BSE.Tracker.getSubscriptions().then((updated) => {
-            subscriptionsCache = updated;
-            renderTrackerList();
-            updateTrackerCountsAndBadge();
-          });
-        });
+        // Empty legacy subscriptions get one repair attempt per side-panel
+        // lifetime. Normal tracker opens never launch background network work.
+        const emptySubs = subscriptionsCache.filter((sub) => (
+          (!sub.items || sub.items.length === 0) && !trackerRepairAttempts.has(sub.id)
+        ));
+        if (emptySubs.length > 0) {
+          emptySubs.forEach((sub) => trackerRepairAttempts.add(sub.id));
+          const activeBvid = BSE.Utils?.getBvid
+            ? (BSE.Utils.getBvid(state?.url || '') || (state?.mediaKey ? state.mediaKey.match(/bili:(BV[a-zA-Z0-9]+)/i)?.[1] : ''))
+            : '';
+          Promise.allSettled(emptySubs.map((sub) => BSE.Tracker.checkSubscriptionUpdates(sub, { activeBvid })))
+            .then(() => scheduleTrackerRefresh(0));
+        }
+      } catch (err) {
+        console.warn('[BSE Tracker] 读取订阅列表异常:', err);
+        if (elements.trackerStatusLine) elements.trackerStatusLine.textContent = `${t('status_error')}：${err?.message || ''}`;
+        toast(t('tracker_toast_load_failed'), true);
+      } finally {
+        trackerLoading = false;
+        if (elements.trackerList) elements.trackerList.setAttribute('aria-busy', 'false');
       }
-    } catch (err) {
-      console.warn('[BSE Tracker] 读取订阅列表异常:', err);
-      if (elements.trackerStatusLine) elements.trackerStatusLine.textContent = `${t('status_error')}：${err?.message || ''}`;
-      toast(t('tracker_toast_load_failed'), true);
-    } finally {
-      trackerLoading = false;
-      if (elements.trackerList) elements.trackerList.setAttribute('aria-busy', 'false');
+    })().finally(() => { trackerLoadPromise = null; });
+    return trackerLoadPromise;
+  }
+
+  function scheduleTrackerRefresh(delay = 35) {
+    if (currentTab !== 'tracker') {
+      loadTrackerSummary().catch(() => {});
+      return;
     }
+    if (trackerRefreshTimer) clearTimeout(trackerRefreshTimer);
+    trackerRefreshTimer = setTimeout(() => {
+      trackerRefreshTimer = null;
+      loadAndRenderTracker().catch(() => {});
+    }, Math.max(0, delay));
   }
 
   function updateTrackerCountsAndBadge() {
     const total = subscriptionsCache.length;
-    const unread = subscriptionsCache.reduce((sum, s) => sum + (s.unreadCount || 0), 0);
+    const unread = subscriptionsCache.reduce((sum, s) => sum + getTrackerUnreadCount(s), 0);
     if (elements.trackerCntAll) elements.trackerCntAll.textContent = String(total);
     if (elements.trackerCntUnread) elements.trackerCntUnread.textContent = String(unread);
 
@@ -614,10 +693,23 @@
     return null;
   }
 
+  function findSubscriptionBySource({ id = '', platform = '', type = '', targetId = '' } = {}) {
+    const normalizedPlatform = String(platform || '').toLowerCase();
+    const normalizedType = String(type || '').toLowerCase();
+    const normalizedTarget = String(targetId || '').trim().toLowerCase();
+    return subscriptionsCache.find((sub) => {
+      if (id && sub.id === id) return true;
+      return normalizedTarget
+        && String(sub.platform || '').toLowerCase() === normalizedPlatform
+        && String(sub.type || '').toLowerCase() === normalizedType
+        && String(sub.targetId || sub.resolvedTargetId || '').trim().toLowerCase() === normalizedTarget;
+    }) || null;
+  }
+
   async function updateQuickSubscribeBar() {
     if (!elements.trackerQuickBar) return;
     const t = (k, p) => BSE.I18n?.t(k, p) || k;
-    currentAuthorInfo = await detectCurrentVideoAuthorInfo();
+    currentAuthorInfo = await getCachedCurrentVideoAuthorInfo();
 
     const videoTitle = state?.title || currentAuthorInfo?.videoTitle || t('tracker_wait_video');
     if (elements.trackerCurrentSource) {
@@ -629,9 +721,9 @@
       if (currentAuthorInfo?.avatar) {
         elements.trackerQuickAvatar.innerHTML = `<img src="${BSE.Utils.escapeHtml(currentAuthorInfo.avatar)}" alt="" style="width:100%;height:100%;border-radius:inherit;object-fit:cover;">`;
       } else if (state?.platform === 'youtube') {
-        elements.trackerQuickAvatar.textContent = '▶';
+        elements.trackerQuickAvatar.textContent = 'YT';
       } else {
-        elements.trackerQuickAvatar.textContent = '📺';
+        elements.trackerQuickAvatar.textContent = 'B';
       }
     }
 
@@ -663,7 +755,13 @@
     const upSubId = authorTargetId
       ? `${currentAuthorInfo.platform}:${currentAuthorInfo.type || 'up'}:${authorTargetId}`
       : '';
-    const isUpSubscribed = Boolean(upSubId && subscriptionsCache.some((s) => s.id === upSubId));
+    const upSubscription = authorTargetId ? findSubscriptionBySource({
+      id: upSubId,
+      platform: currentAuthorInfo.platform,
+      type: currentAuthorInfo.type || 'up',
+      targetId: authorTargetId
+    }) : null;
+    const isUpSubscribed = Boolean(upSubscription);
 
     if (elements.trackerSubscribeUpBtn) {
       elements.trackerSubscribeUpBtn.disabled = !authorTargetId;
@@ -679,7 +777,13 @@
 
     if (currentAuthorInfo.seasonId) {
       const seasonSubId = `${currentAuthorInfo.platform}:season:${currentAuthorInfo.seasonId}`;
-      const isSeasonSubscribed = subscriptionsCache.some((s) => s.id === seasonSubId);
+      const seasonSubscription = findSubscriptionBySource({
+        id: seasonSubId,
+        platform: currentAuthorInfo.platform,
+        type: 'season',
+        targetId: currentAuthorInfo.seasonId
+      });
+      const isSeasonSubscribed = Boolean(seasonSubscription);
       if (elements.trackerSubscribeSeasonBtn) {
         elements.trackerSubscribeSeasonBtn.hidden = false;
         elements.trackerSubscribeSeasonBtn.classList.toggle('subscribed', isSeasonSubscribed);
@@ -769,13 +873,13 @@
       actions = `
         <button class="tracker-item-act-btn tracker-btn-copy" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}" title="复制字幕">${t('tracker_btn_copy')}</button>
         <button class="tracker-item-act-btn tracker-btn-preview-toggle" data-target="${previewId}" aria-expanded="false" title="展开预览">${t('tracker_btn_preview')}</button>`;
-      preview = `<div class="tracker-preview-drawer" id="${previewId}">${BSE.Utils.escapeHtml(subtitle.markdown || subtitle.plainText || '')}</div>`;
+      preview = `<div class="tracker-preview-drawer" id="${previewId}" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}" data-loaded="false"></div>`;
     } else if (subtitle?.status === 'pending') {
       badge = `<span class="tracker-sub-badge pending">${t('tracker_badge_extracting')}</span>`;
       actions = '';
     } else if (subtitle?.status === 'not_found' || subtitle?.status === 'error' || subtitle?.status === 'evicted') {
       const label = subtitle.status === 'error' ? t('tracker_badge_error') : (subtitle.status === 'evicted' ? t('tracker_badge_evicted') : t('tracker_badge_no_sub'));
-      badge = `<span class="tracker-sub-badge not-found" title="${BSE.Utils.escapeHtml(subtitle.errorHint || '')}">⚪ ${label}</span>`;
+      badge = `<span class="tracker-sub-badge not-found" title="${BSE.Utils.escapeHtml(subtitle.errorHint || '')}">${label}</span>`;
       actions = `<button class="tracker-item-act-btn tracker-btn-copy tracker-btn-retry-sub" data-sub-id="${BSE.Utils.escapeHtml(sub.id)}" data-item-id="${BSE.Utils.escapeHtml(item.id)}" title="重新提取">${t('tracker_btn_retry')}</button>`;
     }
 
@@ -805,13 +909,13 @@
     elements.trackerList.innerHTML = '';
 
     let list = [...subscriptionsCache];
-    if (trackerFilter === 'unread') list = list.filter((sub) => (sub.unreadCount || 0) > 0);
+    if (trackerFilter === 'unread') list = list.filter((sub) => getTrackerUnreadCount(sub) > 0);
     if (trackerSearchQuery) {
       list = list.filter((sub) => `${sub.title || ''} ${sub.author || ''}`.toLocaleLowerCase().includes(trackerSearchQuery));
     }
     list.sort((a, b) => {
       if (trackerSort === 'name') return String(a.title || '').localeCompare(String(b.title || ''), BSE.I18n?.getLocale() || 'zh-CN');
-      if (trackerSort === 'unread') return (b.unreadCount || 0) - (a.unreadCount || 0) || (b.lastCheckedAt || 0) - (a.lastCheckedAt || 0);
+      if (trackerSort === 'unread') return getTrackerUnreadCount(b) - getTrackerUnreadCount(a) || (b.lastCheckedAt || 0) - (a.lastCheckedAt || 0);
       const aActivity = a.items?.[0]?.pubdate || a.lastCheckedAt || a.subscribedAt || 0;
       const bActivity = b.items?.[0]?.pubdate || b.lastCheckedAt || b.subscribedAt || 0;
       return bActivity - aActivity;
@@ -826,19 +930,16 @@
         : t('tracker_empty_desc_all');
     }
 
-    const unreadTotal = subscriptionsCache.reduce((sum, sub) => sum + (sub.unreadCount || 0), 0);
-    const copyableUnread = subscriptionsCache.reduce((sum, sub) => {
-      const unreadItems = (sub.items || []).slice(0, sub.unreadCount || 0);
-      return sum + unreadItems.filter((item) => item.subtitle?.status === 'ready' && (item.subtitle.markdown || item.subtitle.plainText)).length;
-    }, 0);
+    const unreadTotal = subscriptionsCache.reduce((sum, sub) => sum + getTrackerUnreadCount(sub), 0);
+    const copyableUnread = subscriptionsCache.reduce((sum, sub) => (
+      sum + getTrackerUnreadItems(sub).filter((item) => item.subtitle?.status === 'ready').length
+    ), 0);
     if (elements.trackerStatusLine) {
-      const cacheLabel = trackerStorageStats ? t('tracker_cache_label', { kb: Math.ceil(trackerStorageStats.approximateBytes / 1024) }) : '';
       elements.trackerStatusLine.textContent = t('tracker_status_summary', {
         shown: list.length,
         total: subscriptionsCache.length,
         unread: unreadTotal,
-        copyable: copyableUnread,
-        cache: cacheLabel
+        copyable: copyableUnread
       });
     }
     if (elements.trackerCopyAllBtn) elements.trackerCopyAllBtn.disabled = copyableUnread === 0 || trackerLoading;
@@ -847,15 +948,19 @@
     const fragment = document.createDocumentFragment();
     list.forEach((sub, subIndex) => {
       const card = document.createElement('section');
-      const hasUnread = (sub.unreadCount || 0) > 0;
+      const items = [...(sub.items || [])].sort((a, b) => Number(b.pubdate || 0) - Number(a.pubdate || 0));
+      const unreadItems = getTrackerUnreadItems(sub);
+      const unreadIds = new Set(unreadItems.map((item) => item.id));
+      const unreadCount = unreadItems.length;
+      const hasUnread = unreadCount > 0;
       card.className = `tracker-card ${hasUnread ? 'has-unread' : 'is-read'}`;
       card.dataset.id = sub.id;
-      const items = sub.items || [];
-      const unreadCount = Math.min(sub.unreadCount || 0, items.length);
+      // Tracker is compact by default, but history stays reachable in-context.
+      // Collapsed cards show exactly the latest three rows; expanding is an
+      // explicit user action and therefore may render the retained history.
       const expanded = expandedTrackerCards.has(sub.id);
-      const defaultVisible = sub.type === 'season' ? 5 : 3;
-      const visibleCount = expanded ? items.length : Math.max(unreadCount, Math.min(items.length, defaultVisible));
-      const visibleItems = items.slice(0, visibleCount);
+      const visibleItems = expanded ? items : items.slice(0, TRACKER_VISIBLE_ITEMS);
+      const hiddenCount = Math.max(0, items.length - visibleItems.length);
       const typeLabel = sub.type === 'season' ? t('tracker_type_season') : (sub.platform === 'youtube' ? t('tracker_type_youtube_channel') : t('tracker_type_bilibili_up'));
 
       const subUrl = getSubscriptionUrl(sub);
@@ -866,14 +971,14 @@
       card.innerHTML = `
         <div class="tracker-card-head">
           <div class="tracker-card-brand tracker-card-link" data-url="${BSE.Utils.escapeHtml(subUrl)}" title="${openHint}: ${BSE.Utils.escapeHtml(sub.title)}" role="button" tabindex="0">
-            <div class="tracker-avatar-wrap">${sub.avatar ? `<img src="${BSE.Utils.escapeHtml(sub.avatar)}" alt="">` : (sub.platform === 'youtube' ? '▶' : '📺')}</div>
+            <div class="tracker-avatar-wrap">${sub.avatar ? `<img src="${BSE.Utils.escapeHtml(sub.avatar)}" alt="">` : (sub.platform === 'youtube' ? 'YT' : 'B')}</div>
             <div class="tracker-card-meta">
               <div class="tracker-card-title-row">
                 <strong class="tracker-card-title">${BSE.Utils.escapeHtml(sub.title)}</strong>
-                <span class="tracker-card-open-icon" aria-hidden="true">↗</span>
+                <span class="tracker-card-open-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 5h5v5"/><path d="M10 14L19 5"/><path d="M19 14v5H5V5h5"/></svg></span>
               </div>
               <div class="tracker-card-subtext">
-                ${authorText ? `<span class="tracker-card-author" title="UP主/作者: ${BSE.Utils.escapeHtml(authorText)}">👤 ${BSE.Utils.escapeHtml(authorText)}</span><span class="tracker-card-sep">·</span>` : ''}<span>${typeLabel} · ${items.length} 篇 · ${formatTrackerTime(sub.lastCheckedAt)}</span>
+                ${authorText ? `<span class="tracker-card-author" title="UP主/作者: ${BSE.Utils.escapeHtml(authorText)}">${BSE.Utils.escapeHtml(authorText)}</span><span class="tracker-card-sep">·</span>` : ''}<span>${typeLabel} · ${items.length} 篇 · ${formatTrackerTime(sub.lastCheckedAt)}</span>
               </div>
             </div>
           </div>
@@ -882,15 +987,18 @@
               <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
             </button>
             ${showBatchExport ? `<button class="tracker-card-act-btn tracker-btn-batch-card" data-id="${BSE.Utils.escapeHtml(sub.id)}" title="${t('tracker_btn_batch_card_title')}">${t('tracker_btn_batch_card')}</button>` : ''}
-            ${unreadCount ? `<button class="tracker-card-unread-pill tracker-btn-read" data-id="${BSE.Utils.escapeHtml(sub.id)}" title="${t('tracker_btn_mark_card_read')}">${t('tracker_tag_unread', { n: unreadCount })}</button>` : `<span class="tracker-card-tag is-read-tag">✓ ${t('tracker_tag_read')}</span>`}
-            <button class="tracker-card-del-btn tracker-btn-del" data-id="${BSE.Utils.escapeHtml(sub.id)}" data-title="${BSE.Utils.escapeHtml(sub.title)}" title="${t('tracker_btn_untrack')}">✕</button>
+            ${unreadCount ? `<button class="tracker-card-unread-pill tracker-btn-read" data-id="${BSE.Utils.escapeHtml(sub.id)}" title="${t('tracker_btn_mark_card_read')}">${t('tracker_tag_unread', { n: unreadCount })}</button>` : `<span class="tracker-card-tag is-read-tag">${t('tracker_tag_read')}</span>`}
+            <button class="tracker-card-del-btn tracker-btn-del" data-id="${BSE.Utils.escapeHtml(sub.id)}" data-title="${BSE.Utils.escapeHtml(sub.title)}" title="${t('tracker_btn_untrack')}">×</button>
           </div>
         </div>
-        <div class="tracker-items">${visibleItems.map((item, itemIndex) => {
-          const isItemUnread = unreadCount > 0 && (item.isRead === false || (item.isRead === undefined && itemIndex < unreadCount));
-          return renderTrackerItem(sub, item, `tracker-preview-${subIndex}-${itemIndex}`, isItemUnread);
-        }).join('')}</div>
-        ${items.length > visibleCount ? `<button class="tracker-expand-btn" data-id="${BSE.Utils.escapeHtml(sub.id)}">${t('tracker_btn_expand_more', { n: items.length - visibleCount })}</button>` : (expanded && items.length > 1 ? `<button class="tracker-expand-btn" data-id="${BSE.Utils.escapeHtml(sub.id)}">${t('tracker_btn_collapse_more')}</button>` : '')}`;
+        <div class="tracker-items">${visibleItems.map((item, itemIndex) => (
+          renderTrackerItem(sub, item, `tracker-preview-${subIndex}-${itemIndex}`, unreadIds.has(item.id))
+        )).join('')}</div>
+        ${!expanded && hiddenCount > 0
+          ? `<button class="tracker-expand-btn" data-id="${BSE.Utils.escapeHtml(sub.id)}" aria-expanded="false">${t('tracker_btn_expand_more', { n: hiddenCount })}</button>`
+          : (expanded && items.length > TRACKER_VISIBLE_ITEMS
+            ? `<button class="tracker-expand-btn" data-id="${BSE.Utils.escapeHtml(sub.id)}" aria-expanded="true">${t('tracker_btn_collapse_more')}</button>`
+            : '')}`;
       fragment.appendChild(card);
     });
     elements.trackerList.appendChild(fragment);
@@ -907,9 +1015,9 @@
     if (code === 'yue') return t('queue_language_yue');
     try {
       const displayNames = new Intl.DisplayNames([BSE.I18n?.getLocale?.() || 'zh-CN'], { type: 'language' });
-      return `${displayNames.of(code) || code} [${code}] · Parakeet`;
+      return `${displayNames.of(code) || code} [${code}]`;
     } catch {
-      return `${code} · Parakeet`;
+      return code;
     }
   }
 
@@ -956,7 +1064,7 @@
     elements.queueCapabilityPanel.dataset.state = 'checking';
     if (elements.queueCapabilityStatus) elements.queueCapabilityStatus.textContent = t('queue_capability_checking');
     if (elements.queueCapabilityRefresh) elements.queueCapabilityRefresh.disabled = true;
-    appendDiagnostic('本机服务', `正在探测端侧模型与服务状态 (force=${force})…`);
+    appendDiagnostic('本机服务', `正在探测 SparkScribe 浏览器集成能力 (force=${force})…`);
     try {
       const response = await chrome.runtime.sendMessage({ type: 'BSE_NATIVE_CAPABILITIES', force });
       if (!response?.ok || !response.capabilities) {
@@ -973,7 +1081,9 @@
           level: ready ? 'info' : 'warn',
           code: ready ? 'NATIVE_READY' : 'NATIVE_PARTIAL'
         });
-        appendDiagnostic('本机服务详情', `hostReady=${caps.hostReady} · ytDLP=${caps.ytDLP?.available} (${caps.ytDLP?.detail || ''}) · Parakeet=${caps.models?.parakeet?.available} (${caps.models?.parakeet?.detail || ''}) · Cohere=${caps.models?.cohere?.available} (${caps.models?.cohere?.detail || ''})`, {
+        const localASR = caps.features?.localASR;
+        const remoteMedia = caps.features?.remoteMedia;
+        appendDiagnostic('本机服务详情', `protocol=${caps.protocolVersion} · contract=${caps.contract || 'legacy-v1'} · localASR=${localASR?.available === true} · languages=${Array.isArray(localASR?.languages) ? localASR.languages.join(',') : ''} · youtubeCaptions=${caps.features?.youtubeCaptions?.available === true} · remoteMedia[youtube=${remoteMedia?.youtube === true},bilibili=${remoteMedia?.bilibili === true}]`, {
           scope: 'native',
           sessionId: diagnosticSessions.native,
           level: 'debug',
@@ -995,7 +1105,11 @@
     }
   }
 
-  async function loadAndRenderQueue() {
+  let queueLoadPromise = null;
+  let queueLoadFollowUpRequested = false;
+  let queueRefreshTimer = null;
+
+  async function performQueueLoadAndRender() {
     if (!BSE.Queue) return;
     try {
       queueCache = await BSE.Queue.getQueue();
@@ -1016,6 +1130,31 @@
       console.warn('[SparkSub Queue] 读取队列异常:', err);
       appendDiagnostic('转录队列', `读取队列异常: ${err?.message || err}`);
     }
+  }
+
+  async function loadAndRenderQueue() {
+    if (queueLoadPromise) {
+      queueLoadFollowUpRequested = true;
+      return queueLoadPromise;
+    }
+    queueLoadPromise = performQueueLoadAndRender();
+    try {
+      await queueLoadPromise;
+    } finally {
+      queueLoadPromise = null;
+      if (queueLoadFollowUpRequested) {
+        queueLoadFollowUpRequested = false;
+        scheduleQueueRefresh();
+      }
+    }
+  }
+
+  function scheduleQueueRefresh() {
+    if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
+    queueRefreshTimer = setTimeout(() => {
+      queueRefreshTimer = null;
+      loadAndRenderQueue().catch(() => {});
+    }, 35);
   }
 
   function updateQueueBadge() {
@@ -1055,14 +1194,14 @@
       card.className = `queue-card is-${item.stage}`;
 
       const stageLabels = {
-        queued: '⏳ 排队中',
-        resolving: '🔍 解析中',
-        fetching_caption: '📥 提取字幕',
-        fetching_audio: '🎵 探测音频',
-        transcribing: '⚡ 转录中',
-        postprocessing: '📝 格式化',
-        done: item.subtitle?.cueCount ? `✓ ${item.subtitle.cueCount} 句字幕` : '✓ 已就绪',
-        failed: '✕ 失败'
+        queued: '排队中',
+        resolving: '解析中',
+        fetching_caption: '提取字幕',
+        fetching_audio: '探测音频',
+        transcribing: '转录中',
+        postprocessing: '格式化',
+        done: item.subtitle?.cueCount ? `${item.subtitle.cueCount} 句字幕` : '已就绪',
+        failed: '失败'
       };
 
       const stageText = stageLabels[item.stage] || item.stage;
@@ -1112,12 +1251,12 @@
       }
 
       card.innerHTML = `
-        <button type="button" class="queue-card-del-btn btn-remove" data-id="${safeId}" title="从队列中移除">✕</button>
+        <button type="button" class="queue-card-del-btn btn-remove" data-id="${safeId}" title="从队列中移除">×</button>
         <div class="queue-card-main">
           <div class="queue-thumb-wrap" title="点击在新标签页打开视频">
             <img class="queue-thumb-img" src="${BSE.Utils.escapeHtml(item.cover || 'data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 100 60\' fill=\'%23334155\'><text x=\'50\' y=\'35\' fill=\'%2394a3b8\' font-size=\'14\' text-anchor=\'middle\'>SparkSub</text></svg>')}" alt="cover" loading="lazy">
             <span class="queue-thumb-tag ${isBili ? 'bilibili' : 'youtube'}">${isBili ? 'B站' : 'YT'}</span>
-            <div class="queue-thumb-hover-overlay">▶</div>
+            <div class="queue-thumb-hover-overlay" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></div>
           </div>
           <div class="queue-card-body">
             <a class="queue-card-title" href="${BSE.Utils.escapeHtml(item.url || '#')}" target="_blank" title="${BSE.Utils.escapeHtml(item.title)} (点击打开视频)">
@@ -1157,7 +1296,7 @@
             <span class="queue-failure-retryability">${BSE.Utils.escapeHtml(t(failure.retriable ? 'queue_error_retriable' : 'queue_error_not_retriable'))}</span>
           </div>
         ` : ''}
-        ${item.subtitle?.plainText ? `
+        ${Array.isArray(item.subtitle?.cues) && item.subtitle.cues.length ? `
           <div class="queue-preview-drawer ${isExpanded ? 'open' : ''}">
             <div class="queue-preview-toolbar">
               <span class="queue-preview-stats">共 ${item.subtitle.cueCount || 0} 行字幕 · ${item.subtitle.langDoc || item.subtitle.language || '中文'}</span>
@@ -1166,7 +1305,7 @@
                 <span>复制全文</span>
               </button>
             </div>
-            <div class="queue-preview-body">${BSE.Utils.escapeHtml(item.subtitle.plainText)}</div>
+            <div class="queue-preview-body" data-loaded="${isExpanded ? 'true' : 'false'}">${isExpanded ? BSE.Utils.escapeHtml(item.subtitle.plainText || BSE.Formatters?.toTxt(item.subtitle.cues, false) || '') : ''}</div>
           </div>
         ` : ''}
       `;
@@ -1187,11 +1326,26 @@
           const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
           const cues = item.subtitle?.cues;
           if (tab?.id != null && Array.isArray(cues) && cues.length) {
-            await chrome.tabs.sendMessage(tab.id, {
+            const tabState = await chrome.tabs.sendMessage(tab.id, { type: 'BSE_GET_STATE' });
+            if (!BSE.Utils?.mediaStateMatchesUrl?.(tabState, item.url)) {
+              throw new Error('当前标签页不是这条转录任务对应的视频，已阻止载入');
+            }
+            const itemMediaKey = String(item.mediaContext?.mediaKey || '').trim();
+            const tabMediaKey = String(tabState?.mediaKey || '').trim();
+            const itemBilibiliCid = itemMediaKey.match(/^bili:(BV[a-zA-Z0-9]+):cid([^:]+)$/i);
+            const tabBilibiliCid = tabMediaKey.match(/^bili:(BV[a-zA-Z0-9]+):cid([^:]+)$/i);
+            const exactIdentityRequired = itemMediaKey.startsWith('yt:')
+              || Boolean(itemBilibiliCid && tabBilibiliCid);
+            if (itemMediaKey && exactIdentityRequired && itemMediaKey !== tabMediaKey) {
+              throw new Error('当前视频的分P/CID 已变化，已阻止载入旧字幕');
+            }
+            const applyResult = await chrome.tabs.sendMessage(tab.id, {
               type: 'BSE_APPLY_EXTERNAL_SUBTITLE',
+              expectedMediaKey: tabMediaKey,
+              mediaContext: item.mediaContext || null,
               track: {
                 id: `transcribed-${item.id}`,
-                name: `🎙️ 端侧本地转录 (${item.subtitle?.cueCount || cues.length} 句)`,
+                name: `端侧本地转录 (${item.subtitle?.cueCount || cues.length} 句)`,
                 language: item.subtitle?.language || 'zh',
                 langDoc: item.subtitle?.langDoc || '本地端侧转录',
                 isAi: true,
@@ -1199,9 +1353,14 @@
                 engine: item.subtitle?.engine || 'local-asr'
               },
               cues
-            }).catch(() => {});
+            });
+            if (applyResult?.ok !== true) {
+              throw new Error(applyResult?.error === 'MEDIA_CONTEXT_CHANGED'
+                ? '当前标签页已经切换到其他视频，已阻止载入旧字幕'
+                : (applyResult?.error || '字幕载入被页面拒绝'));
+            }
             switchTab('timestamp');
-            toast(`✓ 已载入 ${cues.length} 句字幕到播放器与侧边栏`);
+            toast(`已载入 ${cues.length} 句字幕到播放器与侧边栏`);
           } else {
             toast('当前标签页不可用或该任务无字幕数据', true);
           }
@@ -1218,8 +1377,15 @@
           expandedQueueCards.add(item.id);
         }
         const drawer = card.querySelector('.queue-preview-drawer');
+        const previewBody = /** @type {HTMLElement | null} */ (card.querySelector('.queue-preview-body'));
         const btn = card.querySelector('.btn-preview');
         const nowOpen = expandedQueueCards.has(item.id);
+        if (nowOpen && previewBody?.dataset.loaded !== 'true') {
+          previewBody.textContent = item.subtitle?.plainText
+            || (Array.isArray(item.subtitle?.cues) ? BSE.Formatters?.toTxt(item.subtitle.cues, false) : '')
+            || '';
+          previewBody.dataset.loaded = 'true';
+        }
         drawer?.classList.toggle('open', nowOpen);
         btn?.classList.toggle('active', nowOpen);
       });
@@ -1230,7 +1396,7 @@
         if (text) {
           try {
             await navigator.clipboard.writeText(text);
-            toast(`✓ 已复制《${item.title || '当前视频'}》字幕全文`);
+            toast(`已复制《${item.title || '当前视频'}》字幕全文`);
           } catch {
             toast('复制失败，请重试', true);
           }
@@ -1241,11 +1407,11 @@
 
       card.querySelector('.btn-copy')?.addEventListener('click', async (e) => {
         e.stopPropagation();
-        const md = item.subtitle?.markdown || (Array.isArray(item.subtitle?.cues) ? BSE.Formatters?.toMd(item.subtitle.cues, metadata()) : '') || item.subtitle?.plainText || '';
+        const md = item.subtitle?.markdown || (Array.isArray(item.subtitle?.cues) ? BSE.Formatters?.toMarkdown(item.subtitle.cues, metadata()) : '') || item.subtitle?.plainText || '';
         if (md) {
           try {
             await navigator.clipboard.writeText(md);
-            toast(`✓ 已复制《${item.title || '当前视频'}》Markdown 字幕`);
+            toast(`已复制《${item.title || '当前视频'}》Markdown 字幕`);
           } catch {
             toast('复制失败，请重试', true);
           }
@@ -1260,7 +1426,7 @@
         if (text) {
           const filename = `${item.title || item.id || 'transcript'}.txt`;
           BSE.Utils.downloadText(text, filename, 'text/plain;charset=utf-8');
-          toast(`✓ 已开始下载纯文本字幕：${filename}`);
+          toast(`已开始下载纯文本字幕：${filename}`);
         } else {
           toast('暂无可下载的纯文本字幕', true);
         }
@@ -1272,7 +1438,7 @@
         if (srt) {
           const filename = `${item.title || item.id || 'transcript'}.srt`;
           BSE.Utils.downloadText(srt, filename, 'application/x-subrip;charset=utf-8');
-          toast(`✓ 已开始下载 SRT 字幕：${filename}`);
+          toast(`已开始下载 SRT 字幕：${filename}`);
         } else {
           toast('暂无可下载的 SRT 字幕', true);
         }
@@ -1406,9 +1572,12 @@
       && Number(nextState?.revision || 0) < Number(state.revision || 0)
     ) return;
 
-    // Prevent accidental downgrades from 'ready' with cues to transient 'empty'
+    // Prevent accidental downgrades from 'ready' with cues to transient 'empty' only inside the same tab.
+    // A real active-tab switch must be allowed to replace the old media state, even when the new tab has no video.
+    const sameStateTab = stateTabId == null || stateTabId === activeTabId;
     if (
-      state?.status === 'ready'
+      sameStateTab
+      && state?.status === 'ready'
       && state.cues?.length > 0
       && nextState.status === 'empty'
       && (!nextState.mediaKey || nextState.mediaKey === state.mediaKey)
@@ -1416,7 +1585,15 @@
       return;
     }
 
+    const previousMediaKey = state?.mediaKey || null;
+    const previousStateTabId = stateTabId;
     state = nextState;
+    stateTabId = activeTabId;
+    const mediaChanged = previousMediaKey && previousMediaKey !== (state?.mediaKey || null);
+    const tabChanged = previousStateTabId != null && previousStateTabId !== stateTabId;
+    if (mediaChanged || tabChanged) {
+      resetAiWorkbenchForMediaChange(state?.mediaKey || '');
+    }
     activeIndex = Number.isInteger(state?.activeIndex) ? state.activeIndex : -1;
     elements.title.textContent = state?.title || BSE.I18n?.t('waiting_video') || '等待视频…';
     if (elements.statusText) elements.statusText.textContent = state?.message || BSE.I18n?.t('connecting_tab') || '正在连接当前标签页';
@@ -1489,8 +1666,8 @@
     searchMatches = [];
     currentMatchIndex = -1;
 
-    elements.transcript.querySelectorAll('.cue').forEach((row) => {
-      const match = !normalized || row.dataset.search.includes(normalized);
+    /** @type {NodeListOf<HTMLElement>} */ (elements.transcript.querySelectorAll('.cue')).forEach((row) => {
+      const match = !normalized || String(row.dataset.search || '').includes(normalized);
       row.classList.toggle('hidden', !match);
       if (match) searchMatches.push(row);
     });
@@ -1583,9 +1760,7 @@
         loadInitialState();
       }
     } else if (message?.type === 'BSE_STATE_BROADCAST') {
-      const shouldAccept = !activeTabId
-        || message.tabId === activeTabId
-        || (state?.status !== 'ready' && message.state?.status === 'ready');
+      const shouldAccept = !activeTabId || message.tabId === activeTabId;
       if (shouldAccept) {
         activeTabId = message.tabId;
         if (message.state) {
@@ -1597,9 +1772,7 @@
     } else if (message?.type === 'BSE_PLAYBACK_BROADCAST' && (!activeTabId || message.tabId === activeTabId)) {
       updatePlayback(message.activeIndex);
     } else if (message?.type === 'BSE_QUEUE_UPDATED') {
-      loadAndRenderQueue();
-    } else if (message?.type === 'BSE_TRACKER_SUBSCRIPTIONS_UPDATED') {
-      loadAndRenderTracker().catch(() => {});
+      scheduleQueueRefresh();
     } else if (message?.type === 'BSE_DIAGNOSTIC_APPEND') {
       appendDiagnostic(message.stage || '端侧大模型', message.message || '', {
         scope: message.scope,
@@ -1616,10 +1789,22 @@
       if (areaName === 'local') {
         const hasQueueChanges = Object.keys(changes || {}).some((k) => k.startsWith('bse_transcription_queue_v1'));
         if (hasQueueChanges) {
-          loadAndRenderQueue();
+          scheduleQueueRefresh();
         }
-        if (changes && changes['bse_tracker_subscriptions']) {
-          loadAndRenderTracker().catch(() => {});
+        if (changes && changes['bse_subscriptions']) {
+          scheduleTrackerRefresh();
+        }
+      } else if (areaName === 'sync') {
+        if (changes?.cueFontSize?.newValue && elements.sizeSelect) {
+          const size = String(changes.cueFontSize.newValue);
+          elements.sizeSelect.value = size;
+          document.documentElement.style.setProperty('--bse-cue-font-size', `${size}px`);
+        }
+        if (changes?.bseSubtitlePreference?.newValue && elements.prefSelect) {
+          elements.prefSelect.value = String(changes.bseSubtitlePreference.newValue);
+        }
+        if (changes?.bse_tracker_settings) {
+          syncTrackerSettingsControls().catch(() => {});
         }
       }
     });
@@ -1627,17 +1812,39 @@
 
   window.addEventListener('focus', () => {
     loadInitialState();
-    loadAndRenderTracker().catch(() => {});
+    if (currentTab === 'tracker') scheduleTrackerRefresh();
   });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
       loadInitialState();
-      loadAndRenderTracker().catch(() => {});
+      if (currentTab === 'tracker') scheduleTrackerRefresh();
     }
   });
 
+  function setSelectOptionText(select, value, text) {
+    if (!select) return;
+    const option = Array.from(select.options || []).find((entry) => entry.value === value);
+    if (option) option.textContent = text;
+  }
+
+  async function syncGlobalPreferenceControls() {
+    if (typeof chrome === 'undefined' || !chrome?.storage?.sync?.get) return;
+    try {
+      const settings = await chrome.storage.sync.get({ cueFontSize: '14.5', bseSubtitlePreference: 'manual-first' });
+      if (settings?.cueFontSize) {
+        if (elements.sizeSelect) elements.sizeSelect.value = settings.cueFontSize;
+        document.documentElement.style.setProperty('--bse-cue-font-size', `${settings.cueFontSize}px`);
+      }
+      if (settings?.bseSubtitlePreference && elements.prefSelect) {
+        elements.prefSelect.value = settings.bseSubtitlePreference;
+      }
+    } catch {}
+  }
+
   function applyI18nAndTheme() {
     const theme = BSE.I18n?.getTheme() || 'auto';
+    const effectiveLocale = BSE.I18n?.getLocale?.() || 'zh-CN';
+    document.documentElement.lang = effectiveLocale;
     if (theme === 'light') {
       document.documentElement.dataset.theme = 'light';
     } else if (theme === 'dark') {
@@ -1647,34 +1854,62 @@
     } else if (theme === 'youtube') {
       document.documentElement.dataset.theme = 'youtube';
     } else {
-      document.documentElement.dataset.theme = state?.platform === 'bilibili' ? 'bilibili' : 'dark';
+      const systemLight = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: light)').matches;
+      document.documentElement.dataset.theme = systemLight ? 'light' : 'dark';
     }
     if (elements.themeSelect) elements.themeSelect.value = theme;
-    if (elements.langSelect) elements.langSelect.value = BSE.I18n?.getLocale() || 'auto';
-
-    if (typeof chrome !== 'undefined' && chrome?.storage?.sync?.get) {
-      chrome.storage.sync.get({ cueFontSize: '14.5', bseSubtitlePreference: 'manual-first' }, (res) => {
-        if (res?.cueFontSize) {
-          if (elements.sizeSelect) elements.sizeSelect.value = res.cueFontSize;
-          document.documentElement.style.setProperty('--bse-cue-font-size', `${res.cueFontSize}px`);
-        }
-        if (res?.bseSubtitlePreference && elements.prefSelect) {
-          elements.prefSelect.value = res.bseSubtitlePreference;
-        }
-      });
-    }
+    if (elements.langSelect) elements.langSelect.value = BSE.I18n?.getLocalePreference?.() || BSE.I18n?.getLocale() || 'auto';
 
     const t = (k, p) => BSE.I18n?.t(k, p) || k;
     if (elements.settingsTitle) elements.settingsTitle.textContent = t('settings_title');
-    if (elements.settingsToggle) elements.settingsToggle.title = t('settings_title');
+    if (elements.settingsGeneralTitle) elements.settingsGeneralTitle.textContent = t('settings_section_general');
+    if (elements.settingsTrackerTitle) elements.settingsTrackerTitle.textContent = t('settings_section_tracking');
+    if (elements.settingsDataTitle) elements.settingsDataTitle.textContent = t('settings_section_data');
+    if (elements.settingsToggle) {
+      elements.settingsToggle.title = t('settings_title');
+      elements.settingsToggle.setAttribute('aria-label', t('settings_title'));
+    }
     if (elements.labelTheme) elements.labelTheme.textContent = t('theme_label');
     if (elements.labelLang) elements.labelLang.textContent = t('lang_label');
     if (elements.labelPref) elements.labelPref.textContent = t('pref_subtitle_label');
     if (elements.labelSize) elements.labelSize.textContent = t('pref_size_label');
     if (elements.labelInterval) elements.labelInterval.textContent = t('tracker_setting_interval_label');
     if (elements.labelNotify) elements.labelNotify.textContent = t('tracker_setting_notify_label');
-    if (elements.trackerExportBtn) elements.trackerExportBtn.textContent = t('tracker_setting_export_btn');
-    if (elements.trackerImportBtn) elements.trackerImportBtn.textContent = t('tracker_setting_import_btn');
+    if (elements.themeSelect) {
+      elements.themeSelect.setAttribute('aria-label', t('theme_label'));
+      setSelectOptionText(elements.themeSelect, 'auto', t('theme_auto'));
+      setSelectOptionText(elements.themeSelect, 'dark', t('theme_dark'));
+      setSelectOptionText(elements.themeSelect, 'light', t('theme_light'));
+      setSelectOptionText(elements.themeSelect, 'bilibili', t('theme_bilibili'));
+      setSelectOptionText(elements.themeSelect, 'youtube', t('theme_youtube'));
+    }
+    if (elements.langSelect) {
+      elements.langSelect.setAttribute('aria-label', t('lang_label'));
+      setSelectOptionText(elements.langSelect, 'auto', t('lang_auto'));
+      setSelectOptionText(elements.langSelect, 'zh-CN', t('lang_zh_cn'));
+      setSelectOptionText(elements.langSelect, 'zh-TW', t('lang_zh_tw'));
+      setSelectOptionText(elements.langSelect, 'en', t('lang_en'));
+    }
+    if (elements.prefSelect) {
+      elements.prefSelect.setAttribute('aria-label', t('pref_subtitle_label'));
+      setSelectOptionText(elements.prefSelect, 'manual-first', t('batch_pref_manual_first'));
+      setSelectOptionText(elements.prefSelect, 'manual-only', t('batch_pref_manual_only'));
+      setSelectOptionText(elements.prefSelect, 'ai-first', t('batch_pref_ai_first'));
+    }
+    if (elements.sizeSelect) {
+      elements.sizeSelect.setAttribute('aria-label', t('pref_size_label'));
+      setSelectOptionText(elements.sizeSelect, '13', t('size_small'));
+      setSelectOptionText(elements.sizeSelect, '14.5', t('size_medium'));
+      setSelectOptionText(elements.sizeSelect, '16.5', t('size_large'));
+    }
+    if (elements.trackerExportBtn) {
+      elements.trackerExportBtn.textContent = t('tracker_setting_export_btn');
+      elements.trackerExportBtn.title = t('tracker_setting_export_btn');
+    }
+    if (elements.trackerImportBtn) {
+      elements.trackerImportBtn.textContent = t('tracker_setting_import_btn');
+      elements.trackerImportBtn.title = t('tracker_setting_import_btn');
+    }
     if (elements.search) elements.search.placeholder = t('search_placeholder');
     if (elements.refresh) elements.refresh.title = t('refresh_subtitles');
     if (elements.copy) elements.copy.title = t('copy_full_text');
@@ -1731,19 +1966,22 @@
     }
     if (elements.trackerSearchInput) elements.trackerSearchInput.placeholder = t('tracker_search_placeholder');
 
-    if (elements.trackerIntervalSelect && elements.trackerIntervalSelect.options?.length >= 4) {
+    if (elements.trackerIntervalSelect) {
       const curVal = elements.trackerIntervalSelect.value;
-      elements.trackerIntervalSelect.options[0].textContent = t('tracker_setting_interval_30m');
-      elements.trackerIntervalSelect.options[1].textContent = t('tracker_setting_interval_1h');
-      elements.trackerIntervalSelect.options[2].textContent = t('tracker_setting_interval_3h');
-      elements.trackerIntervalSelect.options[3].textContent = t('tracker_setting_interval_manual');
+      elements.trackerIntervalSelect.setAttribute('aria-label', t('tracker_setting_interval_label'));
+      setSelectOptionText(elements.trackerIntervalSelect, '30', t('tracker_setting_interval_30m'));
+      setSelectOptionText(elements.trackerIntervalSelect, '60', t('tracker_setting_interval_1h'));
+      setSelectOptionText(elements.trackerIntervalSelect, '180', t('tracker_setting_interval_3h'));
+      setSelectOptionText(elements.trackerIntervalSelect, '0', t('tracker_setting_interval_manual'));
       elements.trackerIntervalSelect.value = curVal;
     }
 
-    if (elements.trackerNotifySelect && elements.trackerNotifySelect.options?.length >= 2) {
+    if (elements.trackerNotifySelect) {
       const curVal = elements.trackerNotifySelect.value;
-      elements.trackerNotifySelect.options[0].textContent = t('tracker_setting_notify_on');
-      elements.trackerNotifySelect.options[1].textContent = t('tracker_setting_notify_badge_only');
+      elements.trackerNotifySelect.setAttribute('aria-label', t('tracker_setting_notify_label'));
+      setSelectOptionText(elements.trackerNotifySelect, 'desktop', t('tracker_setting_notify_on'));
+      setSelectOptionText(elements.trackerNotifySelect, 'badge', t('tracker_setting_notify_badge_only'));
+      setSelectOptionText(elements.trackerNotifySelect, 'off', t('tracker_setting_notify_off'));
       elements.trackerNotifySelect.value = curVal;
     }
 
@@ -1765,6 +2003,13 @@
     BSE.I18n.subscribe(applyI18nAndTheme);
     applyI18nAndTheme();
   }
+  if (typeof matchMedia === 'function') {
+    const systemThemeQuery = matchMedia('(prefers-color-scheme: light)');
+    systemThemeQuery.addEventListener?.('change', () => {
+      if ((BSE.I18n?.getTheme?.() || 'auto') === 'auto') applyI18nAndTheme();
+    });
+  }
+  syncGlobalPreferenceControls().catch(() => {});
 
   // Tabs events
   elements.tabTimestamp?.addEventListener('click', () => switchTab('timestamp'));
@@ -1799,39 +2044,49 @@
   elements.emptyTranscribe?.addEventListener('click', async () => {
     try {
       const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
-      const targetUrl = activeTab?.url || (state?.mediaKey ? (state.mediaKey.startsWith('bili:') ? `https://www.bilibili.com/video/${state.mediaKey.split(':')[1]}` : (state.mediaKey.startsWith('yt:') ? `https://www.youtube.com/watch?v=${state.mediaKey.split(':')[1]}` : null)) : null);
-      if (!targetUrl) {
-        toast('未定位到有效视频链接', true);
+      const targetUrl = activeTab?.url || '';
+      const isCurrentVideoPage = Boolean(activeTab?.id && (targetUrl.includes('bilibili.com') || targetUrl.includes('youtube.com')));
+      if (!isCurrentVideoPage) {
+        toast('请先切回要转录的 Bilibili / YouTube 视频标签页', true);
         return;
       }
 
-      // 1. 若当前处在视频页，优先尝试让页面直接探测网络官方/AI字幕
-      if (activeTab?.id && (targetUrl.includes('bilibili.com') || targetUrl.includes('youtube.com'))) {
-        toast('正在探测视频网络官方/AI字幕…');
-        try {
-          await chrome.tabs.sendMessage(activeTab.id, { type: 'BSE_COMMAND', command: 'REFRESH' });
-          await new Promise((r) => setTimeout(r, 650));
-          const latestState = await chrome.tabs.sendMessage(activeTab.id, { type: 'BSE_GET_STATE' }).catch(() => null);
-          if (latestState?.cues?.length) {
-            renderState(latestState);
-            toast(`已直接获取网络字幕（共 ${latestState.cues.length} 条）`);
-            return;
-          }
-        } catch {
-          // 当前页暂未就绪，继续进入后台队列处理
-        }
+      let enqueueMediaKey = '';
+
+      // Explicit offline transcription never refreshes or reuses platform subtitles.
+      // It only asks the active content script for its current media identity.
+      if (isCurrentVideoPage) {
+        const latestState = await chrome.tabs.sendMessage(activeTab.id, { type: 'BSE_GET_STATE' }).catch(() => null);
+        const latestMatchesTarget = BSE.Utils?.mediaStateMatchesUrl?.(latestState, targetUrl) === true;
+        if (latestMatchesTarget) enqueueMediaKey = String(latestState?.mediaKey || '').trim();
       }
 
-      // 2. 页面无可用网络字幕时，再转入后台处理队列
+      if (isCurrentVideoPage && !enqueueMediaKey) {
+        appendDiagnostic('转录队列', '当前页面媒体身份尚未稳定，已阻止 URL-only 离线转录，避免跨视频/CID 串台。', {
+          scope: 'queue',
+          level: 'warn',
+          code: 'QUEUE_MEDIA_IDENTITY_UNAVAILABLE'
+        });
+        toast('当前视频身份仍在切换，请等待播放器稳定后再点离线转录', true);
+        return;
+      }
+
       const response = await chrome.runtime.sendMessage({
         type: 'BSE_QUEUE_ENQUEUE',
-        urls: [targetUrl],
-        options: { sourceLanguage: elements.queueSourceLanguage?.value || 'auto' }
+        urls: [{
+          url: targetUrl,
+          mediaKey: enqueueMediaKey,
+          processingIntent: 'local-asr'
+        }],
+        options: {
+          sourceLanguage: elements.queueSourceLanguage?.value || 'auto',
+          processingIntent: 'local-asr'
+        }
       });
       if (!response?.ok) throw new Error(response?.error || '无法加入队列');
       chrome.runtime.sendMessage({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
       switchTab('queue');
-      toast('已加入转录队列，正在进行字幕处理…');
+      toast('已加入离线转录队列，SparkScribe 将只处理当前视频音频…');
       await loadAndRenderQueue();
     } catch (err) {
       toast(`发起字幕获取失败：${err.message || String(err)}`, true);
@@ -1877,7 +2132,7 @@
       const res = await chrome.runtime.sendMessage({ type: 'BSE_QUEUE_EXPORT_MERGED' });
       if (res?.ok && res.markdown) {
         await navigator.clipboard.writeText(res.markdown);
-        toast('✓ 已复制全部已完成视频的合并 Markdown');
+        toast('已复制全部已完成视频的合并 Markdown');
       } else {
         toast('暂无已完成的转录内容可导出', true);
       }
@@ -1900,11 +2155,17 @@
   elements.trackerSubscribeUpBtn?.addEventListener('click', async () => {
     if (!currentAuthorInfo || !currentAuthorInfo.targetId) return;
     const t = (k, p) => BSE.I18n?.t(k, p) || k;
-    const subId = `${currentAuthorInfo.platform}:${currentAuthorInfo.type || 'up'}:${currentAuthorInfo.mid || currentAuthorInfo.targetId}`;
-    const exists = subscriptionsCache.some((s) => s.id === subId);
+    const targetId = currentAuthorInfo.mid || currentAuthorInfo.targetId;
+    const subId = `${currentAuthorInfo.platform}:${currentAuthorInfo.type || 'up'}:${targetId}`;
+    const existingSubscription = findSubscriptionBySource({
+      id: subId,
+      platform: currentAuthorInfo.platform,
+      type: currentAuthorInfo.type || 'up',
+      targetId
+    });
     const upName = currentAuthorInfo.upName || currentAuthorInfo.title || 'UP';
-    if (exists) {
-      await BSE.Tracker.removeSubscription(subId);
+    if (existingSubscription) {
+      await BSE.Tracker.removeSubscription(existingSubscription.id);
       toast(t('tracker_toast_untracked', { name: upName }));
     } else {
       const sub = await BSE.Tracker.addSubscription({
@@ -1923,17 +2184,21 @@
       } catch {}
     }
     await loadAndRenderTracker();
-    chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
   });
 
   elements.trackerSubscribeSeasonBtn?.addEventListener('click', async () => {
     if (!currentAuthorInfo || !currentAuthorInfo.seasonId) return;
     const t = (k, p) => BSE.I18n?.t(k, p) || k;
     const subId = `${currentAuthorInfo.platform}:season:${currentAuthorInfo.seasonId}`;
-    const exists = subscriptionsCache.some((s) => s.id === subId);
+    const existingSubscription = findSubscriptionBySource({
+      id: subId,
+      platform: currentAuthorInfo.platform,
+      type: 'season',
+      targetId: currentAuthorInfo.seasonId
+    });
     const seasonTitle = currentAuthorInfo.seasonTitle || currentAuthorInfo.title || t('tracker_type_season');
-    if (exists) {
-      await BSE.Tracker.removeSubscription(subId);
+    if (existingSubscription) {
+      await BSE.Tracker.removeSubscription(existingSubscription.id);
       toast(t('tracker_toast_untracked_season', { title: seasonTitle }));
     } else {
       const bvid = currentAuthorInfo.bvid || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(state?.url || '') : '') || '';
@@ -1956,7 +2221,6 @@
       } catch {}
     }
     await loadAndRenderTracker();
-    chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
   });
 
   elements.trackerFilterAll?.addEventListener('click', () => {
@@ -2014,25 +2278,42 @@
     const t = (k, p) => BSE.I18n?.t(k, p) || k;
     await BSE.Tracker?.markAllAsRead?.();
     await loadAndRenderTracker();
-    chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
-    chrome.runtime.sendMessage({ type: 'BSE_TRACKER_SUBSCRIPTIONS_UPDATED' }).catch(() => {});
     toast(t('tracker_toast_marked_all_read'));
   });
 
   elements.trackerCopyAllBtn?.addEventListener('click', async () => {
     const t = (k, p) => BSE.I18n?.t(k, p) || k;
-    const list = subscriptionsCache;
-    const unreadItems = [];
+    const requests = [];
+    const sourceByKey = new Map();
     let skippedWithoutSubtitle = 0;
-    list.forEach((sub) => {
-      if ((sub.unreadCount || 0) > 0) {
-        (sub.items || []).slice(0, sub.unreadCount).forEach((item) => {
-          if (item.subtitle?.status === 'ready' && (item.subtitle.markdown || item.subtitle.plainText)) {
-            unreadItems.push({ ...item, author: item.author || sub.author || sub.title });
-          } else {
-            skippedWithoutSubtitle++;
-          }
+
+    subscriptionsCache.forEach((sub) => {
+      getTrackerUnreadItems(sub).forEach((item) => {
+        if (item.subtitle?.status === 'ready') {
+          const key = `${sub.id}\u0000${item.id}`;
+          requests.push({ subscriptionId: sub.id, itemId: item.id });
+          sourceByKey.set(key, { sub, item });
+        } else {
+          skippedWithoutSubtitle++;
+        }
+      });
+    });
+
+    const hydrated = requests.length
+      ? await BSE.Tracker.getCachedSubtitlesForItems(requests)
+      : [];
+    const unreadItems = [];
+    hydrated.forEach((entry) => {
+      const source = sourceByKey.get(`${entry.subscriptionId}\u0000${entry.itemId}`);
+      const subtitle = entry.subtitle;
+      if (source && subtitle && (subtitle.markdown || subtitle.plainText)) {
+        unreadItems.push({
+          ...source.item,
+          author: source.item.author || source.sub.author || source.sub.title,
+          subtitle
         });
+      } else {
+        skippedWithoutSubtitle++;
       }
     });
 
@@ -2049,47 +2330,65 @@
 
   elements.trackerList?.addEventListener('click', async (e) => {
     const t = (k, p) => BSE.I18n?.t(k, p) || k;
-    const copyBtn = e.target.closest('.tracker-btn-copy:not(.tracker-btn-retry-sub)');
+    const copyBtn = closestButton(e, '.tracker-btn-copy:not(.tracker-btn-retry-sub)');
     if (copyBtn) {
       const subId = copyBtn.dataset.subId;
       const itemId = copyBtn.dataset.itemId;
       const sub = subscriptionsCache.find((s) => s.id === subId);
       const item = (sub?.items || []).find((i) => i.id === itemId);
-      if (item?.subtitle?.markdown) {
-        await navigator.clipboard.writeText(item.subtitle.markdown);
-        toast(t('tracker_toast_copied_md', { title: item.title }));
-      } else if (item?.subtitle?.plainText) {
-        await navigator.clipboard.writeText(item.subtitle.plainText);
-        toast(t('tracker_toast_copied_txt', { title: item.title }));
-      } else {
-        toast(t('tracker_toast_extract_not_ready'), true);
+      if (!subId || !itemId || !item) return;
+      copyBtn.disabled = true;
+      try {
+        const subtitle = await BSE.Tracker.getCachedSubtitleForItem(subId, itemId);
+        if (subtitle?.markdown) {
+          await navigator.clipboard.writeText(subtitle.markdown);
+          toast(t('tracker_toast_copied_md', { title: item.title }));
+        } else if (subtitle?.plainText) {
+          await navigator.clipboard.writeText(subtitle.plainText);
+          toast(t('tracker_toast_copied_txt', { title: item.title }));
+        } else {
+          toast(subtitle?.errorHint || t('tracker_toast_extract_not_ready'), true);
+        }
+      } finally {
+        copyBtn.disabled = false;
       }
       return;
     }
 
-    const previewBtn = e.target.closest('.tracker-btn-preview-toggle:not(.tracker-btn-watch)');
+    const previewBtn = closestButton(e, '.tracker-btn-preview-toggle:not(.tracker-btn-watch)');
     if (previewBtn) {
       const targetId = previewBtn.dataset.target;
       const drawer = document.getElementById(targetId);
       if (drawer) {
-        drawer.classList.toggle('open');
-        const open = drawer.classList.contains('open');
-        previewBtn.setAttribute('aria-expanded', String(open));
-        previewBtn.textContent = open ? t('tracker_btn_collapse') : t('tracker_btn_preview');
+        const opening = !drawer.classList.contains('open');
+        if (opening && drawer.dataset.loaded !== 'true') {
+          previewBtn.disabled = true;
+          try {
+            const subtitle = await BSE.Tracker.getCachedSubtitleForItem(drawer.dataset.subId, drawer.dataset.itemId);
+            drawer.textContent = subtitle?.markdown || subtitle?.plainText || subtitle?.errorHint || t('tracker_toast_extract_not_ready');
+            drawer.dataset.loaded = 'true';
+          } finally {
+            previewBtn.disabled = false;
+          }
+        }
+        drawer.classList.toggle('open', opening);
+        previewBtn.setAttribute('aria-expanded', String(opening));
+        previewBtn.textContent = opening ? t('tracker_btn_collapse') : t('tracker_btn_preview');
       }
       return;
     }
 
-    const expandBtn = e.target.closest('.tracker-expand-btn');
+    const expandBtn = closestButton(e, '.tracker-expand-btn');
     if (expandBtn) {
       const id = expandBtn.dataset.id;
+      if (!id) return;
       if (expandedTrackerCards.has(id)) expandedTrackerCards.delete(id);
       else expandedTrackerCards.add(id);
       renderTrackerList();
       return;
     }
 
-    const retrySubBtn = e.target.closest('.tracker-btn-retry-sub');
+    const retrySubBtn = closestButton(e, '.tracker-btn-retry-sub');
     if (retrySubBtn) {
       const subId = retrySubBtn.dataset.subId;
       const itemId = retrySubBtn.dataset.itemId;
@@ -2109,14 +2408,14 @@
       return;
     }
 
-    const cardLink = e.target.closest('.tracker-card-link');
-    if (cardLink && !e.target.closest('button')) {
+    const cardLink = closestHtml(e, '.tracker-card-link');
+    if (cardLink && !closestButton(e, 'button')) {
       const url = cardLink.dataset.url;
       if (url) chrome.tabs.create({ url });
       return;
     }
 
-    const renameBtn = e.target.closest('.tracker-btn-rename');
+    const renameBtn = closestButton(e, '.tracker-btn-rename');
     if (renameBtn) {
       const subId = renameBtn.dataset.id;
       const oldTitle = renameBtn.dataset.title || '';
@@ -2129,20 +2428,20 @@
       return;
     }
 
-    const batchCardBtn = e.target.closest('.tracker-btn-batch-card');
+    const batchCardBtn = closestButton(e, '.tracker-btn-batch-card');
     if (batchCardBtn) {
       const subId = batchCardBtn.dataset.id;
       const sub = subscriptionsCache.find((s) => s.id === subId);
       if (!sub) return;
 
       if (sub.platform === 'youtube' && typeof openBatchModal === 'function') {
-        openBatchModal(sub.id);
+        openBatchModal(sub.id, 'youtube');
         return;
       }
 
       const bvid = getSubscriptionBvid(sub);
       if (bvid && typeof openBatchModal === 'function') {
-        openBatchModal(bvid);
+        openBatchModal(bvid, 'bilibili');
         return;
       }
 
@@ -2157,20 +2456,18 @@
       return;
     }
 
-    const unreadDot = e.target.closest('.tracker-item-unread-dot');
+    const unreadDot = closestHtml(e, '.tracker-item-unread-dot');
     if (unreadDot) {
       const subId = unreadDot.dataset.subId;
       const itemId = unreadDot.dataset.itemId;
       if (subId && itemId) {
         await BSE.Tracker?.markAsRead?.(subId, itemId);
         await loadAndRenderTracker();
-        chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
-        chrome.runtime.sendMessage({ type: 'BSE_TRACKER_SUBSCRIPTIONS_UPDATED' }).catch(() => {});
       }
       return;
     }
 
-    const watchBtn = e.target.closest('.tracker-btn-watch');
+    const watchBtn = closestButton(e, '.tracker-btn-watch');
     if (watchBtn) {
       const url = watchBtn.dataset.url;
       const subId = watchBtn.dataset.subId;
@@ -2178,34 +2475,28 @@
       if (subId && itemId) {
         BSE.Tracker?.markAsRead?.(subId, itemId).then(() => {
           loadAndRenderTracker();
-          chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
-          chrome.runtime.sendMessage({ type: 'BSE_TRACKER_SUBSCRIPTIONS_UPDATED' }).catch(() => {});
         }).catch(() => {});
       }
       if (url) chrome.tabs.create({ url });
       return;
     }
-    const readBtn = e.target.closest('.tracker-btn-read');
+    const readBtn = closestButton(e, '.tracker-btn-read');
     if (readBtn) {
       const id = readBtn.dataset.id;
       if (id) {
         await BSE.Tracker?.markAsRead?.(id);
         await loadAndRenderTracker();
-        chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
-        chrome.runtime.sendMessage({ type: 'BSE_TRACKER_SUBSCRIPTIONS_UPDATED' }).catch(() => {});
         toast(t('tracker_toast_marked_read'));
       }
       return;
     }
-    const delBtn = e.target.closest('.tracker-btn-del');
+    const delBtn = closestButton(e, '.tracker-btn-del');
     if (delBtn) {
       const id = delBtn.dataset.id;
       const title = delBtn.dataset.title || t('tracker_type_season');
       if (id && window.confirm(t('tracker_confirm_untrack', { title }))) {
         await BSE.Tracker?.removeSubscription?.(id);
         await loadAndRenderTracker();
-        chrome.runtime.sendMessage({ type: 'BSE_TRACKER_UPDATE_BADGE' }).catch(() => {});
-        chrome.runtime.sendMessage({ type: 'BSE_TRACKER_SUBSCRIPTIONS_UPDATED' }).catch(() => {});
         toast(t('tracker_toast_untracked', { name: title }));
       }
       return;
@@ -2213,9 +2504,10 @@
   });
 
   elements.trackerList?.addEventListener('keydown', (e) => {
+    if (!(e instanceof KeyboardEvent)) return;
     if (e.key === 'Enter' || e.key === ' ') {
-      const cardLink = e.target.closest('.tracker-card-link');
-      if (cardLink && !e.target.closest('button')) {
+      const cardLink = closestHtml(e, '.tracker-card-link');
+      if (cardLink && !closestButton(e, 'button')) {
         e.preventDefault();
         const url = cardLink.dataset.url;
         if (url) chrome.tabs.create({ url });
@@ -2223,23 +2515,35 @@
     }
   });
 
+  function trackerNotificationMode(settings) {
+    if (settings?.enableNotification) return 'desktop';
+    if (settings?.enableBadge) return 'badge';
+    return 'off';
+  }
+
+  async function syncTrackerSettingsControls() {
+    if (!BSE.Tracker) return;
+    const settings = await BSE.Tracker.getSettings();
+    if (elements.trackerIntervalSelect) elements.trackerIntervalSelect.value = String(settings.checkIntervalMinutes);
+    if (elements.trackerNotifySelect) elements.trackerNotifySelect.value = trackerNotificationMode(settings);
+  }
+
   if (elements.trackerIntervalSelect && BSE.Tracker) {
-    BSE.Tracker.getSettings().then((s) => {
-      if (elements.trackerIntervalSelect) elements.trackerIntervalSelect.value = String(s.checkIntervalMinutes);
-      if (elements.trackerNotifySelect) elements.trackerNotifySelect.value = String(s.enableNotification);
-    }).catch(() => {});
+    syncTrackerSettingsControls().catch(() => {});
 
     elements.trackerIntervalSelect.addEventListener('change', async () => {
       const val = Number(elements.trackerIntervalSelect.value);
       await BSE.Tracker?.saveSettings?.({ checkIntervalMinutes: val });
-      chrome.runtime.sendMessage({ type: 'BSE_TRACKER_RESET_ALARM' }).catch(() => {});
       const t = (k, p) => BSE.I18n?.t(k, p) || k;
       toast(t('tracker_toast_interval_saved'));
     });
 
     elements.trackerNotifySelect?.addEventListener('change', async () => {
-      const val = elements.trackerNotifySelect.value === 'true';
-      await BSE.Tracker?.saveSettings?.({ enableNotification: val });
+      const mode = elements.trackerNotifySelect.value;
+      await BSE.Tracker?.saveSettings?.({
+        enableNotification: mode === 'desktop',
+        enableBadge: mode !== 'off'
+      });
       const t = (k, p) => BSE.I18n?.t(k, p) || k;
       toast(t('tracker_toast_notify_saved'));
     });
@@ -2260,13 +2564,14 @@
     elements.trackerImportFile?.click();
   });
 
-  elements.trackerImportFile?.addEventListener('change', async (e) => {
+  elements.trackerImportFile?.addEventListener('change', async () => {
     const t = (k, p) => BSE.I18n?.t(k, p) || k;
-    const file = e.target.files?.[0];
+    const file = elements.trackerImportFile?.files?.[0];
     if (!file) return;
     try {
       const text = await file.text();
       const res = await BSE.Tracker?.importConfigJson?.(text);
+      await syncTrackerSettingsControls();
       await loadAndRenderTracker();
       toast(t('tracker_toast_import_success', { n: res.importedCount }));
     } catch (err) {
@@ -2277,7 +2582,16 @@
   });
 
   // === AI Workbench & Visual Course Breakdown Note Generator ===
+  const AI_EVIDENCE_FRAME_MAX_WIDTH = 1536;
+  const AI_EVIDENCE_FRAME_QUALITY = 0.9;
   let currentAiMode = 'course_notes';
+  let manualFrames = [];
+  let externalImageDeliveryMode = 'contact-sheet';
+  let externalDeliveredFrames = [];
+  /** @type {(() => void) | null} */
+  let activeNoteImagePreviewClose = null;
+  let aiNoteRestoreRevision = 0;
+  let aiGenerationRevision = 0;
   let currentGeneratedNote = {
     markdown: '',
     imagesMap: {}, // key: timestamp (number/string), value: { dataUrl, timestamp, timeStr, label }
@@ -2286,73 +2600,243 @@
     mediaKey: ''
   };
 
+  /** @returns {Error & { code: 'MEDIA_CONTEXT_CHANGED' }} */
+  function createMediaContextChangedError(message) {
+    return Object.assign(new Error(message), { code: /** @type {const} */ ('MEDIA_CONTEXT_CHANGED') });
+  }
+
+  function createMediaOperationContext() {
+    const mediaKey = state?.mediaKey || '';
+    const tabId = activeTabId;
+    if (!mediaKey || tabId == null) throw new Error('当前视频上下文尚未就绪');
+    return { mediaKey, tabId };
+  }
+
+  function assertMediaOperationContext(context) {
+    if (!context || activeTabId !== context.tabId || state?.mediaKey !== context.mediaKey) {
+      throw createMediaContextChangedError('视频已切换，已停止本次画面处理以避免跨视频污染');
+    }
+  }
+
   /**
-   * 向当前活动视频标签页安全发送消息
+   * 向启动操作时锁定的视频标签页发送消息。媒体上下文改变时立即拒绝继续执行，
+   * 避免 A 视频字幕与 B 视频画面在异步流程中被混合。
    */
-  async function sendTabMessage(message) {
+  async function sendTabMessage(message, context = null) {
     if (typeof chrome === 'undefined' || !chrome.tabs) return null;
+    if (context) {
+      assertMediaOperationContext(context);
+      const response = await chrome.tabs.sendMessage(context.tabId, {
+        ...message,
+        expectedMediaKey: context.mediaKey
+      });
+      assertMediaOperationContext(context);
+      if (response?.mediaKey && response.mediaKey !== context.mediaKey) {
+        throw createMediaContextChangedError('播放器媒体已变化，截图结果已丢弃');
+      }
+      return response;
+    }
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) throw new Error('未找到当前活跃的视频标签页');
     return await chrome.tabs.sendMessage(tab.id, message);
   }
 
-  async function saveCurrentNoteToCache() {
-    if (!state?.mediaKey || !currentGeneratedNote?.markdown || typeof chrome === 'undefined' || !chrome.storage?.local) return;
-    const key = `bse_ai_note_${state.mediaKey}`;
+  async function refreshAiModeIndicators(mediaKey = state?.mediaKey || '') {
+    const pills = [...document.querySelectorAll('.ai-mode-pill[data-mode]')];
+    pills.forEach((pill) => pill.classList.remove('has-result'));
+    if (!mediaKey || !BSE.AiNoteCache?.listModes) return;
     try {
-      await chrome.storage.local.set({ [key]: { ...currentGeneratedNote, mediaKey: state.mediaKey } });
+      const modes = await BSE.AiNoteCache.listModes(mediaKey);
+      const ready = new Set((modes || []).map((entry) => entry.mode));
+      pills.forEach((pill) => {
+        const mode = pill.dataset.mode || '';
+        if (ready.has(mode)) pill.classList.add('has-result');
+      });
     } catch {}
   }
 
-  async function restoreNoteFromCache(mediaKey) {
-    if (!mediaKey || typeof chrome === 'undefined' || !chrome.storage?.local) return;
-    const key = `bse_ai_note_${mediaKey}`;
+  async function saveCurrentNoteToCache() {
+    const noteMediaKey = String(currentGeneratedNote?.mediaKey || '').trim();
+    if (!noteMediaKey || !currentGeneratedNote?.markdown) return false;
+    if (state?.mediaKey && state.mediaKey !== noteMediaKey) return false;
     try {
-      const res = await chrome.storage.local.get(key);
-      const cached = res[key];
-      if (cached && cached.markdown) {
-        currentGeneratedNote = cached;
-        const html = BSE.Formatters?.renderNoteToHtml?.(cached.markdown, { imagesMap: cached.imagesMap || {} }) || cached.markdown;
-        if (elements.aiNoteContent) {
-          elements.aiNoteContent.innerHTML = html;
-          elements.aiNoteContent.hidden = false;
-        }
-        if (elements.aiNotePlaceholder) elements.aiNotePlaceholder.hidden = true;
-        if (elements.aiBtnCopyNote) elements.aiBtnCopyNote.disabled = false;
-        if (elements.aiBtnExportZip) elements.aiBtnExportZip.disabled = false;
+      if (!BSE.AiNoteCache?.save) throw new Error('AI Note Cache 模块未加载');
+      const saved = await BSE.AiNoteCache.save({ ...currentGeneratedNote, mediaKey: noteMediaKey });
+      if (!saved) throw new Error('AI Note Cache 未能持久化当前学习产物');
+      void refreshAiModeIndicators(noteMediaKey);
+      return true;
+    } catch (error) {
+      appendDiagnostic('AI缓存', `讲义缓存保存失败: ${error?.message || error}`, { scope: 'ai', level: 'warn' });
+      return false;
+    }
+  }
+
+  function renderManualTray() {
+    // 托盘内容发生变化后，之前复制/下载的图片集合就不再代表当前状态；
+    // 下一次复制阶段二提示词应重新绑定当前托盘，而不是沿用陈旧投递快照。
+    externalImageDeliveryMode = 'contact-sheet';
+    externalDeliveredFrames = [];
+    if (!elements.aiManualTray || !elements.aiManualTrayList) return;
+    if (!manualFrames.length) {
+      elements.aiManualTray.hidden = true;
+      elements.aiManualTrayList.innerHTML = '';
+      if (elements.aiManualTrayCount) elements.aiManualTrayCount.textContent = '0';
+      return;
+    }
+    elements.aiManualTray.hidden = false;
+    if (elements.aiManualTrayCount) {
+      elements.aiManualTrayCount.textContent = String(manualFrames.length);
+    }
+    elements.aiManualTrayList.innerHTML = manualFrames.map((frame, idx) => `
+      <div class="ai-tray-card" data-index="${idx}" data-seek="${frame.timestamp}" title="点击跳转至 ${frame.timeStr}；外部 AI 投递请使用“复制精选拼图”或“原图打包”">
+        <img src="${frame.dataUrl}" alt="${frame.timeStr}" draggable="false" />
+        <span class="ai-tray-card-time">${frame.timeStr}</span>
+        <button class="btn-delete-tray-card" data-index="${idx}" title="移除此截图">×</button>
+      </div>
+    `).join('');
+  }
+
+  function removeFrameAliases(imagesMap, targetFrame, targetSeconds) {
+    if (!imagesMap || !targetFrame) return;
+    const targetDataUrl = targetFrame.dataUrl || '';
+    for (const [key, value] of Object.entries(imagesMap)) {
+      const timestamp = Number(value?.timestamp);
+      const sameFrame = value === targetFrame
+        || (targetDataUrl && value?.dataUrl === targetDataUrl)
+        || (Number.isFinite(timestamp) && Number.isFinite(targetSeconds) && Math.abs(timestamp - targetSeconds) < 0.01);
+      if (sameFrame) delete imagesMap[key];
+    }
+  }
+
+  function renderEmptyAiNoteState(mediaKey = state?.mediaKey || '', mode = currentAiMode) {
+    currentGeneratedNote = {
+      markdown: '',
+      imagesMap: {},
+      mode: ['course_notes', 'summary', 'deep_qa'].includes(mode) ? mode : 'course_notes',
+      title: '',
+      mediaKey
+    };
+    if (elements.aiNoteContent) {
+      elements.aiNoteContent.innerHTML = '';
+      elements.aiNoteContent.hidden = true;
+    }
+    if (elements.aiNotePlaceholder) elements.aiNotePlaceholder.hidden = false;
+    if (elements.aiBtnCopyNote) elements.aiBtnCopyNote.disabled = true;
+    if (elements.aiBtnExportZip) elements.aiBtnExportZip.disabled = true;
+  }
+
+  function resetAiWorkbenchForMediaChange(mediaKey) {
+    manualFrames = [];
+    externalImageDeliveryMode = 'contact-sheet';
+    externalDeliveredFrames = [];
+    renderManualTray();
+    activeNoteImagePreviewClose?.();
+    aiNoteRestoreRevision++;
+    aiGenerationRevision++;
+    if (elements.aiBtnGenerate) elements.aiBtnGenerate.disabled = false;
+    if (elements.aiProgressBox) elements.aiProgressBox.hidden = true;
+    renderEmptyAiNoteState(mediaKey || '', currentAiMode);
+    void refreshAiModeIndicators(mediaKey || '');
+    if (currentTab === 'ai' && mediaKey && currentAiMode !== 'prompts') void restoreNoteFromCache(mediaKey, currentAiMode);
+  }
+
+  async function restoreNoteFromCache(mediaKey, mode = currentAiMode) {
+    if (!mediaKey) {
+      renderEmptyAiNoteState('', mode);
+      return;
+    }
+    const restoreRevision = ++aiNoteRestoreRevision;
+    try {
+      if (!BSE.AiNoteCache?.load) throw new Error('AI Note Cache 模块未加载');
+      const cached = await BSE.AiNoteCache.load(mediaKey, mode);
+      if (restoreRevision !== aiNoteRestoreRevision || state?.mediaKey !== mediaKey || currentAiMode !== mode) return;
+      if (!cached?.markdown) {
+        renderEmptyAiNoteState(mediaKey, mode);
+        return;
       }
-    } catch {}
+      currentGeneratedNote = cached;
+      const html = BSE.Formatters?.renderNoteToHtml?.(cached.markdown, { imagesMap: cached.imagesMap || {} }) || cached.markdown;
+      if (elements.aiNoteContent) {
+        elements.aiNoteContent.innerHTML = html;
+        elements.aiNoteContent.hidden = false;
+      }
+      if (elements.aiNotePlaceholder) elements.aiNotePlaceholder.hidden = true;
+      if (elements.aiBtnCopyNote) elements.aiBtnCopyNote.disabled = false;
+      if (elements.aiBtnExportZip) elements.aiBtnExportZip.disabled = false;
+    } catch (error) {
+      if (restoreRevision !== aiNoteRestoreRevision || state?.mediaKey !== mediaKey || currentAiMode !== mode) return;
+      renderEmptyAiNoteState(mediaKey, mode);
+      appendDiagnostic('AI缓存', `学习产物缓存恢复失败: ${error?.message || error}`, { scope: 'ai', level: 'warn' });
+    }
+  }
+
+  /** @returns {Promise<import('../types/bse').AiSettings>} */
+  async function getActiveAiSettings() {
+    const config = await BSE.Ai?.getAiSettings?.();
+    return config || BSE.Ai?.DEFAULT_CONFIG || {
+      endpoint: '',
+      apiKey: '',
+      model: '',
+      timeoutMs: 120000
+    };
+  }
+
+  let aiStatusRevision = 0;
+  /** @type {import('../types/bse').AiSettings | null} */
+  let savedAiConfig = null;
+
+  function renderAiModelOptions(models = []) {
+    if (!elements.aiModelOptions) return;
+    const uniqueModels = [...new Set((Array.isArray(models) ? models : []).filter(Boolean))].slice(0, 200);
+    const fragment = document.createDocumentFragment();
+    uniqueModels.forEach((model) => {
+      const option = document.createElement('option');
+      option.value = String(model);
+      fragment.appendChild(option);
+    });
+    elements.aiModelOptions.replaceChildren(fragment);
   }
 
   async function loadAiConfigToUi() {
-    const config = await BSE.Ai?.getAiSettings?.() || BSE.Ai?.DEFAULT_CONFIG || {};
+    const config = await getActiveAiSettings();
+    savedAiConfig = config;
     if (elements.aiInputEndpoint) elements.aiInputEndpoint.value = config.endpoint || '';
     if (elements.aiInputApiKey) elements.aiInputApiKey.value = config.apiKey || '';
     if (elements.aiInputModel) elements.aiInputModel.value = config.model || '';
-    if (elements.aiModelName) elements.aiModelName.textContent = config.model || 'Gemini 3.7 Flash Thinking';
-    checkAiStatus(config.endpoint, config.apiKey);
+    if (elements.aiModelName) elements.aiModelName.textContent = config.model || '未配置模型';
+    checkAiStatus(config.endpoint, config.apiKey, config.model);
   }
 
-  async function checkAiStatus(endpoint, apiKey) {
-    if (!elements.aiStatusDot) return;
+  async function checkAiStatus(endpoint, apiKey, model) {
+    if (!elements.aiStatusDot) return null;
+    const revision = ++aiStatusRevision;
     elements.aiStatusDot.className = 'badge-dot';
     try {
-      const probe = await BSE.Ai?.probeLlm?.(endpoint, apiKey);
+      const probe = await BSE.Ai?.probeLlm?.(endpoint, apiKey, model);
+      if (revision !== aiStatusRevision) return probe || null;
+      renderAiModelOptions(probe?.models || []);
       if (probe?.available) {
         elements.aiStatusDot.className = 'badge-dot online';
-        if (elements.aiModelName && probe.model) {
-          elements.aiModelName.textContent = probe.model;
+        if (elements.aiTestStatus) {
+          elements.aiTestStatus.textContent = probe.modelAvailable === false
+            ? `服务在线 · ${probe.protocol || '兼容协议'} · 模型列表中未发现「${model}」，请用“测试当前模型”做实际调用确认`
+            : `服务在线 · ${probe.protocol || '兼容协议'} · 当前生成模型：${model || '未配置'}`;
         }
       } else {
         elements.aiStatusDot.className = 'badge-dot offline';
+        if (elements.aiTestStatus) elements.aiTestStatus.textContent = `服务探测未通过：${probe?.error || '未响应'}`;
       }
-    } catch {
+      return probe || null;
+    } catch (err) {
+      if (revision !== aiStatusRevision) return null;
       elements.aiStatusDot.className = 'badge-dot offline';
+      if (elements.aiTestStatus) elements.aiTestStatus.textContent = `服务探测异常：${err?.message || err}`;
+      return null;
     }
   }
 
   function setupAiWorkbench() {
-    loadAiConfigToUi();
+    const aiConfigReady = loadAiConfigToUi();
 
     // Toggle AI Settings Panel
     const toggleAiSettings = () => {
@@ -2369,153 +2853,232 @@
       elements.aiModelBadge.addEventListener('click', toggleAiSettings);
     }
 
+    const readDraftAiConfig = () => ({
+      endpoint: elements.aiInputEndpoint?.value.trim() || '',
+      apiKey: elements.aiInputApiKey?.value.trim() || '',
+      model: elements.aiInputModel?.value.trim() || ''
+    });
+
+    const validateDraftAiConfig = (draft) => {
+      if (!draft.endpoint) {
+        if (elements.aiTestStatus) elements.aiTestStatus.textContent = '请先填写 API Base URL';
+        elements.aiInputEndpoint?.focus();
+        return false;
+      }
+      if (!draft.model) {
+        if (elements.aiTestStatus) elements.aiTestStatus.textContent = '请先填写生成模型名称';
+        elements.aiInputModel?.focus();
+        return false;
+      }
+      return true;
+    };
+
+    const isSavedAiConfig = (draft) => Boolean(savedAiConfig
+      && draft.endpoint.replace(/\/+$/, '') === savedAiConfig.endpoint.replace(/\/+$/, '')
+      && draft.apiKey === savedAiConfig.apiKey
+      && draft.model === savedAiConfig.model);
+
     // Save Settings
     if (elements.aiBtnSaveSettings) {
       elements.aiBtnSaveSettings.addEventListener('click', async () => {
-        const endpoint = elements.aiInputEndpoint?.value.trim() || '';
-        const apiKey = elements.aiInputApiKey?.value.trim() || '';
-        const model = elements.aiInputModel?.value.trim() || '';
-        await BSE.Ai?.saveAiSettings?.({ endpoint, apiKey, model });
-        toast('✓ AI 配置已保存');
-        if (elements.aiSettingsDrawer) elements.aiSettingsDrawer.hidden = true;
-        checkAiStatus(endpoint, apiKey);
+        await aiConfigReady;
+        const draft = readDraftAiConfig();
+        if (!validateDraftAiConfig(draft)) return;
+        elements.aiBtnSaveSettings.disabled = true;
+        try {
+          if (!BSE.Ai?.saveAiSettings) throw new Error('AI 配置模块未加载');
+          const saved = await BSE.Ai.saveAiSettings(draft);
+          savedAiConfig = saved;
+          if (elements.aiInputEndpoint) elements.aiInputEndpoint.value = saved.endpoint;
+          if (elements.aiInputApiKey) elements.aiInputApiKey.value = saved.apiKey;
+          if (elements.aiInputModel) elements.aiInputModel.value = saved.model;
+          if (elements.aiModelName) elements.aiModelName.textContent = saved.model;
+          await checkAiStatus(saved.endpoint, saved.apiKey, saved.model);
+          toast('AI 配置已保存');
+        } catch (err) {
+          if (elements.aiTestStatus) elements.aiTestStatus.textContent = `配置保存失败：${err?.message || err}`;
+          toast(`AI 配置保存失败: ${err?.message || err}`, true);
+        } finally {
+          elements.aiBtnSaveSettings.disabled = false;
+        }
       });
     }
 
-    // Test Connection
+    // Test the exact model currently entered. This does not mutate saved settings.
     if (elements.aiBtnTestConn) {
       elements.aiBtnTestConn.addEventListener('click', async () => {
-        const endpoint = elements.aiInputEndpoint?.value.trim() || '';
-        const apiKey = elements.aiInputApiKey?.value.trim() || '';
-        if (elements.aiTestStatus) elements.aiTestStatus.textContent = '⏳ 正在测试连接…';
+        await aiConfigReady;
+        const draft = readDraftAiConfig();
+        if (!validateDraftAiConfig(draft)) return;
+        aiStatusRevision++;
+        elements.aiBtnTestConn.disabled = true;
+        const originalLabel = elements.aiBtnTestConn.textContent;
+        elements.aiBtnTestConn.textContent = '测试中…';
+        if (elements.aiTestStatus) elements.aiTestStatus.textContent = `正在实际调用「${draft.model}」…`;
         try {
-          const probe = await BSE.Ai?.probeLlm?.(endpoint, apiKey);
-          if (probe?.available) {
-            if (elements.aiTestStatus) elements.aiTestStatus.textContent = `🟢 连接成功！协议: ${probe.protocol} · 默认模型: ${probe.model}`;
-            if (elements.aiModelName) elements.aiModelName.textContent = probe.model || '在线';
-            if (elements.aiStatusDot) elements.aiStatusDot.className = 'badge-dot online';
+          if (!BSE.Ai?.testLlm) throw new Error('当前 AI 模块不支持模型实测');
+          const result = await BSE.Ai.testLlm(draft.endpoint, draft.apiKey, draft.model);
+          if (result?.models?.length) renderAiModelOptions(result.models);
+          if (result?.available) {
+            const returnedModel = result.returnedModel || result.model || draft.model;
+            const modelRoute = returnedModel !== draft.model
+              ? `请求 ${draft.model} → 服务返回 ${returnedModel}`
+              : `模型 ${draft.model}`;
+            const catalogHint = result.modelAvailable === false ? ' · 未列入模型目录但实际调用成功' : '';
+            const saveHint = isSavedAiConfig(draft) ? '' : ' · 当前为未保存配置';
+            const preview = result.responsePreview ? ` · 返回「${result.responsePreview}」` : '';
+            if (elements.aiTestStatus) {
+              elements.aiTestStatus.textContent = `模型可用 · ${result.protocol || '兼容协议'} · ${modelRoute} · ${result.latencyMs || 0}ms${catalogHint}${saveHint}${preview}`;
+            }
+            if (isSavedAiConfig(draft) && elements.aiStatusDot) elements.aiStatusDot.className = 'badge-dot online';
           } else {
-            if (elements.aiTestStatus) elements.aiTestStatus.textContent = `🔴 连接失败: ${probe?.error || '服务未响应'}`;
-            if (elements.aiStatusDot) elements.aiStatusDot.className = 'badge-dot offline';
+            if (elements.aiTestStatus) elements.aiTestStatus.textContent = `当前模型不可用：${result?.error || '服务未响应'}`;
+            if (isSavedAiConfig(draft) && elements.aiStatusDot) elements.aiStatusDot.className = 'badge-dot offline';
           }
         } catch (err) {
-          if (elements.aiTestStatus) elements.aiTestStatus.textContent = `🔴 测试异常: ${err.message}`;
+          if (elements.aiTestStatus) elements.aiTestStatus.textContent = `模型测试异常：${err?.message || err}`;
+        } finally {
+          elements.aiBtnTestConn.disabled = false;
+          elements.aiBtnTestConn.textContent = originalLabel || '测试当前模型';
         }
       });
     }
 
-    // Mode Selector
-    document.querySelectorAll('.ai-mode-pill').forEach((pill) => {
-      pill.addEventListener('click', () => {
-        document.querySelectorAll('.ai-mode-pill').forEach((p) => p.classList.remove('active'));
-        pill.classList.add('active');
-        currentAiMode = pill.dataset.mode || 'course_notes';
+    // Mode Selector: segmented navigation with synchronized visual + accessibility state.
+    const aiModePills = /** @type {HTMLElement[]} */ ([...document.querySelectorAll('.ai-mode-pill')]);
+    const aiExternalToolbar = /** @type {HTMLElement | null} */ (document.querySelector('#ai-external-toolbar'));
+    const aiPlaceholderTitle = /** @type {HTMLElement | null} */ (document.querySelector('#ai-note-placeholder-title'));
+    const aiPlaceholderDesc = /** @type {HTMLElement | null} */ (document.querySelector('#ai-note-placeholder-desc'));
+    const activateAiMode = (pill) => {
+      aiModePills.forEach((item) => {
+        const selected = item === pill;
+        item.classList.toggle('active', selected);
+        item.setAttribute('aria-selected', String(selected));
+        item.tabIndex = selected ? 0 : -1;
+      });
+      currentAiMode = pill.dataset.mode || 'course_notes';
+      const isDeepNotes = currentAiMode === 'course_notes';
+      if (aiExternalToolbar) aiExternalToolbar.hidden = !isDeepNotes;
+      if (elements.aiBtnSnipFrame) elements.aiBtnSnipFrame.hidden = !isDeepNotes;
+      if (elements.aiManualTray && !isDeepNotes) elements.aiManualTray.hidden = true;
+      if (elements.aiPromptsGrid) elements.aiPromptsGrid.hidden = true;
+      if (elements.aiPromptsToggle) elements.aiPromptsToggle.setAttribute('aria-expanded', 'false');
 
-        if (currentAiMode === 'prompts') {
-          if (elements.aiPromptsGrid) elements.aiPromptsGrid.hidden = false;
-          if (elements.aiActionToolbar) elements.aiActionToolbar.hidden = true;
-          if (elements.aiNoteResultContainer) elements.aiNoteResultContainer.hidden = true;
-        } else {
-          if (elements.aiPromptsGrid) elements.aiPromptsGrid.hidden = true;
-          if (elements.aiActionToolbar) elements.aiActionToolbar.hidden = false;
-          if (elements.aiNoteResultContainer) elements.aiNoteResultContainer.hidden = false;
-
-          const modeTexts = {
-            course_notes: '生成图文课程讲义',
-            summary: '生成核心主旨脉络',
-            deep_qa: '生成难点辨析自测'
-          };
-          if (elements.aiBtnGenerateText) {
-            elements.aiBtnGenerateText.textContent = modeTexts[currentAiMode] || '开始 AI 深度分解';
-          }
+      const emptyStateCopy = {
+        course_notes: {
+          title: '生成一份可长期留存的学习讲义',
+          desc: '先梳理字幕主线，再按需要规划和筛选关键画面，适合系统学习、课程复习和归档。'
+        },
+        summary: {
+          title: '生成一份几分钟就能看完的快速回顾',
+          desc: '只处理字幕文本，保留一句话结论、主线、关键结论和重要边界；适合看完视频后快速回忆。'
+        },
+        deep_qa: {
+          title: '把视频变成真正可作答的复盘自测',
+          desc: '聚焦易混概念、关键前提与推理断点；题目和参考答案分开组织，适合复习和查漏补缺。'
         }
+      };
+      const currentCopy = emptyStateCopy[currentAiMode] || emptyStateCopy.course_notes;
+      if (aiPlaceholderTitle) aiPlaceholderTitle.textContent = currentCopy.title;
+      if (aiPlaceholderDesc) aiPlaceholderDesc.textContent = currentCopy.desc;
+
+      if (elements.aiActionToolbar) {
+        elements.aiActionToolbar.hidden = false;
+        elements.aiActionToolbar.classList.toggle('text-only', !isDeepNotes);
+      }
+      if (elements.aiNoteResultContainer) elements.aiNoteResultContainer.hidden = false;
+
+      const modeTexts = {
+        course_notes: '生成学习讲义',
+        summary: '生成快速回顾',
+        deep_qa: '生成复盘自测'
+      };
+      if (elements.aiBtnGenerateText) {
+        elements.aiBtnGenerateText.textContent = modeTexts[currentAiMode] || '开始生成';
+      }
+      const exportLabel = elements.aiBtnExportZip?.querySelector('span');
+      if (exportLabel) exportLabel.textContent = currentAiMode === 'course_notes' ? '导出图文包' : '下载 Markdown';
+      if (elements.aiManualTray) {
+        elements.aiManualTray.hidden = !isDeepNotes || manualFrames.length === 0;
+      }
+      if (state?.mediaKey) void restoreNoteFromCache(state.mediaKey, currentAiMode);
+      else renderEmptyAiNoteState('', currentAiMode);
+    };
+
+    if (elements.aiPromptsToggle) {
+      elements.aiPromptsToggle.addEventListener('click', () => {
+        const nextOpen = Boolean(elements.aiPromptsGrid?.hidden);
+        if (elements.aiPromptsGrid) elements.aiPromptsGrid.hidden = !nextOpen;
+        elements.aiPromptsToggle.setAttribute('aria-expanded', String(nextOpen));
+      });
+    }
+
+    aiModePills.forEach((pill, index) => {
+      pill.addEventListener('click', () => activateAiMode(pill));
+      pill.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        let nextIndex = index;
+        if (event.key === 'Home') nextIndex = 0;
+        else if (event.key === 'End') nextIndex = aiModePills.length - 1;
+        else if (event.key === 'ArrowLeft') nextIndex = (index - 1 + aiModePills.length) % aiModePills.length;
+        else if (event.key === 'ArrowRight') nextIndex = (index + 1) % aiModePills.length;
+        const next = aiModePills[nextIndex];
+        if (!next) return;
+        activateAiMode(next);
+        next.focus();
       });
     });
 
     // Pre-generation Manual Frames Buffer & Tray Management
-    let manualFrames = [];
+    function openNoteImagePreview(sourceImage) {
+      if (!(sourceImage instanceof HTMLImageElement) || !sourceImage.src) return;
+      activeNoteImagePreviewClose?.();
 
-    // 将 base64 DataURL 同步转为原生 File 对象（供 HTML5 跨窗口直接拖入外部网页 AI）
-    function dataUrlToFile(dataUrl, filename) {
-      try {
-        const parts = dataUrl.split(',');
-        const mime = parts[0].match(/:(.*?);/)?.[1] || 'image/png';
-        const bstr = atob(parts[1]);
-        let n = bstr.length;
-        const u8arr = new Uint8Array(n);
-        while (n--) {
-          u8arr[n] = bstr.charCodeAt(n);
-        }
-        return new File([u8arr], filename, { type: mime });
-      } catch (err) {
-        console.error('dataUrlToFile 转换失败:', err);
-        return null;
-      }
-    }
+      const overlay = document.createElement('div');
+      overlay.className = 'note-image-lightbox';
+      overlay.setAttribute('role', 'dialog');
+      overlay.setAttribute('aria-modal', 'true');
+      overlay.setAttribute('aria-label', sourceImage.alt || '截图原图预览');
 
-    function renderManualTray() {
-      if (!elements.aiManualTray || !elements.aiManualTrayList) return;
-      if (!manualFrames.length) {
-        elements.aiManualTray.hidden = true;
-        return;
-      }
-      elements.aiManualTray.hidden = false;
-      if (elements.aiManualTrayCount) {
-        elements.aiManualTrayCount.textContent = String(manualFrames.length);
-      }
-      elements.aiManualTrayList.innerHTML = manualFrames.map((frame, idx) => `
-        <div class="ai-tray-card" draggable="true" data-index="${idx}" data-seek="${frame.timestamp}" title="按住可直接拖入左侧网页 AI · 点击跳转至 ${frame.timeStr}">
-          <img src="${frame.dataUrl}" alt="${frame.timeStr}" draggable="false" />
-          <span class="ai-tray-card-time">${frame.timeStr}</span>
-          <button class="btn-delete-tray-card" data-index="${idx}" title="移除此截图">✕</button>
-        </div>
-      `).join('');
-    }
+      const image = document.createElement('img');
+      image.className = 'note-image-lightbox-image';
+      image.src = sourceImage.src;
+      image.alt = sourceImage.alt || '截图原图';
 
-    // 支持将单张截图直接从托盘拖入网页版 AI (ChatGPT / Claude / DeepSeek)
-    if (elements.aiManualTrayList) {
-      elements.aiManualTrayList.addEventListener('dragstart', (e) => {
-        const card = e.target.closest('.ai-tray-card');
-        if (!card) return;
-        const idx = Number(card.dataset.index);
-        const frame = manualFrames[idx];
-        if (frame && e.dataTransfer) {
-          e.dataTransfer.effectAllowed = 'copy';
-          const safeTime = (frame.timeStr || `frame_${idx + 1}`).replace(/[:：]/g, '-');
-          const file = dataUrlToFile(frame.dataUrl, `frame_${idx + 1}_${safeTime}.png`);
-          if (file && e.dataTransfer.items) {
-            e.dataTransfer.items.add(file);
-          }
-        }
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.className = 'note-image-lightbox-close';
+      closeButton.setAttribute('aria-label', '关闭原图预览');
+      closeButton.textContent = '×';
+
+      const caption = document.createElement('div');
+      caption.className = 'note-image-lightbox-caption';
+      caption.textContent = sourceImage.alt || '视频画面';
+
+      const onKeydown = (event) => {
+        if (event.key === 'Escape') closePreview();
+      };
+      const closePreview = () => {
+        document.removeEventListener('keydown', onKeydown);
+        overlay.remove();
+        if (activeNoteImagePreviewClose === closePreview) activeNoteImagePreviewClose = null;
+      };
+
+      closeButton.addEventListener('click', closePreview);
+      overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) closePreview();
       });
-    }
-
-    // 支持将全部截图一次性拖入网页版 AI
-    const btnDragAllTray = document.querySelector('#btn-drag-all-tray');
-    if (btnDragAllTray) {
-      btnDragAllTray.addEventListener('dragstart', (e) => {
-        if (!manualFrames.length) {
-          e.preventDefault();
-          return;
-        }
-        e.dataTransfer.effectAllowed = 'copy';
-        let addedCount = 0;
-        manualFrames.forEach((frame, idx) => {
-          const safeTime = (frame.timeStr || `frame_${idx + 1}`).replace(/[:：]/g, '-');
-          const file = dataUrlToFile(frame.dataUrl, `frame_${idx + 1}_${safeTime}.png`);
-          if (file && e.dataTransfer.items) {
-            e.dataTransfer.items.add(file);
-            addedCount++;
-          }
-        });
-        e.dataTransfer.setData('text/plain', `SparkSub 已附加 ${addedCount} 张高清原画截图`);
-        toast(`🖐️ 正在拖拽全部 ${addedCount} 张原画，在网页 AI 输入框松手即可上传！`);
-      });
+      document.addEventListener('keydown', onKeydown);
+      overlay.append(image, closeButton, caption);
+      document.body.appendChild(overlay);
+      activeNoteImagePreviewClose = closePreview;
+      closeButton.focus();
     }
 
     if (elements.aiManualTray) {
       elements.aiManualTray.addEventListener('click', (e) => {
-        const delBtn = e.target.closest('.btn-delete-tray-card');
+        const delBtn = closestButton(e, '.btn-delete-tray-card');
         if (delBtn) {
           e.stopPropagation();
           const idx = Number(delBtn.dataset.index);
@@ -2527,7 +3090,7 @@
           return;
         }
 
-        const clearBtn = e.target.closest('#btn-clear-manual-tray');
+        const clearBtn = closestButton(e, '#btn-clear-manual-tray');
         if (clearBtn) {
           e.stopPropagation();
           manualFrames = [];
@@ -2536,90 +3099,138 @@
           return;
         }
 
-        const trayCard = e.target.closest('.ai-tray-card');
+        const trayCard = closestHtml(e, '.ai-tray-card');
         if (trayCard && trayCard.dataset.seek) {
           const sec = Number(trayCard.dataset.seek);
           if (Number.isFinite(sec)) {
             command('SEEK', { time: sec });
-            toast(`▶ 已跳转至 ${BSE.Utils?.formatClock ? BSE.Utils.formatClock(sec) : sec}`);
+            toast(`已跳转至 ${BSE.Utils?.formatClock ? BSE.Utils.formatClock(sec) : sec}`);
           }
         }
       });
     }
 
-    // 将多张已截帧画面垂直拼接为一张带时间戳分割的高清长图
-    async function stitchFramesToBlob(frames) {
+    // 为外部 AI 生成受控尺寸的联系表，而不是无限向下拼接的超长图。
+    // 1~2 张保持单列以保文字分辨率；3~4 张使用双列。完整原图始终由 ZIP 保留。
+    async function buildContactSheetBlob(frames) {
       if (!Array.isArray(frames) || !frames.length) return null;
-      const loaded = await Promise.all(frames.map((f, idx) => {
-        return new Promise((resolve) => {
-          const img = new Image();
-          img.onload = () => resolve({ img, frame: f, index: idx });
-          img.onerror = () => resolve(null);
-          img.src = f.dataUrl;
-        });
-      }));
+      const initialLayout = BSE.Media?.getContactSheetLayout?.(frames.length) || {
+        maxFrames: 4, count: Math.min(4, frames.length), width: 1152, columns: frames.length <= 2 ? 1 : 2, gap: 12, padding: 12, headerHeight: 34
+      };
+      const sourceFrames = frames.slice(0, initialLayout.maxFrames);
+      const loaded = await Promise.all(sourceFrames.map((frame, index) => new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve({ img, frame, index });
+        img.onerror = () => resolve(null);
+        img.src = frame.dataUrl;
+      })));
       const valid = loaded.filter(Boolean);
       if (!valid.length) return null;
 
-      const targetWidth = 1280;
-      const headerHeight = 36;
-      let totalHeight = 0;
-      const heights = valid.map(({ img }) => {
-        const h = Math.round((targetWidth / img.width) * img.height);
-        totalHeight += (h + headerHeight + 8);
-        return h;
-      });
+      const layout = BSE.Media?.getContactSheetLayout?.(valid.length, {
+        maxFrames: initialLayout.maxFrames,
+        width: initialLayout.width
+      }) || initialLayout;
+      const { width, columns, gap, padding, headerHeight } = layout;
+      const cardWidth = Math.floor((width - padding * 2 - gap * (columns - 1)) / columns);
+      const maxImageHeight = columns === 1 ? 640 : 360;
+      const rows = [];
+      for (let start = 0; start < valid.length; start += columns) {
+        const entries = valid.slice(start, start + columns).map((entry) => {
+          const scale = Math.min(1, cardWidth / entry.img.width, maxImageHeight / entry.img.height);
+          return {
+            ...entry,
+            imageWidth: Math.max(1, Math.round(entry.img.width * scale)),
+            imageHeight: Math.max(1, Math.round(entry.img.height * scale))
+          };
+        });
+        rows.push({
+          entries,
+          height: headerHeight + Math.max(...entries.map((entry) => entry.imageHeight))
+        });
+      }
+      const totalHeight = padding * 2
+        + rows.reduce((sum, row) => sum + row.height, 0)
+        + gap * Math.max(0, rows.length - 1);
 
       const canvas = document.createElement('canvas');
-      canvas.width = targetWidth;
+      canvas.width = width;
       canvas.height = totalHeight;
       const ctx = canvas.getContext('2d');
-
+      if (!ctx) return null;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
       ctx.fillStyle = '#0f172a';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillRect(0, 0, width, totalHeight);
 
-      let currentY = 0;
-      valid.forEach(({ img, frame }, idx) => {
-        const h = heights[idx];
-        // 绘制标题头栏
-        ctx.fillStyle = '#1e293b';
-        ctx.fillRect(0, currentY, targetWidth, headerHeight);
+      const fitLabel = (text, maxWidth) => {
+        const raw = String(text || '');
+        if (ctx.measureText(raw).width <= maxWidth) return raw;
+        let shortened = raw;
+        while (shortened.length > 4 && ctx.measureText(`${shortened}…`).width > maxWidth) shortened = shortened.slice(0, -1);
+        return `${shortened}…`;
+      };
 
-        ctx.fillStyle = '#38bdf8';
-        ctx.font = 'bold 16px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-        const titleText = `【画面 ${idx + 1}】时间戳: ${frame.timeStr || frame.timestamp + 's'}  ${frame.label || ''}`;
-        ctx.fillText(titleText, 16, currentY + 24);
+      let rowY = padding;
+      let visualIndex = 0;
+      for (const row of rows) {
+        row.entries.forEach(({ img, frame, imageWidth, imageHeight }, columnIndex) => {
+          const x = padding + columnIndex * (cardWidth + gap);
+          ctx.fillStyle = '#1e293b';
+          ctx.fillRect(x, rowY, cardWidth, headerHeight);
+          ctx.fillStyle = '#e2e8f0';
+          ctx.font = '600 15px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+          const time = frame.timeStr || `${Number(frame.timestamp) || 0}s`;
+          const label = frame.label ? ` · ${frame.label}` : '';
+          ctx.fillText(fitLabel(`${visualIndex + 1}. ${time}${label}`, cardWidth - 20), x + 10, rowY + 22);
+          const imageX = x + Math.floor((cardWidth - imageWidth) / 2);
+          ctx.drawImage(img, imageX, rowY + headerHeight, imageWidth, imageHeight);
+          visualIndex++;
+        });
+        rowY += row.height + gap;
+      }
 
-        // 绘制截图画面
-        ctx.drawImage(img, 0, currentY + headerHeight, targetWidth, h);
-        currentY += (headerHeight + h + 8);
-      });
-
-      return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+      if (!blob) return null;
+      return {
+        blob,
+        frameCount: valid.length,
+        frames: valid.map(({ frame }) => frame),
+        width,
+        height: totalHeight
+      };
     }
 
-    // 复制拼接长图（一次性将多张截图以一张长图形式写入系统剪切板，去网页端可直接 Ctrl+V 粘贴）
+    // 可靠的外部投递路径：复制一张受控尺寸联系表，再在目标 AI 输入框粘贴。
     if (elements.btnCopyStitchedTray) {
       elements.btnCopyStitchedTray.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (!manualFrames.length) {
-          toast('当前暂无截图可供拼接复制', true);
+          toast('当前暂无截图可供复制', true);
           return;
         }
-        toast(`🖼️ 正在拼接 ${manualFrames.length} 张板书原画…`);
+        const videoDuration = state.duration || state.cues?.[state.cues.length - 1]?.to || 0;
+        const selectedFrames = BSE.VisualDetector?.selectPresentationFrames
+          ? BSE.VisualDetector.selectPresentationFrames(manualFrames, { videoDuration, maxFrames: 4 })
+          : manualFrames.slice(0, 4);
+        toast(`正在生成 ${selectedFrames.length} 张精选画面的高清联系表…`);
         try {
-          const blob = await stitchFramesToBlob(manualFrames);
-          if (!blob) {
-            toast('长图生成失败', true);
+          const sheet = await buildContactSheetBlob(selectedFrames);
+          if (!sheet?.blob) {
+            toast('精选拼图生成失败', true);
             return;
           }
           await navigator.clipboard.write([
-            new ClipboardItem({ 'image/png': blob })
+            new ClipboardItem({ 'image/png': sheet.blob })
           ]);
-          toast(`🖼️ 已将全部 ${manualFrames.length} 张截图拼成长图并复制！去网页版 AI 按 Ctrl+V 即可直接粘贴！`);
+          externalImageDeliveryMode = 'contact-sheet';
+          externalDeliveredFrames = [...(sheet.frames || [])];
+          const omitted = Math.max(0, manualFrames.length - sheet.frameCount);
+          const omittedHint = omitted > 0 ? `；其余 ${omitted} 张请用“原图打包”保留完整画质` : '';
+          toast(`已复制 ${sheet.frameCount} 张精选拼图 (${sheet.width}×${sheet.height})，可直接粘贴到网页版 AI${omittedHint}`);
         } catch (err) {
-          console.error('[SparkSub] 复制长图异常:', err);
-          toast(`复制长图失败: ${err.message}`, true);
+          console.error('[SparkSub] 复制精选拼图异常:', err);
+          toast(`复制精选拼图失败: ${err.message}；可改用“原图打包”`, true);
         }
       });
     }
@@ -2636,7 +3247,7 @@
           toast('JSZip 依赖未就绪', true);
           return;
         }
-        toast(`📦 正在打包 ${manualFrames.length} 张高清原画…`);
+        toast(`正在打包 ${manualFrames.length} 张高清原画…`);
         try {
           const zip = new BSE.JSZip();
           manualFrames.forEach((frame, idx) => {
@@ -2653,7 +3264,9 @@
           a.download = `${safeTitle}_${manualFrames.length}张关键帧.zip`;
           a.click();
           setTimeout(() => URL.revokeObjectURL(url), 5000);
-          toast(`📦 已成功下载截图包！解压后可直接批量拖入网页版 AI`);
+          externalImageDeliveryMode = 'originals';
+          externalDeliveredFrames = [...manualFrames];
+          toast('截图包已下载。解压后可直接批量拖入网页版 AI；阶段二合成词会按这批原图生成');
         } catch (err) {
           toast(`打包下载失败: ${err.message}`, true);
         }
@@ -2669,8 +3282,9 @@
         }
         const promptText = BSE.Ai?.buildPlanningPrompt?.({
           title: state.title,
-          author: state.author,
+          author: state.authorInfo?.name || state.mediaContext?.author || '',
           cues: state.cues,
+          mediaContext: state.mediaContext || null,
           manualFrames
         }) || '';
         if (!promptText) {
@@ -2678,7 +3292,7 @@
           return;
         }
         await navigator.clipboard.writeText(promptText);
-        toast('📋 已复制阶段一规划词！可直接粘贴至网页版 ChatGPT/DeepSeek/Claude 获取截图点位');
+        toast('已复制阶段一时间窗口规划词，可直接粘贴至网页版 AI 获取播放器取样窗口 JSON');
       });
     }
 
@@ -2690,24 +3304,24 @@
           return;
         }
 
-        // 收集当前所有已截帧画面（包含 manualFrames 与 imagesMap 中的帧）
-        const capturedFrames = [...manualFrames];
-        if (currentGeneratedNote?.imagesMap) {
-          for (const key of Object.keys(currentGeneratedNote.imagesMap)) {
-            const entry = currentGeneratedNote.imagesMap[key];
-            if (entry && typeof entry === 'object' && entry.dataUrl) {
-              if (!capturedFrames.some(f => Math.abs(f.timestamp - entry.timestamp) <= 1)) {
-                capturedFrames.push(entry);
-              }
-            }
-          }
-        }
-
+        // 阶段二提示词必须与用户实际投递给外部 AI 的图片集合一致：
+        // 联系表只列联系表中的最多 4 张；原图包模式才从已打包原图中选择更宽的证据集。
+        const videoDuration = state.duration || state.cues?.[state.cues.length - 1]?.to || 0;
+        const hasDeliveredSnapshot = externalDeliveredFrames.length > 0;
+        const deliveredFrames = hasDeliveredSnapshot ? [...externalDeliveredFrames] : [...manualFrames];
+        const selectedFrames = externalImageDeliveryMode === 'originals'
+          ? (BSE.VisualDetector?.selectEvidenceFrames
+              ? BSE.VisualDetector.selectEvidenceFrames(deliveredFrames, { videoDuration })
+              : deliveredFrames)
+          : (BSE.VisualDetector?.selectPresentationFrames
+              ? BSE.VisualDetector.selectPresentationFrames(deliveredFrames, { videoDuration, maxFrames: 4 })
+              : deliveredFrames.slice(0, 4));
         const promptText = BSE.Ai?.buildCourseNotePrompt?.({
           title: state.title,
-          author: state.author,
+          author: state.authorInfo?.name || state.mediaContext?.author || '',
           cues: state.cues,
-          capturedFrames,
+          mediaContext: state.mediaContext || null,
+          capturedFrames: selectedFrames,
           mode: currentAiMode || 'course_notes'
         }) || '';
 
@@ -2717,10 +3331,16 @@
         }
 
         await navigator.clipboard.writeText(promptText);
-        if (capturedFrames.length > 0) {
-          toast(`📝 已复制阶段二讲义合成词（已内置 ${capturedFrames.length} 处画面截图锚点）！可发给网页版 AI`);
+        if (selectedFrames.length > 0) {
+          const deliveryLabel = externalImageDeliveryMode === 'originals'
+            ? `原图包中的 ${selectedFrames.length} 张高价值画面`
+            : `精选拼图中的 ${selectedFrames.length} 张画面`;
+          const deliveryHint = hasDeliveredSnapshot
+            ? '请确保网页版 AI 收到同一批图片'
+            : '请再点击“复制精选拼图”并粘贴同一批图片';
+          toast(`已复制阶段二讲义合成词（按${deliveryLabel}生成）。${deliveryHint}`);
         } else {
-          toast('📝 已复制阶段二讲义合成词！可发给网页版 AI（建议先导入规划截取板书画面效果更佳）');
+          toast('已复制阶段二报告合成词。当前未绑定图片；建议先导入规划并截取关键画面', true);
         }
       });
     }
@@ -2760,27 +3380,32 @@
           toast('请先粘贴内容', true);
           return;
         }
+        const importState = state;
+        let mediaContext;
+        try {
+          mediaContext = createMediaOperationContext();
+        } catch (error) {
+          toast(error.message, true);
+          return;
+        }
 
         // 1. 尝试解析为 JSON 规划
         const parsedJson = BSE.Ai?.extractJsonFromText?.(rawText);
-        if (parsedJson && (parsedJson.visualRequests || parsedJson.visualEvidence || parsedJson.chapters)) {
+        if (parsedJson && (parsedJson.samplingWindows || parsedJson.visualRequests || parsedJson.visualEvidence || parsedJson.chapters)) {
           closeImportModal();
-          appendDiagnostic('AI外部导入', `成功解析外部规划 JSON · 提取 ${parsedJson.chapters?.length || 0} 个章节 · ${parsedJson.visualRequests?.length || parsedJson.visualEvidence?.length || 0} 处视觉需求`, { scope: 'ai', level: 'info' });
+          const samplingWindows = BSE.Ai?.normalizeSamplingWindows?.(parsedJson) || [];
+          appendDiagnostic('AI外部导入', `成功解析外部规划 JSON · 提取 ${parsedJson.chapters?.length || 0} 个章节 · ${samplingWindows.length} 个取样窗口`, { scope: 'ai', level: 'info' });
 
-          const visualRequests = Array.isArray(parsedJson.visualRequests)
-            ? parsedJson.visualRequests
-            : (Array.isArray(parsedJson.visualEvidence) ? parsedJson.visualEvidence : []);
-
-          const videoDuration = state.duration || Infinity;
+          const videoDuration = importState.duration || importState.cues?.[importState.cues.length - 1]?.to || Infinity;
           const visualEvidence = BSE.VisualDetector?.resolveRequestTimestamps
-            ? BSE.VisualDetector.resolveRequestTimestamps(visualRequests, videoDuration)
-            : visualRequests.map((req, idx) => ({
+            ? BSE.VisualDetector.resolveRequestTimestamps(samplingWindows, videoDuration)
+            : samplingWindows.map((req, idx) => ({
                 ...req,
-                id: req.id || `VR_${idx + 1}`,
-                timestamp: req.targetSec || req.timestamp || (idx + 1) * 60,
-                timeStr: req.timeStr || `${Math.round(req.targetSec || req.timestamp || (idx + 1) * 60)}s`,
-                label: req.label || req.evidenceGoal || `视觉检查点 ${idx + 1}`,
-                reason: req.reason || '重要板书/演示'
+                id: req.id || `SW_${idx + 1}`,
+                timestamp: Number.isFinite(req.targetSec) ? req.targetSec : (Number.isFinite(req.timestamp) ? req.timestamp : (idx + 1) * 60),
+                timeStr: req.timeStr || `${Math.round(Number.isFinite(req.targetSec) ? req.targetSec : (Number.isFinite(req.timestamp) ? req.timestamp : (idx + 1) * 60))}s`,
+                label: req.label || req.evidenceGoal || `取样窗口 ${idx + 1}`,
+                reason: req.reason || '字幕提示该时段可能包含额外信息'
               }));
 
           if (visualEvidence.length > 0) {
@@ -2788,61 +3413,90 @@
             if (elements.aiProgressText) elements.aiProgressText.textContent = `正在根据导入的规划定向截取高清原画 (0/${visualEvidence.length})…`;
 
             let doneCount = 0;
+            let capturedCount = 0;
+            let reusedCount = 0;
             for (const ev of visualEvidence) {
               try {
                 const targetTime = Number.isFinite(ev.optimalSec) ? ev.optimalSec : ev.timestamp;
                 const existingManual = manualFrames.find(mf => Math.abs(mf.timestamp - targetTime) <= 3);
                 if (existingManual) {
+                  reusedCount++;
                   doneCount++;
                   continue;
                 }
                 const res = await sendTabMessage({
-                  type: 'BSE_CAPTURE_FRAME',
-                  timestamp: targetTime,
-                  options: { restoreTime: true, quality: 0.85, maxWidth: 1280 }
-                });
+                  type: 'BSE_CAPTURE_BEST_FRAME',
+                  request: ev,
+                  options: { quality: AI_EVIDENCE_FRAME_QUALITY, maxWidth: AI_EVIDENCE_FRAME_MAX_WIDTH, timeoutMs: 2500 }
+                }, mediaContext);
                 if (res?.ok && res.frame?.dataUrl) {
-                  const sec = targetTime;
-                  const timeStr = ev.timeStr || (BSE.Utils?.formatClock ? BSE.Utils.formatClock(sec) : `${Math.round(sec)}s`);
+                  const capturedTimestamp = Number(res.frame.timestamp);
+                  const sec = Number.isFinite(capturedTimestamp) ? capturedTimestamp : targetTime;
+                  const timeStr = BSE.Utils?.formatClock ? BSE.Utils.formatClock(sec) : `${Math.round(sec)}s`;
                   const frameObj = {
                     dataUrl: res.frame.dataUrl,
                     timestamp: sec,
                     timeStr,
                     label: ev.label || ev.reason || ev.evidenceGoal,
-                    reason: ev.reason || ev.evidenceGoal
+                    reason: ev.reason || ev.evidenceGoal,
+                    evidenceGoal: ev.evidenceGoal,
+                    importance: ev.importance,
+                    source: 'planned',
+                    selection: res.frame.selection
                   };
                   manualFrames.push(frameObj);
+                  capturedCount++;
                   renderManualTray();
-                  appendDiagnostic('AI视觉证据', `外部规划截帧成功 (${doneCount + 1}/${visualEvidence.length}) · ${timeStr} · ${frameObj.label}`, { scope: 'ai', level: 'info' });
+                  const selectionLabel = res.frame.selection?.strategy === 'visual' ? '像素稳定性筛选' : '时间兜底';
+                  appendDiagnostic('AI视觉证据', `外部规划截帧成功 (${doneCount + 1}/${visualEvidence.length}) · ${timeStr} · ${selectionLabel} · ${frameObj.label}`, { scope: 'ai', level: 'info' });
                 }
               } catch (err) {
+                if (err?.code === 'MEDIA_CONTEXT_CHANGED') {
+                  if (elements.aiProgressBox) elements.aiProgressBox.hidden = true;
+                  toast(err.message, true);
+                  return;
+                }
                 console.warn('[SparkSub AI] 外部规划截帧失败:', ev, err);
               }
               doneCount++;
               if (elements.aiProgressText) elements.aiProgressText.textContent = `正在根据导入的规划定向截取高清原画 (${doneCount}/${visualEvidence.length})…`;
             }
             if (elements.aiProgressBox) elements.aiProgressBox.hidden = true;
-            toast(`✨ 成功截取 ${manualFrames.length} 张高清画面！已加入托盘，可随时点击生成或导出讲义`);
+            const beforeShortlistCount = manualFrames.length;
+            const finalBudget = BSE.VisualDetector?.evidenceBudgetForDuration?.(videoDuration) || 12;
+            const trayBudget = Math.min(36, Math.max(finalBudget, finalBudget * 2));
+            if (BSE.VisualDetector?.selectEvidenceFrames && manualFrames.length > trayBudget) {
+              manualFrames = BSE.VisualDetector.selectEvidenceFrames(manualFrames, { videoDuration, maxFrames: trayBudget });
+              renderManualTray();
+            }
+            const reusedLabel = reusedCount > 0 ? `，复用 ${reusedCount} 张已有画面` : '';
+            const shortlistLabel = beforeShortlistCount > manualFrames.length ? `；候选初筛后托盘保留 ${manualFrames.length} 张` : `，托盘共 ${manualFrames.length} 张`;
+            toast(`本次新增 ${capturedCount} 张高清画面${reusedLabel}${shortlistLabel}`);
           } else {
-            toast('✓ 已识别章节大纲（未包含截图点位）');
+            toast('已识别章节大纲（未包含截图点位）');
           }
           return;
         }
 
         // 2. 若不是规划 JSON，直接作为最终 Markdown 讲义渲染
+        assertMediaOperationContext(mediaContext);
         closeImportModal();
         const imagesMap = currentGeneratedNote?.imagesMap || {};
-        for (const mf of manualFrames) {
+        const selectedImportedFrames = BSE.VisualDetector?.selectEvidenceFrames
+          ? BSE.VisualDetector.selectEvidenceFrames(manualFrames, { videoDuration: importState.duration || importState.cues?.[importState.cues.length - 1]?.to || 0 })
+          : manualFrames;
+        for (const mf of selectedImportedFrames) {
           imagesMap[mf.timestamp] = mf;
           imagesMap[String(mf.timestamp)] = mf;
-          imagesMap[mf.timeStr] = mf;
+          if (mf.timeStr) imagesMap[mf.timeStr] = mf;
         }
+        aiNoteRestoreRevision++;
         currentGeneratedNote = {
           markdown: rawText,
           imagesMap,
           mode: 'course_notes',
-          title: state?.title || '导入讲义',
-          mediaKey: state?.mediaKey || ''
+          title: importState?.title || '导入讲义',
+          mediaKey: importState?.mediaKey || ''
         };
         const html = BSE.Formatters?.renderNoteToHtml?.(rawText, { imagesMap }) || rawText;
         if (elements.aiNoteContent) {
@@ -2853,7 +3507,9 @@
         if (elements.aiBtnCopyNote) elements.aiBtnCopyNote.disabled = false;
         if (elements.aiBtnExportZip) elements.aiBtnExportZip.disabled = false;
         await saveCurrentNoteToCache();
-        toast('✨ 讲义 Markdown 已导入并完成图文渲染！');
+        if (state?.mediaKey === importState?.mediaKey) {
+          toast('报告 Markdown 已导入并完成图文渲染');
+        }
       });
     }
 
@@ -2865,7 +3521,24 @@
           return;
         }
 
-        const activeConfig = await BSE.Ai?.getAiSettings?.() || BSE.Ai?.DEFAULT_CONFIG || {};
+        const generationState = state;
+        const generationMode = currentAiMode;
+        const generationManualFrames = [...manualFrames];
+        const mediaContext = createMediaOperationContext();
+        const generationRevision = ++aiGenerationRevision;
+        aiNoteRestoreRevision++;
+
+        await aiConfigReady;
+        assertMediaOperationContext(mediaContext);
+        const draftConfig = readDraftAiConfig();
+        if (!isSavedAiConfig(draftConfig)) {
+          if (elements.aiSettingsDrawer) elements.aiSettingsDrawer.hidden = false;
+          toast('AI 配置有未保存修改，请先保存后再生成', true);
+          return;
+        }
+
+        const activeConfig = await getActiveAiSettings();
+        assertMediaOperationContext(mediaContext);
         const activeModelName = activeConfig.model || '大模型';
 
         elements.aiBtnGenerate.disabled = true;
@@ -2873,6 +3546,7 @@
         if (elements.aiNotePlaceholder) elements.aiNotePlaceholder.hidden = true;
 
         const updateProgress = (txt) => {
+          if (generationRevision !== aiGenerationRevision) return;
           if (elements.aiProgressText) elements.aiProgressText.textContent = txt;
         };
 
@@ -2884,32 +3558,36 @@
           let plannedEvidence = [];
 
           let aiResult;
-          if (currentAiMode === 'course_notes') {
-            // 阶段一：大模型规划 Video Understanding IR 与视觉检查请求（附带用户已手动标记的截帧）
-            appendDiagnostic('AI视频规划', `正在向大模型发起章节结构与视觉检查需求规划 (字幕: ${state.cues.length} 条 · 手动预选: ${manualFrames.length} 张 · 模型: ${activeModelName})…`, { scope: 'ai', level: 'info' });
-            updateProgress(`1/3 正在由 ${activeModelName} 规划视频章节结构与视觉检查窗口 (IR Planning)…`);
+          if (generationMode === 'course_notes') {
+            // 阶段一：文本模型只根据带时间戳字幕规划章节与播放器取样窗口。
+            appendDiagnostic('AI时间规划', `正在向大模型提交带时间戳字幕以规划章节与取样窗口 (字幕: ${generationState.cues.length} 条 · 用户标记: ${generationManualFrames.length} 处 · 模型: ${activeModelName})…`, { scope: 'ai', level: 'info' });
+            updateProgress(`1/3 正在由 ${activeModelName} 分析字幕并规划取样时间窗口…`);
             const planResult = await BSE.Ai?.planVisualEvidence?.({
-              title: state.title,
-              author: state.author,
-              cues: state.cues,
-              manualFrames,
-              videoDuration: state.duration || Infinity,
+              title: generationState.title,
+              author: generationState.authorInfo?.name || '',
+              cues: generationState.cues,
+              manualFrames: generationManualFrames,
+              videoDuration: generationState.duration || generationState.cues?.[generationState.cues.length - 1]?.to || Infinity,
               endpoint: activeConfig.endpoint,
               apiKey: activeConfig.apiKey,
               model: activeConfig.model
             });
 
-            plannedEvidence = planResult?.visualEvidence || [];
-            appendDiagnostic('AI视频规划', `规划完成 · 提取 ${planResult?.chapters?.length || 0} 个章节 · 发起 ${plannedEvidence.length} 处视觉检查需求 (策略: ${planResult?.strategy || 'llm'})`, { scope: 'ai', level: 'info' });
-
-            // 阶段二：定向精准截取目标帧稳定代表帧原画，并将用户手动截取的关键帧无缝并入证据流
-            const capturedFrames = [...manualFrames];
-            for (const mf of manualFrames) {
-              imagesMap[mf.timestamp] = mf;
-              imagesMap[String(mf.timestamp)] = mf;
-              imagesMap[mf.timeStr] = mf;
-              capturedScreenshots.push(mf.dataUrl);
+            assertMediaOperationContext(mediaContext);
+            if (!planResult) throw new Error('AI 视频规划模块未返回结果');
+            if (planResult.strategy === 'fallback' && planResult.failureKind === 'request') {
+              throw new Error(`AI 规划阶段调用失败: ${planResult.error || '模型服务不可用'}`);
             }
+            if (planResult.strategy === 'fallback' && planResult.failureKind === 'parse') {
+              appendDiagnostic('AI时间规划', `规划返回格式异常，已降级为字幕 + 用户标记内容直接合成: ${planResult.error || 'JSON 解析失败'}`, { scope: 'ai', level: 'warn' });
+              updateProgress('1/3 时间窗口规划格式异常，已降级为字幕与用户标记内容直接合成…');
+            }
+
+            plannedEvidence = planResult.visualEvidence || [];
+            appendDiagnostic('AI时间规划', `规划完成 · 提取 ${planResult.chapters?.length || 0} 个章节 · 给出 ${plannedEvidence.length} 个播放器取样窗口 (策略: ${planResult.strategy})`, { scope: 'ai', level: planResult.strategy === 'fallback' ? 'warn' : 'info' });
+
+            // 阶段二：允许规划覆盖更多高价值画面；所有候选先留在内存，完成后再做跨画面的去重与质量筛选。
+            const capturedFrames = [...generationManualFrames];
 
             if (plannedEvidence.length > 0) {
               updateProgress(`2/3 正在根据大模型规划定位稳定画面代表帧 (0/${plannedEvidence.length})…`);
@@ -2918,41 +3596,41 @@
                 try {
                   const targetTime = Number.isFinite(ev.optimalSec) ? ev.optimalSec : ev.timestamp;
                   // 若用户已预先截取过该时间附近（3秒内）的画面，直接复用，避免重复寻道
-                  const existingManual = manualFrames.find(mf => Math.abs(mf.timestamp - targetTime) <= 3);
+                  const existingManual = generationManualFrames.find(mf => Math.abs(mf.timestamp - targetTime) <= 3);
                   if (existingManual) {
-                    imagesMap[targetTime] = existingManual;
-                    imagesMap[String(targetTime)] = existingManual;
-                    imagesMap[ev.timeStr || `${Math.round(targetTime)}s`] = existingManual;
                     doneCount++;
                     updateProgress(`2/3 正在根据大模型规划定位稳定画面代表帧 (${doneCount}/${plannedEvidence.length})…`);
                     continue;
                   }
 
                   const res = await sendTabMessage({
-                    type: 'BSE_CAPTURE_FRAME',
-                    timestamp: targetTime,
-                    options: { restoreTime: true, quality: 0.85, maxWidth: 1280 }
-                  });
+                    type: 'BSE_CAPTURE_BEST_FRAME',
+                    request: ev,
+                    options: { quality: AI_EVIDENCE_FRAME_QUALITY, maxWidth: AI_EVIDENCE_FRAME_MAX_WIDTH, timeoutMs: 2500 }
+                  }, mediaContext);
                   if (res?.ok && res.frame?.dataUrl) {
-                    const sec = targetTime;
-                    const timeStr = ev.timeStr || (BSE.Utils?.formatClock ? BSE.Utils.formatClock(sec) : `${Math.round(sec)}s`);
+                    const capturedTimestamp = Number(res.frame.timestamp);
+                    const sec = Number.isFinite(capturedTimestamp) ? capturedTimestamp : targetTime;
+                    const timeStr = BSE.Utils?.formatClock ? BSE.Utils.formatClock(sec) : `${Math.round(sec)}s`;
                     const frameObj = {
                       dataUrl: res.frame.dataUrl,
                       timestamp: sec,
                       timeStr,
                       label: ev.label || ev.reason || ev.evidenceGoal,
-                      reason: ev.reason || ev.evidenceGoal
+                      reason: ev.reason || ev.evidenceGoal,
+                      evidenceGoal: ev.evidenceGoal,
+                      importance: ev.importance,
+                      source: 'planned',
+                      selection: res.frame.selection
                     };
-                    imagesMap[sec] = frameObj;
-                    imagesMap[String(sec)] = frameObj;
-                    imagesMap[timeStr] = frameObj;
-                    capturedScreenshots.push(res.frame.dataUrl);
                     capturedFrames.push(frameObj);
-                    appendDiagnostic('AI视觉证据', `成功截取代表帧 (${doneCount + 1}/${plannedEvidence.length}) · ${timeStr} · ${frameObj.label}`, { scope: 'ai', level: 'info' });
+                    const selectionLabel = res.frame.selection?.strategy === 'visual' ? '像素稳定性筛选' : '时间兜底';
+                    appendDiagnostic('AI视觉证据', `成功截取代表帧 (${doneCount + 1}/${plannedEvidence.length}) · ${timeStr} · ${selectionLabel} · ${frameObj.label}`, { scope: 'ai', level: 'info' });
                   } else {
                     appendDiagnostic('AI视觉证据', `代表帧截取受限 (${ev.timeStr || targetTime + 's'}): ${res?.error || '画面未就绪'}`, { scope: 'ai', level: 'warn' });
                   }
                 } catch (err) {
+                  if (err?.code === 'MEDIA_CONTEXT_CHANGED') throw err;
                   console.warn('[SparkSub AI] 截帧失败:', ev, err);
                   appendDiagnostic('AI视觉证据', `代表帧截取异常: ${err.message}`, { scope: 'ai', level: 'warn' });
                 }
@@ -2961,8 +3639,22 @@
               }
             }
 
-            // 阶段三：基于 Video Understanding IR 与真实画面进行多模态讲义合成
-            appendDiagnostic('AI多模态合成', `正在向多模态大模型上传 ${capturedFrames.length} 张画面与结构化知识大纲 (模型: ${activeModelName})…`, { scope: 'ai', level: 'info' });
+            const videoDuration = generationState.duration || generationState.cues?.[generationState.cues.length - 1]?.to || 0;
+            const selectedFrames = BSE.VisualDetector?.selectEvidenceFrames
+              ? BSE.VisualDetector.selectEvidenceFrames(capturedFrames, { videoDuration })
+              : capturedFrames;
+            for (const frame of selectedFrames) {
+              imagesMap[frame.timestamp] = frame;
+              imagesMap[String(frame.timestamp)] = frame;
+              if (frame.timeStr) imagesMap[frame.timeStr] = frame;
+              capturedScreenshots.push(frame.dataUrl);
+            }
+            if (capturedFrames.length !== selectedFrames.length) {
+              appendDiagnostic('AI视觉证据', `候选画面 ${capturedFrames.length} 张，经近重复、质量与时间覆盖筛选后保留 ${selectedFrames.length} 张；未入选候选不写入讲义缓存`, { scope: 'ai', level: 'info' });
+            }
+
+            // 阶段三：仅将筛选后的高价值画面送入模型并进入最终缓存。
+            appendDiagnostic('AI多模态合成', `正在向多模态大模型上传 ${selectedFrames.length} 张画面与结构化知识大纲 (模型: ${activeModelName})…`, { scope: 'ai', level: 'info' });
             let elapsedSec = 0;
             updateProgress(`3/3 正在由多模态大模型组织结构化知识与图文讲义排版… (已耗时 0s)`);
             step3Timer = setInterval(() => {
@@ -2971,29 +3663,29 @@
             }, 1000);
 
             aiResult = await BSE.Ai?.generateCourseNotes?.({
-              title: state.title,
-              author: state.author,
-              cues: state.cues,
+              title: generationState.title,
+              author: generationState.authorInfo?.name || '',
+              cues: generationState.cues,
               screenshots: capturedScreenshots,
-              capturedFrames,
+              capturedFrames: selectedFrames,
               videoIR: planResult,
-              mode: currentAiMode,
+              mode: generationMode,
               endpoint: activeConfig.endpoint,
               apiKey: activeConfig.apiKey,
               model: activeConfig.model,
               onProgress: (p) => updateProgress(p)
             });
           } else {
-            appendDiagnostic('AI文本精修', `正在由大模型深度提炼文本 (模式: ${currentAiMode} · 模型: ${activeModelName})…`, { scope: 'ai', level: 'info' });
+            appendDiagnostic('AI文本精修', `正在由大模型深度提炼文本 (模式: ${generationMode} · 模型: ${activeModelName})…`, { scope: 'ai', level: 'info' });
             updateProgress(`正在由 ${activeModelName} 深度提炼…`);
             aiResult = await BSE.Ai?.generateCourseNotes?.({
-              title: state.title,
-              author: state.author,
-              cues: state.cues,
+              title: generationState.title,
+              author: generationState.authorInfo?.name || '',
+              cues: generationState.cues,
               screenshots: [],
               capturedFrames: [],
               visualEvidence: [],
-              mode: currentAiMode,
+              mode: generationMode,
               endpoint: activeConfig.endpoint,
               apiKey: activeConfig.apiKey,
               model: activeConfig.model,
@@ -3006,16 +3698,21 @@
             step3Timer = null;
           }
 
+          assertMediaOperationContext(mediaContext);
           const markdown = aiResult?.markdown || '';
+          if (!markdown.trim()) throw new Error('AI 返回的学习内容为空');
           const totalDurationSec = ((performance.now() - startTime) / 1000).toFixed(1);
-          appendDiagnostic('AI多模态合成', `讲义生成成功 (总耗时 ${totalDurationSec}s · Markdown ${markdown.length} 字符 · 渲染 ${Object.keys(imagesMap).length} 张图文证据)`, { scope: 'ai', level: 'info' });
+          const renderedEvidenceCount = new Set(Object.values(imagesMap).map((frame) => String(frame?.timestamp ?? frame?.timeStr ?? ''))).size;
+          const actualModel = aiResult?.modelUsed || activeModelName;
+          appendDiagnostic('AI内容生成', `生成成功 (总耗时 ${totalDurationSec}s · 模型: ${actualModel} · Markdown ${markdown.length} 字符 · 图文证据 ${renderedEvidenceCount} 张)`, { scope: 'ai', level: 'info' });
 
+          aiNoteRestoreRevision++;
           currentGeneratedNote = {
             markdown,
             imagesMap,
-            mode: currentAiMode,
-            title: state.title || '课程笔记',
-            mediaKey: state.mediaKey || ''
+            mode: generationMode,
+            title: generationState.title || '课程笔记',
+            mediaKey: generationState.mediaKey || ''
           };
 
           // Render Markdown with Interactive Image Cards
@@ -3028,16 +3725,29 @@
           if (elements.aiBtnCopyNote) elements.aiBtnCopyNote.disabled = false;
           if (elements.aiBtnExportZip) elements.aiBtnExportZip.disabled = false;
           await saveCurrentNoteToCache();
-          toast('✨ 图文课程讲义生成成功！');
+          if (generationRevision !== aiGenerationRevision) return;
+          const successLabel = generationMode === 'summary'
+            ? '快速回顾'
+            : (generationMode === 'deep_qa' ? '复盘自测' : '学习讲义');
+          toast(`${successLabel}生成成功`);
         } catch (err) {
           if (step3Timer) {
             clearInterval(step3Timer);
             step3Timer = null;
           }
+          if (generationRevision !== aiGenerationRevision) {
+            console.info('[SparkSub AI] 忽略已过期生成任务的结束状态:', err?.message || err);
+            return;
+          }
+          if (err?.code === 'MEDIA_CONTEXT_CHANGED') {
+            console.info('[SparkSub AI] 生成因媒体上下文变化而中止:', err.message);
+            if (generationRevision === aiGenerationRevision) toast(err.message, true);
+            return;
+          }
           appendDiagnostic('AI生成异常', `生成失败: ${err.message}`, { scope: 'ai', level: 'error' });
           const is401 = String(err.message).includes('401') || String(err.message).includes('invalid_api_key');
           if (is401) {
-            toast('⚠️ AI 认证失败：请在右上角 ⚙️ 输入并保存 API Key', true);
+            toast('AI 认证失败：请在右上角设置中输入并保存 API Key', true);
             if (elements.aiSettingsDrawer) elements.aiSettingsDrawer.hidden = false;
             if (elements.aiInputApiKey) elements.aiInputApiKey.focus();
           } else {
@@ -3049,8 +3759,10 @@
             clearInterval(step3Timer);
             step3Timer = null;
           }
-          elements.aiBtnGenerate.disabled = false;
-          if (elements.aiProgressBox) elements.aiProgressBox.hidden = true;
+          if (generationRevision === aiGenerationRevision) {
+            elements.aiBtnGenerate.disabled = false;
+            if (elements.aiProgressBox) elements.aiProgressBox.hidden = true;
+          }
         }
       });
     }
@@ -3059,19 +3771,22 @@
     if (elements.aiBtnSnipFrame) {
       elements.aiBtnSnipFrame.addEventListener('click', async () => {
         try {
+          const mediaContext = createMediaOperationContext();
           const res = await sendTabMessage({
             type: 'BSE_CAPTURE_FRAME',
-            options: { quality: 0.85, maxWidth: 1280 }
-          });
+            options: { quality: AI_EVIDENCE_FRAME_QUALITY, maxWidth: AI_EVIDENCE_FRAME_MAX_WIDTH }
+          }, mediaContext);
           if (res?.ok && res.frame?.dataUrl) {
-            const time = Math.round(res.frame.timestamp || 0);
+            const capturedTimestamp = Number(res.frame.timestamp);
+            const time = Math.round(Number.isFinite(capturedTimestamp) ? capturedTimestamp : 0);
             const timeStr = BSE.Utils?.formatClock ? BSE.Utils.formatClock(time) : `${time}s`;
             const frameObj = {
               dataUrl: res.frame.dataUrl,
               timestamp: time,
               timeStr,
               label: `重点画面 (${timeStr})`,
-              reason: '用户手动标记的关键画面'
+              reason: '用户手动标记的关键画面',
+              source: 'manual'
             };
 
             // 1. 保存至预选截图托盘（供稍后点击生成讲义时一并传给 AI）
@@ -3087,8 +3802,8 @@
             if (currentGeneratedNote?.markdown) {
               currentGeneratedNote.imagesMap[timeStr] = frameObj;
               currentGeneratedNote.imagesMap[time] = frameObj;
-              const extraTag = `\n\n[SCREENSHOT: ${timeStr} "重点画面截图"]\n`;
-              currentGeneratedNote.markdown += extraTag;
+              const frameReference = BSE.Formatters?.buildFrameReference?.(timeStr, '重点画面截图') || `[SCREENSHOT: ${timeStr} "重点画面截图"]`;
+              currentGeneratedNote.markdown += `\n\n${frameReference}\n`;
 
               const html = BSE.Formatters?.renderNoteToHtml?.(currentGeneratedNote.markdown, { imagesMap: currentGeneratedNote.imagesMap }) || currentGeneratedNote.markdown;
               if (elements.aiNoteContent) {
@@ -3099,9 +3814,9 @@
               if (elements.aiBtnCopyNote) elements.aiBtnCopyNote.disabled = false;
               if (elements.aiBtnExportZip) elements.aiBtnExportZip.disabled = false;
               await saveCurrentNoteToCache();
-              toast(`📸 已截取 ${timeStr} 画面并加入笔记！`);
+              if (state?.mediaKey === mediaContext.mediaKey) toast(`已截取 ${timeStr} 画面并加入笔记`);
             } else {
-              toast(`📸 已截取 ${timeStr} 画面（已加入预选，生成讲义时将一并传给 AI）！`);
+              toast(`已截取 ${timeStr} 画面（已加入预选，生成讲义时将一并传给 AI）`);
             }
           } else {
             toast('截帧失败，请确认当前视频正在播放', true);
@@ -3116,87 +3831,123 @@
     if (elements.aiNoteContent) {
       elements.aiNoteContent.addEventListener('click', async (e) => {
         // 1. 删除图片按钮
-        const deleteBtn = e.target.closest('.note-card-delete-btn');
+        const deleteBtn = closestButton(e, '.note-card-delete-btn');
         if (deleteBtn) {
           e.stopPropagation();
           e.preventDefault();
-          const timeStr = deleteBtn.dataset.timestr;
+          const timeStr = deleteBtn.dataset.timestr || '';
           const sec = Number(deleteBtn.dataset.seek);
+          const referenceTimeStr = deleteBtn.dataset.refTimestr || timeStr;
+          const referenceSecValue = Number(deleteBtn.dataset.refSeek);
+          const referenceSec = Number.isFinite(referenceSecValue) ? referenceSecValue : sec;
           if (currentGeneratedNote?.imagesMap) {
-            delete currentGeneratedNote.imagesMap[timeStr];
-            delete currentGeneratedNote.imagesMap[sec];
-            delete currentGeneratedNote.imagesMap[String(sec)];
+            const resolved = BSE.Formatters?.resolveFrameEntry?.(currentGeneratedNote.imagesMap, {
+              timeStr,
+              seconds: sec,
+              maxDistance: 0.01
+            });
+            if (resolved?.frame) removeFrameAliases(currentGeneratedNote.imagesMap, resolved.frame, sec);
           }
           if (currentGeneratedNote?.markdown) {
-            const regex = new RegExp(`\\[SCREENSHOT:\\s*${timeStr}[^\\]]*\\]\\n?`, 'gi');
-            currentGeneratedNote.markdown = currentGeneratedNote.markdown.replace(regex, '');
+            currentGeneratedNote.markdown = BSE.Formatters?.transformFrameReferences
+              ? BSE.Formatters.transformFrameReferences(currentGeneratedNote.markdown, (reference) => (
+                  Math.abs(reference.seconds - referenceSec) < 0.01 && reference.timeStr === referenceTimeStr ? '' : reference.raw
+                ))
+              : currentGeneratedNote.markdown;
             const html = BSE.Formatters?.renderNoteToHtml?.(currentGeneratedNote.markdown, { imagesMap: currentGeneratedNote.imagesMap }) || currentGeneratedNote.markdown;
             elements.aiNoteContent.innerHTML = html;
             await saveCurrentNoteToCache();
-            toast(`🗑️ 已删除 ${timeStr} 截图`);
+            toast(`已删除 ${timeStr} 截图`);
           }
           return;
         }
 
-        // 2. 跳转播放按钮
-        const jumpBtn = e.target.closest('.note-jump-btn') || e.target.closest('.note-image-card');
+        // 2. 点击缩略图查看完整原图；跳转视频只由明确的时间按钮触发，避免“zoom-in”光标却执行跳播。
+        const previewImage = closestHtml(e, '.note-img-thumbnail');
+        if (previewImage instanceof HTMLImageElement) {
+          e.stopPropagation();
+          openNoteImagePreview(previewImage);
+          return;
+        }
+
+        // 3. 跳转播放按钮
+        const jumpBtn = closestButton(e, '.note-jump-btn');
         if (jumpBtn && jumpBtn.dataset.seek) {
           const sec = Number(jumpBtn.dataset.seek);
           if (Number.isFinite(sec)) {
             command('SEEK', { time: sec });
-            toast(`▶ 已跳转至 ${BSE.Utils?.formatClock ? BSE.Utils.formatClock(sec) : sec}`);
+            toast(`已跳转至 ${BSE.Utils?.formatClock ? BSE.Utils.formatClock(sec) : sec}`);
           }
           return;
         }
 
-        // 3. 立即补截插槽按钮
-        const slotBtn = e.target.closest('.btn-capture-slot');
+        // 4. 立即补截插槽按钮
+        const slotBtn = closestButton(e, '.btn-capture-slot');
         if (slotBtn) {
           const sec = Number(slotBtn.dataset.seek);
           const timeStr = slotBtn.dataset.timestr;
-          toast(`📸 正在截取 ${timeStr} 画面…`);
+          const mediaContext = createMediaOperationContext();
+          toast(`正在截取 ${timeStr} 画面…`);
           const res = await sendTabMessage({
             type: 'BSE_CAPTURE_FRAME',
             timestamp: sec,
-            options: { restoreTime: true, quality: 0.85, maxWidth: 1280 }
-          });
+            options: { restoreTime: true, quality: AI_EVIDENCE_FRAME_QUALITY, maxWidth: AI_EVIDENCE_FRAME_MAX_WIDTH }
+          }, mediaContext);
           if (res?.ok && res.frame?.dataUrl) {
             currentGeneratedNote.imagesMap[timeStr] = {
               dataUrl: res.frame.dataUrl,
               timestamp: sec,
               timeStr,
-              label: `板书画面 (${timeStr})`
+              label: `补充画面 (${timeStr})`,
+              reason: '用户在报告中手动补截的画面',
+              source: 'manual'
             };
             currentGeneratedNote.imagesMap[sec] = currentGeneratedNote.imagesMap[timeStr];
             const html = BSE.Formatters?.renderNoteToHtml?.(currentGeneratedNote.markdown, { imagesMap: currentGeneratedNote.imagesMap }) || currentGeneratedNote.markdown;
             elements.aiNoteContent.innerHTML = html;
             await saveCurrentNoteToCache();
-            toast(`✓ 成功嵌入 ${timeStr} 板书截图`);
+            if (state?.mediaKey === mediaContext.mediaKey) toast(`已嵌入 ${timeStr} 视频画面`);
           }
         }
       });
     }
 
-    // Copy Note Markdown
+    // Copy the currently selected learning artifact. Each mode is persisted
+    // independently, so copying Summary never replaces Notes or Self-test.
     if (elements.aiBtnCopyNote) {
       elements.aiBtnCopyNote.addEventListener('click', async () => {
         if (!currentGeneratedNote.markdown) return;
         await navigator.clipboard.writeText(currentGeneratedNote.markdown);
-        toast('📋 已复制图文笔记 Markdown 全文');
+        const label = currentGeneratedNote.mode === 'summary'
+          ? '快速回顾'
+          : (currentGeneratedNote.mode === 'deep_qa' ? '复盘自测' : '学习讲义');
+        toast(`已复制${label} Markdown`);
       });
     }
 
-    // Export Note with Images as ZIP Package (For Obsidian / Notion) (去重打包)
+    // Deep notes export as a Markdown + image package. Text-only artifacts are
+    // downloaded directly as Markdown; wrapping them in an empty ZIP is needless work.
     if (elements.aiBtnExportZip) {
       elements.aiBtnExportZip.addEventListener('click', async () => {
-        if (!currentGeneratedNote.markdown || !BSE.JSZip) {
-          toast('无可用笔记或打包模块未加载', true);
+        if (!currentGeneratedNote.markdown) {
+          toast('当前模式还没有可导出的学习产物', true);
+          return;
+        }
+        const safeTitle = (state?.title || 'SparkSub').replace(/[\/\\?%*:|"<>]/g, '_').slice(0, 40);
+        if (currentGeneratedNote.mode !== 'course_notes') {
+          const suffix = currentGeneratedNote.mode === 'summary' ? '快速回顾' : '复盘自测';
+          const blob = new Blob([currentGeneratedNote.markdown], { type: 'text/markdown;charset=utf-8' });
+          BSE.Utils?.downloadBlob?.(blob, `${safeTitle}_${suffix}.md`);
+          toast(`已下载${suffix} Markdown`);
+          return;
+        }
+        if (!BSE.JSZip) {
+          toast('图文打包模块未加载', true);
           return;
         }
         try {
-          toast('📦 正在打包图文 Markdown 笔记压缩包…');
+          toast('正在打包学习讲义与原始画面…');
           const zip = new BSE.JSZip();
-          const safeTitle = (state?.title || 'Course_Notes').replace(/[\/\\?%*:|"<>]/g, '_').slice(0, 40);
 
           // 去重收集唯一的图像
           const uniqueImageMap = new Map();
@@ -3210,6 +3961,7 @@
 
           let exportedMd = currentGeneratedNote.markdown;
           let imgIndex = 1;
+          const exportedFrames = [];
 
           for (const [dataUrl, item] of uniqueImageMap.entries()) {
             const timeStr = String(item.timeStr || item.timestamp || imgIndex).replace(/:/g, '_');
@@ -3222,20 +3974,30 @@
               bytes[i] = binaryStr.charCodeAt(i);
             }
             zip.file(`images/${imgFilename}`, bytes);
+            exportedFrames.push({ item, dataUrl, imgFilename });
+          }
 
-            const tagRegexTimestamp = new RegExp(`\\[SCREENSHOT:\\s*${item.timestamp}(?:\\s*["“]([^"”]+)["”])?\\]`, 'gi');
-            exportedMd = exportedMd.replace(tagRegexTimestamp, (_m, desc) => `![${desc || item.label || '板书截图'}](images/${imgFilename})`);
-
-            if (item.timeStr) {
-              const tagRegexTimeStr = new RegExp(`\\[SCREENSHOT:\\s*${item.timeStr}(?:\\s*["“]([^"”]+)["”])?\\]`, 'gi');
-              exportedMd = exportedMd.replace(tagRegexTimeStr, (_m, desc) => `![${desc || item.label || '板书截图'}](images/${imgFilename})`);
-            }
+          if (BSE.Formatters?.transformFrameReferences && BSE.Formatters?.resolveFrameEntry) {
+            exportedMd = BSE.Formatters.transformFrameReferences(exportedMd, (reference) => {
+              const resolved = BSE.Formatters.resolveFrameEntry(currentGeneratedNote.imagesMap || {}, {
+                timeStr: reference.timeStr,
+                seconds: reference.seconds,
+                maxDistance: 5
+              });
+              if (!resolved?.frame) return reference.raw;
+              const matched = exportedFrames.find(({ item, dataUrl }) => (
+                item === resolved.frame || dataUrl === resolved.frame.dataUrl
+              ));
+              if (!matched) return reference.raw;
+              const alt = String(reference.label || matched.item.label || '视频画面').replace(/\]/g, '）');
+              return `![${alt}](images/${matched.imgFilename})`;
+            });
           }
 
           zip.file(`${safeTitle}.md`, exportedMd);
           const blob = await zip.generateAsync({ type: 'blob' });
           BSE.Utils?.downloadBlob?.(blob, `${safeTitle}_图文讲义.zip`);
-          toast('✓ 已成功导出图文 Markdown 压缩包！');
+          toast('已导出图文 Markdown 压缩包');
         } catch (err) {
           toast(`导出失败: ${err.message}`, true);
         }
@@ -3243,16 +4005,16 @@
     }
 
     // Legacy AI Prompt cards
-    document.querySelectorAll('.ai-prompt-card').forEach((card) => {
+    /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.ai-prompt-card')).forEach((card) => {
       card.addEventListener('click', async () => {
         if (!state?.cues?.length) {
           toast('暂无字幕内容可供总结', true);
           return;
         }
         const promptId = card.dataset.prompt;
-        const text = BSE.Formatters.generateAiPrompt(promptId, state.cues, false, { title: state.title });
+        const text = BSE.Formatters.generateAiPrompt(promptId, state.cues, false, { title: state.title, mediaContext: state.mediaContext || null });
         await navigator.clipboard.writeText(text);
-        toast(BSE.I18n?.t('ai_copied_toast') || '✓ 已复制 AI 提示词与文稿');
+        toast(BSE.I18n?.t('ai_copied_toast') || '已复制 AI 提示词与文稿');
       });
     });
   }
@@ -3261,9 +4023,10 @@
 
   if (elements.settingsToggle) {
     elements.settingsToggle.addEventListener('click', () => {
-      const isHidden = !elements.settingsDrawer.hidden;
-      elements.settingsDrawer.hidden = isHidden;
-      elements.settingsToggle.classList.toggle('active', !isHidden);
+      const shouldClose = !elements.settingsDrawer.hidden;
+      elements.settingsDrawer.hidden = shouldClose;
+      elements.settingsToggle.classList.toggle('active', !shouldClose);
+      elements.settingsToggle.setAttribute('aria-expanded', String(!shouldClose));
     });
   }
 
@@ -3365,28 +4128,28 @@
   }, { passive: true });
 
   elements.transcript.addEventListener('click', async (event) => {
-    const copyBtn = event.target.closest('.cue-copy-btn');
+    const copyBtn = closestButton(event, '.cue-copy-btn');
     if (copyBtn) {
       event.stopPropagation();
       const paragraph = copyBtn.closest('.paragraph');
       if (paragraph) {
         const text = paragraph.querySelector('.paragraph-body')?.textContent || '';
         await navigator.clipboard.writeText(text);
-        toast('✓ 本段文字已复制');
+        toast('本段文字已复制');
         return;
       }
       const cue = copyBtn.closest('.cue');
       if (cue) {
         const text = cue.querySelector('.cue-text')?.textContent || '';
         await navigator.clipboard.writeText(text);
-        toast('✓ 本句字幕已复制');
+        toast('本句字幕已复制');
         return;
       }
     }
 
     const selection = window.getSelection()?.toString();
     if (selection && selection.trim().length > 0) return;
-    const row = event.target.closest('.cue');
+    const row = closestHtml(event, '.cue');
     if (!row) return;
     command('SEEK', { time: Number(row.dataset.time) });
     following = true;
@@ -3433,10 +4196,10 @@
         const audioData = res.data;
         const bitrateKbps = Math.round((audioData.bandwidth || 0) / 1000);
         await navigator.clipboard.writeText(audioData.audioUrl);
-        toast(`✓ 已提取 ${bitrateKbps}kbps 音频直链并复制，正在下载文件…`);
+        toast(`已提取 ${bitrateKbps}kbps 音频直链并复制，正在下载文件…`);
 
         await BSE.Bilibili.downloadAudioFile(audioData, state?.title || '音频');
-        toast(`✓ 音频文件下载完成！(${bitrateKbps}kbps M4A)`);
+        toast(`音频文件下载完成 (${bitrateKbps}kbps M4A)`);
       } catch (err) {
         toast(`音频提取下载失败: ${err.message || '未知错误'}`, true);
       }
@@ -3449,22 +4212,6 @@
     BSE.Utils.downloadText(text, `${state?.title || '字幕'}.${extension}`, mime);
     toast(BSE.I18n?.t('export') + ' OK');
   });
-
-  // Global Subtitle Preference storage sync
-  if (elements.prefSelect) {
-    try {
-      chrome?.storage?.sync?.get(['bseSubtitlePreference'], (res) => {
-        if (res?.bseSubtitlePreference) {
-          elements.prefSelect.value = res.bseSubtitlePreference;
-        }
-      });
-    } catch {}
-    elements.prefSelect.addEventListener('change', () => {
-      try {
-        chrome?.storage?.sync?.set({ bseSubtitlePreference: elements.prefSelect.value });
-      } catch {}
-    });
-  }
 
   // Batch Export Modal logic for Bilibili
   function generateTreePreviewHtml(tree) {
@@ -3479,7 +4226,7 @@
             <label class="batch-tree-sec-label" title="勾选/取消勾选该分组全部分P">
               <span class="batch-tree-sec-chevron" data-sec-toggle="${BSE.Utils.escapeHtml(sec.key)}" title="折叠/展开分组">▼</span>
               <input type="checkbox" class="batch-tree-sec-cb" data-sec-key="${BSE.Utils.escapeHtml(sec.key)}" checked>
-              <span>📁 ${hasMultipleSections ? `第 ${sIdx + 1} 章 · ` : ''}${BSE.Utils.escapeHtml(sec.title)}</span>
+              <span>${hasMultipleSections ? `第 ${sIdx + 1} 章 · ` : ''}${BSE.Utils.escapeHtml(sec.title)}</span>
             </label>
             <div class="batch-tree-sec-actions">
               <span class="batch-tree-node-meta">${countLabel}</span>
@@ -3496,7 +4243,7 @@
             <div class="batch-tree-video-node" data-bvid="${BSE.Utils.escapeHtml(ep.bvid)}">
               <label class="batch-tree-video-label" title="勾选/取消勾选该视频全部分P">
                 <input type="checkbox" class="batch-tree-video-cb" data-bvid="${BSE.Utils.escapeHtml(ep.bvid)}" checked>
-                <span>🎬 视频 ${ep.index}：${BSE.Utils.escapeHtml(ep.title)}</span>
+                <span>视频 ${ep.index}：${BSE.Utils.escapeHtml(ep.title)}</span>
               </label>
               <div class="batch-tree-sec-actions">
                 <span class="batch-tree-node-meta">${ep.pagesCount} P</span>
@@ -3513,7 +4260,7 @@
                 <label class="batch-tree-item-label" title="${BSE.Utils.escapeHtml(item.title)}">
                   <input type="checkbox" class="batch-tree-cb" data-global-index="${item.globalIndex}" data-duration="${item.duration || 0}" data-bvid="${BSE.Utils.escapeHtml(item.bvid)}" data-sec-key="${BSE.Utils.escapeHtml(sec.key)}" checked>
                   <span class="batch-tree-item-text">
-                    ${isCur ? '▶' : '·'} <span class="batch-tree-item-idx">#${String(item.globalIndex).padStart(2, '0')}</span> <strong>${BSE.Utils.escapeHtml(pLabel)}</strong>
+                    <span class="batch-tree-item-idx">#${String(item.globalIndex).padStart(2, '0')}</span> <strong>${BSE.Utils.escapeHtml(pLabel)}</strong>
                     ${isCur ? '<span class="batch-tree-tag-cur">当前播放</span>' : ''}
                   </span>
                 </label>
@@ -3530,7 +4277,7 @@
               <label class="batch-tree-item-label" title="${BSE.Utils.escapeHtml(item.title)}">
                 <input type="checkbox" class="batch-tree-cb" data-global-index="${item.globalIndex}" data-duration="${item.duration || 0}" data-bvid="${BSE.Utils.escapeHtml(item.bvid)}" data-sec-key="${BSE.Utils.escapeHtml(sec.key)}" checked>
                 <span class="batch-tree-item-text">
-                  ${isCur ? '▶' : '·'} <span class="batch-tree-item-idx">#${String(item.globalIndex).padStart(2, '0')}</span> ${BSE.Utils.escapeHtml(ep.title)}
+                  <span class="batch-tree-item-idx">#${String(item.globalIndex).padStart(2, '0')}</span> ${BSE.Utils.escapeHtml(ep.title)}
                   ${isCur ? '<span class="batch-tree-tag-cur">当前播放</span>' : ''}
                 </span>
               </label>
@@ -3548,9 +4295,45 @@
     return html;
   }
 
+  function getBatchOutputMode() {
+    const selected = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="batch-output"]:checked'));
+    if (selected?.value === 'merged-file' || selected?.value === 'zip') return selected.value;
+    return 'copy-text';
+  }
+
+  function syncBatchOutputControls() {
+    const mode = getBatchOutputMode();
+    const formatInput = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="batch-format"]:checked'));
+    const srtOption = /** @type {HTMLElement | null} */ (document.querySelector('.batch-format-srt'));
+    const showFormat = mode !== 'copy-text';
+    const allowSrt = mode === 'zip';
+
+    if (elements.batchFormatRow) elements.batchFormatRow.hidden = !showFormat;
+    if (elements.batchFormatLabel) {
+      elements.batchFormatLabel.textContent = allowSrt ? 'ZIP 内单文件格式' : '合并文件格式';
+    }
+    if (srtOption) srtOption.hidden = !allowSrt;
+    if (!allowSrt && formatInput?.value === 'srt') {
+      const mdInput = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="batch-format"][value="md"]'));
+      if (mdInput) mdInput.checked = true;
+    }
+
+    const activeFormat = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="batch-format"]:checked'))?.value || 'md';
+    const showTimestamp = mode !== 'zip' || activeFormat !== 'srt';
+    if (elements.batchTimestampRow) elements.batchTimestampRow.hidden = !showTimestamp;
+
+    const checkedCount = queryInputs(elements.batchTreeList, '.batch-tree-cb:checked').length;
+    if (elements.batchStartBtn && !batchControlTask?.running) {
+      elements.batchStartBtn.disabled = checkedCount === 0;
+      elements.batchStartBtn.textContent = mode === 'copy-text'
+        ? `复制 ${checkedCount || ''} 项字幕`.replace(/\s+/g, ' ').trim()
+        : (mode === 'merged-file' ? '下载合并长文件' : '导出独立文件 ZIP');
+    }
+  }
+
   function updateTreeSummaryAndScope() {
     if (!currentTree || !elements.batchTreeList) return;
-    const allCbs = [...elements.batchTreeList.querySelectorAll('.batch-tree-cb')];
+    const allCbs = queryInputs(elements.batchTreeList, '.batch-tree-cb');
     const checkedCbs = allCbs.filter(cb => cb.checked);
     const total = allCbs.length;
     const checkedCount = checkedCbs.length;
@@ -3569,9 +4352,9 @@
     }
 
     // Sync section checkboxes (checked, unchecked, or indeterminate)
-    elements.batchTreeList.querySelectorAll('.batch-tree-sec-cb').forEach(secCb => {
+    queryInputs(elements.batchTreeList, '.batch-tree-sec-cb').forEach(secCb => {
       const secKey = secCb.dataset.secKey;
-      const childCbs = [...elements.batchTreeList.querySelectorAll(`.batch-tree-cb[data-sec-key="${secKey}"]`)];
+      const childCbs = queryInputs(elements.batchTreeList, `.batch-tree-cb[data-sec-key="${secKey}"]`);
       const checkedChildren = childCbs.filter(c => c.checked).length;
       if (checkedChildren === 0) {
         secCb.checked = false;
@@ -3586,9 +4369,9 @@
     });
 
     // Sync video checkboxes
-    elements.batchTreeList.querySelectorAll('.batch-tree-video-cb').forEach(vCb => {
+    queryInputs(elements.batchTreeList, '.batch-tree-video-cb').forEach(vCb => {
       const bvid = vCb.dataset.bvid;
-      const childCbs = [...elements.batchTreeList.querySelectorAll(`.batch-tree-cb[data-bvid="${bvid}"]`)];
+      const childCbs = queryInputs(elements.batchTreeList, `.batch-tree-cb[data-bvid="${bvid}"]`);
       const checkedChildren = childCbs.filter(c => c.checked).length;
       if (checkedChildren === 0) {
         vCb.checked = false;
@@ -3601,23 +4384,48 @@
         vCb.indeterminate = true;
       }
     });
+    syncBatchOutputControls();
   }
 
-  async function openBatchModal(targetId) {
+  async function openBatchModal(targetId, targetPlatform) {
     try {
-      const isYouTube = state?.platform === 'youtube' || (state?.url && state.url.includes('youtube.com'));
-      const bvid = (!isYouTube ? (targetId || BSE.Utils?.getBvid?.(state?.url || location.href)) : null);
-      const ytId = isYouTube ? (targetId || (BSE.Utils?.getYouTubeVideoId ? BSE.Utils.getYouTubeVideoId(state?.url || '') : '')) : null;
+      const explicitPlatform = targetPlatform === 'youtube' || targetPlatform === 'bilibili' ? targetPlatform : '';
+      const isYouTube = explicitPlatform
+        ? explicitPlatform === 'youtube'
+        : (state?.platform === 'youtube' || (state?.url && state.url.includes('youtube.com')));
+      // DOM click listeners pass a MouseEvent as their first argument. Only explicit string IDs
+      // are accepted here, otherwise derive the media ID from the active state URL.
+      const explicitTargetId = typeof targetId === 'string' ? targetId.trim() : '';
+      const bvid = !isYouTube
+        ? (BSE.Utils?.getBvid?.(explicitTargetId) || BSE.Utils?.getBvid?.(state?.url || ''))
+        : null;
+      const ytId = isYouTube
+        ? (explicitTargetId || (BSE.Utils?.getYouTubeVideoId ? BSE.Utils.getYouTubeVideoId(state?.url || '') : ''))
+        : null;
 
       if (!bvid && !isYouTube) {
         toast('未识别到视频或合集 ID', true);
         return;
       }
+      if (batchControlTask?.running) {
+        batchControlTask.cancelled = true;
+        batchControlTask.controller?.abort();
+      }
+      batchControlTask = null;
+      currentTree = null;
       elements.batchOverlay.hidden = false;
       elements.batchProgressBox.hidden = true;
       elements.batchStartBtn.hidden = false;
+      elements.batchStartBtn.disabled = true;
+      elements.batchStartBtn.textContent = '正在读取目录…';
       elements.batchPauseBtn.hidden = true;
       elements.batchCancelBtn.hidden = true;
+      elements.batchProgressText.textContent = '准备开始…';
+      elements.batchProgressBarFill.style.width = '0%';
+      elements.batchProgressPercent.textContent = '0%';
+      elements.batchCntSuccess.textContent = '0';
+      elements.batchCntNosub.textContent = '0';
+      elements.batchCntFailed.textContent = '0';
       rotateDiagnosticSession('batch', 'export');
 
       toast('正在分析合集与分P架构…');
@@ -3627,37 +4435,47 @@
       });
 
       if (isYouTube) {
-        const cachedSub = subscriptionsCache.find((s) => s.id === targetId || s.targetId === targetId);
+        const cachedSub = subscriptionsCache.find((s) => s.id === explicitTargetId || s.targetId === explicitTargetId);
         if (cachedSub && Array.isArray(cachedSub.items) && cachedSub.items.length > 0) {
+          /** @type {import('../types/bse').BilibiliItem[]} */
           const items = cachedSub.items.map((it, idx) => {
             const globalIndex = idx + 1;
+            const title = it.title || `第 ${globalIndex} 节`;
             return {
+              kind: 'episode',
               globalIndex,
+              sectionIndex: 1,
+              sectionTitle: cachedSub.title || '播放列表',
+              sectionKey: 'section_0',
+              episodeIndex: globalIndex,
+              episodeTitle: title,
               bvid: it.id,
-              videoId: it.id,
               cid: it.id,
               aid: it.id,
-              title: it.title || `第 ${globalIndex} 节`,
-              page: globalIndex,
-              part: it.title || `第 ${globalIndex} 节`,
+              title,
+              page: 1,
+              part: title,
               duration: typeof it.duration === 'number' ? it.duration : 0,
-              sourceUrl: it.url,
-              sectionKey: 'section_0',
-              sectionTitle: cachedSub.title || '播放列表'
+              sourceUrl: it.url
             };
           });
           currentTree = {
             title: cachedSub.title || 'YouTube 播放列表',
             kind: 'youtube_playlist',
-            seasonId: cachedSub.targetId || targetId || '',
+            isCollection: true,
+            seasonId: cachedSub.targetId || explicitTargetId || '',
             currentBvid: ytId || '',
+            currentPage: 1,
+            totalEpisodesCount: items.length,
             items,
             sections: [{
+              index: 1,
               key: 'section_0',
               title: cachedSub.title || '播放列表',
               items,
               episodes: items.map((it) => ({
-                bvid: it.videoId,
+                bvid: it.bvid,
+                aid: it.aid,
                 title: it.title,
                 index: it.globalIndex,
                 pagesCount: 1,
@@ -3670,10 +4488,17 @@
           currentTree = await BSE.YouTube.fetchMediaTree(ytId, { diagnostic: diagLogger });
         }
       } else {
-        currentTree = await BSE.Bilibili.fetchMediaTree(bvid, { diagnostic: diagLogger });
+        currentTree = await BSE.Bilibili.fetchMediaTree(bvid, {
+          diagnostic: diagLogger,
+          pageUrl: state?.url || ''
+        });
       }
 
-      // 实时反哺同步到已有的追踪卡片中
+      // Batch browsing is a metadata view, not an update-discovery path. It may
+      // enrich tracker rows already known to the ledger, but it must never
+      // replace the ledger or invent new read/unread state. Otherwise opening
+      // the batch dialog can erase `isRead` / cached subtitles and resurrect
+      // work the user has already consumed.
       if (currentTree && Array.isArray(currentTree.items) && currentTree.items.length > 0) {
         const sid = currentTree.seasonId ? String(currentTree.seasonId) : '';
         const matchingSub = subscriptionsCache.find((s) => {
@@ -3683,36 +4508,81 @@
           if (s.sourceUrl && ((bvid && s.sourceUrl.includes(bvid)) || (sid && s.sourceUrl.includes(sid)))) return true;
           return false;
         });
-        if (matchingSub) {
-          const episodes = currentTree.items.map((it) => {
-            const isMultiP = Boolean(it.page && it.page > 1);
-            const epId = isMultiP ? `${bvid || it.bvid}:p${it.page}` : (it.videoId || it.bvid || `${bvid || ytId || 'ep'}:p1`);
-            return {
-              id: epId,
-              title: String(it.part || it.title || '').trim(),
-              url: it.sourceUrl || `https://www.bilibili.com/video/${it.bvid || bvid}${it.page && it.page > 1 ? `?p=${it.page}` : ''}`,
-              pubdate: it.pubdate ? (it.pubdate > 1e11 ? it.pubdate : it.pubdate * 1000) : Date.now(),
-              duration: Number(it.duration) || 0,
-              author: currentTree.title || matchingSub.title
-            };
-          });
-          matchingSub.items = episodes;
-          if (bvid) matchingSub.bvid = bvid;
-          matchingSub.latestBvid = episodes[0]?.id || bvid || ytId;
-          matchingSub.lastCheckedAt = Date.now();
+        if (matchingSub && Array.isArray(matchingSub.items) && matchingSub.items.length > 0) {
+          const pageCountsByBvid = new Map();
+          for (const treeItem of currentTree.items) {
+            const itemBvid = String(treeItem.bvid || bvid || '');
+            if (!itemBvid) continue;
+            pageCountsByBvid.set(itemBvid, (pageCountsByBvid.get(itemBvid) || 0) + 1);
+          }
+
+          const existingById = new Map(matchingSub.items.map((item) => [item.id, item]));
+          let trackerMetadataChanged = false;
+          for (const it of currentTree.items) {
+            const itemBvid = String(it.bvid || bvid || '');
+            const pageNumber = Number(it.page) || 1;
+            const needsPageIdentity = Boolean(itemBvid) && (
+              (pageCountsByBvid.get(itemBvid) || 0) > 1
+              || currentTree.kind === 'multi_page'
+              || currentTree.kind === 'bpx_eplist'
+            );
+            const canonicalId = currentTree.kind === 'youtube_playlist'
+              ? String(it.bvid || it.id || '')
+              : (needsPageIdentity ? `${itemBvid}:p${pageNumber}` : itemBvid);
+            if (!canonicalId) continue;
+
+            // p1 used to be stored as plain BV by the batch UI. Accept that
+            // alias once and migrate it to the same canonical key the poller
+            // uses, while preserving all durable tracker state.
+            const legacyP1Id = needsPageIdentity && pageNumber === 1 ? itemBvid : '';
+            const previous = existingById.get(canonicalId) || (legacyP1Id ? existingById.get(legacyP1Id) : null);
+            if (!previous) continue;
+
+            const incomingPubdate = Number(it.pubdate) > 0
+              ? (Number(it.pubdate) > 1e11 ? Number(it.pubdate) : Number(it.pubdate) * 1000)
+              : 0;
+            const previousReadState = previous.isRead;
+            const previousSubtitle = previous.subtitle;
+            const previousHasSubtitle = previous.hasSubtitle;
+            Object.assign(previous, {
+              id: canonicalId,
+              title: String(it.part || it.title || previous.title || '').trim(),
+              url: it.sourceUrl || previous.url,
+              pubdate: incomingPubdate || previous.pubdate || 0,
+              duration: Number(it.duration) || previous.duration || 0,
+              author: previous.author || currentTree.title || matchingSub.title,
+              cid: it.cid || previous.cid,
+              isRead: previousReadState,
+              subtitle: previousSubtitle,
+              hasSubtitle: previousHasSubtitle
+            });
+            if (legacyP1Id && legacyP1Id !== canonicalId) {
+              existingById.delete(legacyP1Id);
+              existingById.set(canonicalId, previous);
+            }
+            trackerMetadataChanged = true;
+          }
+
+          if (bvid && !matchingSub.bvid) {
+            matchingSub.bvid = bvid;
+            trackerMetadataChanged = true;
+          }
           if (currentTree.title && (matchingSub.title === '合集' || matchingSub.title === '视频合集' || matchingSub.title === 'YouTube 播放列表' || !matchingSub.title)) {
             matchingSub.title = currentTree.title;
+            trackerMetadataChanged = true;
           }
-          await BSE.Tracker.addSubscription(matchingSub);
-          renderTrackerList();
-          updateTrackerCountsAndBadge();
+          if (trackerMetadataChanged) {
+            await BSE.Tracker.saveSubscriptions(subscriptionsCache);
+            renderTrackerList();
+            updateTrackerCountsAndBadge();
+          }
         }
       }
 
       elements.batchModalTitle.textContent = currentTree.title;
       elements.batchTypePill.textContent = currentTree.kind === 'youtube_playlist'
-        ? '▶️ 播放列表'
-        : (currentTree.kind === 'ugc_season' ? '🏷️ UGC合集' : (currentTree.kind === 'multi_page' ? '🎞️ 多P' : '🎬 单视频'));
+        ? '播放列表'
+        : (currentTree.kind === 'ugc_season' ? 'UGC合集' : (currentTree.kind === 'multi_page' ? '多P' : '单视频'));
       elements.batchSelectedSummary.textContent = `共 ${currentTree.items.length} 个分P${currentTree.hasNestedPages ? ' · 含复合多P' : ''}`;
 
       // Initialize quick range bar values
@@ -3743,25 +4613,28 @@
 
   // Tree Checkbox Change Delegation
   elements.batchTreeList?.addEventListener('change', (e) => {
-    const target = e.target;
+    const target = e.target instanceof HTMLInputElement ? e.target : null;
+    if (!target) return;
     if (target.classList.contains('batch-tree-cb')) {
       updateTreeSummaryAndScope();
     } else if (target.classList.contains('batch-tree-sec-cb')) {
       const secKey = target.dataset.secKey;
-      const cbs = elements.batchTreeList.querySelectorAll(`.batch-tree-cb[data-sec-key="${secKey}"]`);
-      cbs.forEach(cb => cb.checked = target.checked);
+      queryInputs(elements.batchTreeList, `.batch-tree-cb[data-sec-key="${secKey}"]`)
+        .forEach(cb => { cb.checked = target.checked; });
       updateTreeSummaryAndScope();
     } else if (target.classList.contains('batch-tree-video-cb')) {
       const bvid = target.dataset.bvid;
-      const cbs = elements.batchTreeList.querySelectorAll(`.batch-tree-cb[data-bvid="${bvid}"]`);
-      cbs.forEach(cb => cb.checked = target.checked);
+      queryInputs(elements.batchTreeList, `.batch-tree-cb[data-bvid="${bvid}"]`)
+        .forEach(cb => { cb.checked = target.checked; });
       updateTreeSummaryAndScope();
     }
   });
 
   // Tree Click Delegation (Row selection, Section folding, Select buttons)
   elements.batchTreeList?.addEventListener('click', (e) => {
-    const chevron = e.target.closest('.batch-tree-sec-chevron');
+    const target = eventTargetElement(e);
+    if (!target) return;
+    const chevron = closestHtml(e, '.batch-tree-sec-chevron');
     if (chevron) {
       e.stopPropagation();
       const secGroup = chevron.closest('.batch-tree-sec-group');
@@ -3769,31 +4642,31 @@
       return;
     }
 
-    const secBtn = e.target.closest('.batch-tree-sec-btn');
+    const secBtn = closestButton(e, '.batch-tree-sec-btn');
     if (secBtn) {
       e.stopPropagation();
       const secKey = secBtn.dataset.secKey;
-      elements.batchTreeList.querySelectorAll('.batch-tree-cb').forEach(cb => {
+      queryInputs(elements.batchTreeList, '.batch-tree-cb').forEach(cb => {
         cb.checked = cb.dataset.secKey === secKey;
       });
       updateTreeSummaryAndScope();
       return;
     }
 
-    const videoBtn = e.target.closest('.batch-tree-video-btn');
+    const videoBtn = closestButton(e, '.batch-tree-video-btn');
     if (videoBtn) {
       e.stopPropagation();
       const bvid = videoBtn.dataset.bvid;
-      elements.batchTreeList.querySelectorAll('.batch-tree-cb').forEach(cb => {
+      queryInputs(elements.batchTreeList, '.batch-tree-cb').forEach(cb => {
         cb.checked = cb.dataset.bvid === bvid;
       });
       updateTreeSummaryAndScope();
       return;
     }
 
-    const itemNode = e.target.closest('.batch-tree-item-node');
-    if (itemNode && !e.target.matches('input[type="checkbox"]')) {
-      const cb = itemNode.querySelector('.batch-tree-cb');
+    const itemNode = closestHtml(e, '.batch-tree-item-node');
+    if (itemNode && !target.matches('input[type="checkbox"]')) {
+      const cb = /** @type {HTMLInputElement | null} */ (itemNode.querySelector('.batch-tree-cb'));
       if (cb) {
         cb.checked = !cb.checked;
         updateTreeSummaryAndScope();
@@ -3803,13 +4676,13 @@
 
   // Tree Toolbar Buttons
   elements.batchTreeBtnAll?.addEventListener('click', () => {
-    elements.batchTreeList.querySelectorAll('.batch-tree-cb').forEach(cb => cb.checked = true);
+    queryInputs(elements.batchTreeList, '.batch-tree-cb').forEach(cb => { cb.checked = true; });
     updateTreeSummaryAndScope();
   });
 
   elements.batchTreeBtnCur?.addEventListener('click', () => {
     if (!currentTree) return;
-    elements.batchTreeList.querySelectorAll('.batch-tree-cb').forEach(cb => {
+    queryInputs(elements.batchTreeList, '.batch-tree-cb').forEach(cb => {
       const isCur = cb.dataset.bvid === currentTree.currentBvid;
       cb.checked = isCur;
     });
@@ -3817,12 +4690,12 @@
   });
 
   elements.batchTreeBtnNone?.addEventListener('click', () => {
-    elements.batchTreeList.querySelectorAll('.batch-tree-cb').forEach(cb => cb.checked = false);
+    queryInputs(elements.batchTreeList, '.batch-tree-cb').forEach(cb => { cb.checked = false; });
     updateTreeSummaryAndScope();
   });
 
   elements.batchTreeBtnInvert?.addEventListener('click', () => {
-    elements.batchTreeList.querySelectorAll('.batch-tree-cb').forEach(cb => {
+    queryInputs(elements.batchTreeList, '.batch-tree-cb').forEach(cb => {
       cb.checked = !cb.checked;
     });
     updateTreeSummaryAndScope();
@@ -3835,43 +4708,53 @@
     const end = Math.min(currentTree.items.length, Number(elements.batchQuickEnd?.value) || currentTree.items.length);
     const min = Math.min(start, end);
     const max = Math.max(start, end);
-    elements.batchTreeList.querySelectorAll('.batch-tree-cb').forEach(cb => {
+    queryInputs(elements.batchTreeList, '.batch-tree-cb').forEach(cb => {
       const idx = Number(cb.dataset.globalIndex);
       cb.checked = (idx >= min && idx <= max);
     });
     updateTreeSummaryAndScope();
   });
 
-  elements.batchButton?.addEventListener('click', openBatchModal);
+  elements.batchButton?.addEventListener('click', () => openBatchModal());
   elements.batchCloseBtn?.addEventListener('click', () => {
     if (batchControlTask?.running) {
       batchControlTask.cancelled = true;
+      batchControlTask.controller?.abort();
     }
     elements.batchOverlay.hidden = true;
   });
 
-  // Output mode toggle
-  document.querySelectorAll('input[name="batch-output"]').forEach(radio => {
-    radio.addEventListener('change', () => {
-      const isZip = document.querySelector('input[name="batch-output"]:checked')?.value === 'zip';
-      if (elements.batchFormatRow) elements.batchFormatRow.style.display = isZip ? 'flex' : 'none';
-    });
+  queryInputs(document, 'input[name="batch-output"]').forEach(radio => {
+    radio.addEventListener('change', syncBatchOutputControls);
   });
+  queryInputs(document, 'input[name="batch-format"]').forEach(radio => {
+    radio.addEventListener('change', syncBatchOutputControls);
+  });
+  syncBatchOutputControls();
 
   elements.batchStartBtn?.addEventListener('click', async () => {
     if (!currentTree) return;
-    const checkedCbs = [...elements.batchTreeList.querySelectorAll('.batch-tree-cb:checked')];
+    const checkedCbs = queryInputs(elements.batchTreeList, '.batch-tree-cb:checked');
     if (!checkedCbs.length) {
       toast('请至少在目录中勾选 1 个分P', true);
       return;
     }
 
     const customIndices = new Set(checkedCbs.map(cb => Number(cb.dataset.globalIndex)));
-    const outputMode = document.querySelector('input[name="batch-output"]:checked')?.value || 'zip';
-    const format = document.querySelector('input[name="batch-format"]:checked')?.value || 'srt';
-    const preference = elements.prefSelect?.value || 'manual-first';
-    const withTimestamp = document.querySelector('input[name="batch-timestamp"]:checked')?.value === 'true';
+    const formatInput = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="batch-format"]:checked'));
+    const timestampInput = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="batch-timestamp"]:checked'));
+    const outputMode = getBatchOutputMode();
+    /** @type {'srt' | 'txt' | 'md'} */
+    let format = formatInput?.value === 'txt' ? 'txt' : (formatInput?.value === 'srt' ? 'srt' : 'md');
+    if (outputMode === 'copy-text') format = 'txt';
+    else if (outputMode === 'merged-file' && format === 'srt') format = 'md';
+    /** @type {'manual-first' | 'manual-only' | 'ai-first'} */
+    const preference = elements.prefSelect?.value === 'manual-only'
+      ? 'manual-only'
+      : (elements.prefSelect?.value === 'ai-first' ? 'ai-first' : 'manual-first');
+    const withTimestamp = timestampInput?.value === 'true';
 
+    /** @type {import('../types/bse').BatchConfig} */
     const config = {
       scope: 'custom',
       customIndices,
@@ -3891,6 +4774,7 @@
       scope: 'batch',
       sessionId: diagnosticSessions.batch
     });
+    batchControlTask.diagnostic = diagLogger;
 
     try {
       const runner = currentTree?.kind === 'youtube_playlist' ? BSE.YouTube?.runBatchExport : BSE.Bilibili?.runBatchExport;
@@ -3900,15 +4784,22 @@
           elements.batchProgressText.textContent = `正在打包 ZIP (${stats.packPercent || 0}%)…`;
           elements.batchProgressBarFill.style.width = `${stats.packPercent || 0}%`;
           elements.batchProgressPercent.textContent = `${stats.packPercent || 0}%`;
+        } else if (phase === 'building') {
+          elements.batchProgressText.textContent = outputMode === 'copy-text'
+            ? '正在整理可复制的合并全文…'
+            : (outputMode === 'merged-file' ? '正在生成合并长文件…' : '正在整理打包清单…');
         } else if (phase === 'fetching') {
           const percent = Math.round((stats.completed / (stats.total || 1)) * 100);
           elements.batchProgressText.textContent = currentItem ? `正在读取: ${currentItem.title}` : `抓取中 (${stats.completed}/${stats.total})`;
           elements.batchProgressBarFill.style.width = `${percent}%`;
           elements.batchProgressPercent.textContent = `${percent}%`;
         } else if (phase === 'done') {
+          const completionVerb = outputMode === 'copy-text'
+            ? '已整理为可复制全文'
+            : (outputMode === 'merged-file' ? '已合并为长文件' : '已打包为 ZIP');
           const summaryText = stats.failed > 0 || stats.noSub > 0
-            ? `✓ 任务完成：成功 ${stats.success} · 无字幕 ${stats.noSub} · 失败 ${stats.failed}`
-            : `✓ 任务完成：共 ${stats.success} 集字幕已全部下载`;
+            ? `任务完成：成功 ${stats.success} · 无字幕 ${stats.noSub} · 失败 ${stats.failed}`
+            : `任务完成：${stats.success} 项字幕${completionVerb}`;
           elements.batchProgressText.textContent = summaryText;
           elements.batchProgressBarFill.style.width = '100%';
           elements.batchProgressPercent.textContent = '100%';
@@ -3916,25 +4807,41 @@
         elements.batchCntSuccess.textContent = String(stats.success || 0);
         elements.batchCntNosub.textContent = String(stats.noSub || 0);
         elements.batchCntFailed.textContent = String(stats.failed || 0);
-      }, batchControlTask, { diagnostic: diagLogger });
+      }, batchControlTask);
 
+      if (exportResult?.cancelled) return;
       const finalStats = exportResult?.stats || {};
-      if (finalStats.failed > 0 || finalStats.noSub > 0) {
-        toast(`导出完成：成功 ${finalStats.success || 0}，无字幕 ${finalStats.noSub || 0}，失败 ${finalStats.failed || 0}`);
-      } else {
-        toast(BSE.I18n?.t('batch_completed_toast') || '✓ 批量导出完成并开始下载');
+      if (outputMode === 'copy-text' && !finalStats.success) {
+        throw new Error('所选视频没有可复制的字幕，请调整选择范围或字幕偏好');
       }
+      await BSE.BatchExport.deliver(exportResult?.output, {
+        writeText: (text) => navigator.clipboard.writeText(text),
+        downloadText: (text, filename, mime) => BSE.Utils.downloadText(text, filename, mime),
+        downloadBlob: (blob, filename) => BSE.Utils.downloadBlob(blob, filename)
+      });
+
+      const partial = finalStats.failed > 0 || finalStats.noSub > 0;
+      const resultLabel = outputMode === 'copy-text'
+        ? `已复制 ${finalStats.success || 0} 项字幕全文`
+        : (outputMode === 'merged-file'
+            ? `合并长文件已下载${exportResult?.output?.filename ? `：${exportResult.output.filename}` : ''}`
+            : 'ZIP 已开始下载');
+      toast(partial
+        ? `${resultLabel}；无字幕 ${finalStats.noSub || 0}，失败 ${finalStats.failed || 0}`
+        : resultLabel);
       setTimeout(() => {
         elements.batchOverlay.hidden = true;
-      }, 2500);
+      }, 1800);
     } catch (err) {
       if (err.name !== 'AbortError' && !batchControlTask.cancelled) {
         toast(err.message || '批量导出失败', true);
       }
     } finally {
+      if (batchControlTask) batchControlTask.running = false;
       elements.batchStartBtn.hidden = false;
       elements.batchPauseBtn.hidden = true;
       elements.batchCancelBtn.hidden = true;
+      syncBatchOutputControls();
     }
   });
 
@@ -3955,7 +4862,10 @@
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       if (!elements.batchOverlay.hidden) {
-        if (batchControlTask?.running) batchControlTask.cancelled = true;
+        if (batchControlTask?.running) {
+          batchControlTask.cancelled = true;
+          batchControlTask.controller?.abort();
+        }
         elements.batchOverlay.hidden = true;
       }
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
@@ -3974,7 +4884,7 @@
   });
 
   loadInitialState().catch((error) => toast(error.message, true));
-  loadAndRenderTracker().catch(() => {});
+  loadTrackerSummary().catch(() => {});
   initializeQueueLanguageControl().catch(() => populateQueueLanguageOptions('auto'));
   loadNativeCapabilities(false).catch(() => {});
   loadAndRenderQueue().catch(() => {});

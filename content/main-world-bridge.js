@@ -6,8 +6,22 @@
 
   const CHANNEL = 'bse-extension-bridge-v1';
 
+  /**
+   * YouTube 的播放器方法是页面私有接口，不属于 HTMLElement 标准类型。
+   * 在桥接层局部建模，避免把非标准成员污染到所有 HTMLElement。
+   * @typedef {HTMLElement & {
+   *   getPlayerResponse?: () => any,
+   *   getVideoData?: () => any,
+   *   getOption?: (namespace: string, key: string) => any,
+   *   setOption?: (namespace: string, key: string, value: any) => void,
+   *   getAudioTrack?: () => any
+   * }} YouTubePlayerElement
+   * @typedef {Element & { playerData_?: any }} YouTubeWatchFlexyElement
+   */
+
+  /** @returns {YouTubePlayerElement | null} */
   function getPlayer() {
-    const player = document.getElementById('movie_player');
+    const player = /** @type {YouTubePlayerElement | null} */ (document.getElementById('movie_player'));
     return player && typeof player.getPlayerResponse === 'function' ? player : null;
   }
 
@@ -67,7 +81,7 @@
       }
     } catch {}
     try {
-      const watchFlexy = document.querySelector('ytd-watch-flexy');
+      const watchFlexy = /** @type {YouTubeWatchFlexyElement | null} */ (document.querySelector('ytd-watch-flexy'));
       const flexyVid = watchFlexy?.playerData_?.videoDetails?.videoId;
       if (flexyVid && currentVideoId && flexyVid === currentVideoId) {
         const tracks = watchFlexy?.playerData_?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
@@ -88,6 +102,30 @@
       seen.add(key);
       return true;
     });
+  }
+
+  function getVideoContext() {
+    const player = getPlayer();
+    const currentVideoId = getCurrentVideoId(player);
+    const candidates = [];
+    try { candidates.push(player?.getPlayerResponse?.()); } catch {}
+    try { candidates.push(window?.ytInitialPlayerResponse); } catch {}
+    try {
+      const watchFlexy = /** @type {YouTubeWatchFlexyElement | null} */ (document.querySelector('ytd-watch-flexy'));
+      candidates.push(watchFlexy?.playerData_);
+    } catch {}
+    const data = candidates.find((candidate) => candidate?.videoDetails?.videoId === currentVideoId) || {};
+    const details = data?.videoDetails || {};
+    const microformat = data?.microformat?.playerMicroformatRenderer || {};
+    return {
+      videoId: currentVideoId,
+      title: details.title || '',
+      author: details.author || '',
+      keywords: Array.isArray(details.keywords) ? details.keywords : [],
+      shortDescription: details.shortDescription || '',
+      lengthSeconds: details.lengthSeconds || '',
+      category: microformat.category || ''
+    };
   }
 
   function getState() {
@@ -135,7 +173,7 @@
       else if (payload.lan) player.setOption?.('captions', 'track', { languageCode: payload.lan });
     }
 
-    const button = document.querySelector('.ytp-subtitles-button');
+    const button = /** @type {HTMLElement | null} */ (document.querySelector('.ytp-subtitles-button'));
     if (button?.getAttribute('aria-pressed') !== 'true') button?.click();
     return { ok: true };
   }
@@ -231,6 +269,7 @@
     if (cues.length > 0) {
       return {
         ok: true,
+        videoId,
         title,
         author,
         cover,
@@ -277,7 +316,7 @@
     }
 
     if (!captionTracks.length) {
-      return { ok: false, error: '该视频未提供字幕轨道', title, author, cover, captionTracks: [] };
+      return { ok: false, videoId, error: '该视频未提供字幕轨道', title, author, cover, captionTracks: [] };
     }
 
     // 规范化并合成中文自动翻译轨道
@@ -329,6 +368,7 @@
 
     return {
       ok: Boolean(rawText),
+      videoId,
       title,
       author,
       cover,
@@ -435,6 +475,9 @@
         window.postMessage({ channel: CHANNEL, direction: 'response', requestId, ok: true, result }, '*');
       } else if (type === 'GET_VIDEO_DATA') {
         result = getState().video;
+        window.postMessage({ channel: CHANNEL, direction: 'response', requestId, ok: true, result }, '*');
+      } else if (type === 'GET_VIDEO_CONTEXT') {
+        result = getVideoContext();
         window.postMessage({ channel: CHANNEL, direction: 'response', requestId, ok: true, result }, '*');
       } else if (type === 'GET_PLAYLIST') {
         result = getPlaylistData();

@@ -14,8 +14,22 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST_FILE="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.sparksub.transcriber.json"
 
+usage() {
+  printf '%s\n' "Usage: ./setup.sh [--id <32-char-extension-id>] [--chrome|--chromium] [--yes]"
+  printf '%s\n' "The installer prefers the SparkScribe bundled helper when readiness succeeds and otherwise falls back to the standalone compatibility host."
+}
+
+for argument in "$@"; do
+  case "$argument" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
+  esac
+done
+
 echo -e "${BOLD}${BLUE}======================================================${NC}"
-echo -e "${BOLD}${BLUE}   ✨ SparkSub (闪幕) 本机服务一键配置向导${NC}"
+echo -e "${BOLD}${BLUE}   SparkSub (闪幕) 本机服务一键配置向导${NC}"
 echo -e "${BOLD}${BLUE}======================================================${NC}\n"
 
 # 1. 系统与硬件架构检查
@@ -40,17 +54,17 @@ if ! command -v swift >/dev/null 2>&1; then
   exit 1
 fi
 
-echo -e "  ${GREEN}✔ macOS 系统与 Apple Silicon 架构验证通过${NC}"
-echo -e "  ${GREEN}✔ Swift 开发编译环境已就绪${NC}\n"
+echo -e "  ${GREEN}OK macOS 系统与 Apple Silicon 架构验证通过${NC}"
+echo -e "  ${GREEN}OK Swift 开发编译环境已就绪${NC}\n"
 
 # 2. 读取或引导输入 Chrome 扩展 ID
 echo -e "${BOLD}[2/4] 获取 SparkSub 扩展 ID...${NC}"
 
 DEFAULT_ID=""
 if [[ -f "$MANIFEST_FILE" ]]; then
-  EXISTING_ORIGIN=$(grep -o 'chrome-extension://[a-z]\{32\}/' "$MANIFEST_FILE" 2>/dev/null || true)
+  EXISTING_ORIGIN=$(grep -o 'chrome-extension://[a-p]\{32\}/' "$MANIFEST_FILE" 2>/dev/null || true)
   if [[ -n "$EXISTING_ORIGIN" ]]; then
-    DEFAULT_ID=$(echo "$EXISTING_ORIGIN" | sed -E 's|chrome-extension://([a-z]{32})/|\1|')
+    DEFAULT_ID=$(echo "$EXISTING_ORIGIN" | sed -E 's|chrome-extension://([a-p]{32})/|\1|')
   fi
 fi
 
@@ -61,8 +75,13 @@ NON_INTERACTIVE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --id|--extension-id|-i)
+      [[ $# -ge 2 ]] || { echo -e "${RED}错误: $1 需要一个扩展 ID。${NC}" >&2; exit 2; }
       CLI_ID="$2"
       shift 2
+      ;;
+    --chrome)
+      BROWSER="chrome"
+      shift
       ;;
     --chromium)
       BROWSER="chromium"
@@ -73,7 +92,9 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      shift
+      echo -e "${RED}错误: 未知参数 $1${NC}" >&2
+      usage >&2
+      exit 2
       ;;
   esac
 done
@@ -105,13 +126,13 @@ fi
 # 清理用户可能意外复制到的前后空白、引号或 chrome-extension:// 前缀
 TARGET_ID="$(echo "$TARGET_ID" | tr '[:upper:]' '[:lower:]' | sed -E 's|chrome-extension://||g' | tr -d ' /"\t\r\n')"
 
-if [[ ! "$TARGET_ID" =~ ^[a-z]{32}$ ]]; then
+if [[ ! "$TARGET_ID" =~ ^[a-p]{32}$ ]]; then
   echo -e "${RED}错误: 扩展 ID 必须是严格的 32 位字母（例如: oadpbmafdiifomohcfgpampelgioagp）。${NC}"
   echo -e "请检查后重新运行 ./setup.sh\n"
   exit 1
 fi
 
-echo -e "  ${GREEN}✔ 锁定目标扩展 ID: ${TARGET_ID}${NC}\n"
+echo -e "  ${GREEN}OK 锁定目标扩展 ID: ${TARGET_ID}${NC}\n"
 
 # 3. 执行安装
 echo -e "${BOLD}[3/4] 正在编译安装本机服务并绑定浏览器通道...${NC}"
@@ -128,20 +149,27 @@ fi
 
 # 4. 执行状态自检诊断
 echo -e "\n${BOLD}[4/4] 正在运行就绪自检...${NC}"
-HOST_BIN="$HOME/Library/Application Support/SparkSub/SparkSubHost"
+SPARKSCRIBE_HOST="/Applications/SparkScribe.app/Contents/Helpers/SparkSubNativeHost"
+LEGACY_HOST="$HOME/Library/Application Support/SparkSub/SparkSubHost"
 
-if [[ -x "$HOST_BIN" ]]; then
-  "$HOST_BIN" --diagnose 2>&1 | while read -r line; do
+if [[ -x "$SPARKSCRIBE_HOST" ]] && "$SPARKSCRIBE_HOST" --browser-native-readiness >/dev/null 2>&1; then
+  echo -e "  ${GREEN}OK SparkScribe 浏览器执行层已接管${NC}"
+  "$SPARKSCRIBE_HOST" --browser-native-readiness 2>&1 | while read -r line; do
+    echo -e "  ${line}"
+  done
+elif [[ -x "$LEGACY_HOST" ]]; then
+  echo -e "  ${YELLOW}使用兼容期 standalone SparkSubHost${NC}"
+  "$LEGACY_HOST" --diagnose 2>&1 | while read -r line; do
     echo -e "  ${line}"
   done
 else
-  echo -e "  ${YELLOW}本机可执行文件已安装，正在等待首次浏览器消息唤醒。${NC}"
+  echo -e "  ${YELLOW}本机 Native Messaging manifest 已写入，正在等待浏览器首次唤醒。${NC}"
 fi
 
 echo -e "\n${BOLD}${GREEN}======================================================${NC}"
-echo -e "${BOLD}${GREEN}   🎉 恭喜！SparkSub 本机离线服务已配置成功！${NC}"
+echo -e "${BOLD}${GREEN}   SparkSub 本机字幕执行层已配置成功${NC}"
 echo -e "${BOLD}${GREEN}======================================================${NC}"
 echo -e "  1. 浏览器与本机安全通讯通道已就绪；"
-echo -e "  2. 离线 yt-dlp 抓取引擎已就绪；"
-echo -e "  3. CoreML 端侧离线 ASR 语音模型已就绪。"
-echo -e "\n现在打开任意 Bilibili 或 YouTube 视频，即可开始畅享极速字幕体验！\n"
+echo -e "  2. 平台字幕/远程媒体能力由当前 Host capability 决定；"
+echo -e "  3. 本地 ASR 语言能力由 SparkScribe 或兼容 Host 动态声明。"
+echo -e "\n现在打开任意 Bilibili 或 YouTube 视频，即可开始使用字幕工作流。\n"

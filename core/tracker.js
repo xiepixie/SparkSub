@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const BSE = globalThis.BSE = globalThis.BSE || {};
+  const BSE = globalThis.BSE;
 
   const STORAGE_KEYS = Object.freeze({
     SUBSCRIPTIONS: 'bse_subscriptions',
@@ -11,8 +11,6 @@
 
   const MAX_HISTORY_PER_SUB = 20;
   const MAX_SUBSCRIPTIONS = 100;
-  const MAX_CACHED_SUBTITLE_CHARS = 3_500_000;
-  const MAX_SINGLE_SUBTITLE_CHARS = 750_000;
 
   const DEFAULT_SETTINGS = Object.freeze({
     checkIntervalMinutes: 60,
@@ -194,11 +192,17 @@
     return MIXIN_KEY_ENC_TAB.map((n) => origKey[n]).join('').slice(0, 32);
   }
 
+  /**
+   * @param {Record<string, string | number | boolean | null | undefined>} [params]
+   * @param {string} [imgKey]
+   * @param {string} [subKey]
+   */
   function calculateWbiSign(params = {}, imgKey = '', subKey = '') {
     const rawKey = (imgKey || '') + (subKey || '');
     const mixinKey = rawKey.length >= 64 ? getMixinKey(rawKey) : '';
     const currTime = Math.round(Date.now() / 1000);
     const chrFilter = /[!'()*]/g;
+    /** @type {Record<string, string | number | boolean | null | undefined>} */
     const queryMap = Object.assign({}, params, { wts: currTime });
 
     const sortedKeys = Object.keys(queryMap).sort();
@@ -291,15 +295,159 @@
     _memoryStorage.set(key, value);
   }
 
+  function isItemRead(sub, item, itemIndex = 0) {
+    const lastReadPubdate = Number(sub?.lastReadPubdate) || 0;
+    const pubdate = Number(item?.pubdate) || 0;
+
+    // The watermark only advances when the user has caught up with every known
+    // unread item. It is therefore a safe guard against old/backfilled entries
+    // resurfacing after history truncation or an ID migration.
+    if (lastReadPubdate > 0 && pubdate > 0 && pubdate <= lastReadPubdate) return true;
+    if (item?.isRead === true) return true;
+    if (item?.isRead === false) return false;
+
+    // One-time legacy migration: older tracker snapshots only persisted a
+    // positional unreadCount. Convert that representation to explicit flags as
+    // soon as the subscription is read by the current tracker.
+    const legacyUnreadCount = Math.max(0, Number(sub?.unreadCount) || 0);
+    return itemIndex >= legacyUnreadCount;
+  }
+
+  function normalizeSubscriptionReadState(sub) {
+    if (!sub || typeof sub !== 'object') return sub;
+    const items = Array.isArray(sub.items) ? sub.items : [];
+    items.forEach((item, itemIndex) => {
+      item.isRead = isItemRead(sub, item, itemIndex);
+    });
+    sub.unreadCount = items.reduce((sum, item) => sum + (item.isRead === false ? 1 : 0), 0);
+    return sub;
+  }
+
+  function getUnreadItems(sub) {
+    if (!sub || !Array.isArray(sub.items)) return [];
+    normalizeSubscriptionReadState(sub);
+    return sub.items.filter((item) => item.isRead === false);
+  }
+
+  function getTrackedItemMediaKey(item) {
+    if (!item) return '';
+    const source = String(item.id || item.url || '');
+    const bvidMatch = source.match(/BV[a-zA-Z0-9]+/i);
+    if (bvidMatch) {
+      const pageMatch = source.match(/[?&]p=(\d+)|:p(\d+)/i);
+      const pageNum = pageMatch ? parseInt(pageMatch[1] || pageMatch[2], 10) : 1;
+      return `bili:${bvidMatch[0]}:p${pageNum}`;
+    }
+    const ytMatch = source.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/))([a-zA-Z0-9_-]{11})/);
+    const ytVideoId = ytMatch ? ytMatch[1] : (item.id && /^[a-zA-Z0-9_-]{11}$/.test(item.id) ? item.id : '');
+    return ytVideoId ? `yt:${ytVideoId}` : '';
+  }
+
+  function mergeCachedSubtitleBody(item, cached) {
+    const metadata = item?.subtitle || null;
+    if (metadata?.markdown || metadata?.plainText) return metadata;
+    if (cached && (cached.markdown || cached.plainText)) {
+      return {
+        ...metadata,
+        status: 'ready',
+        language: cached.language || metadata?.language,
+        langDoc: cached.langDoc || metadata?.langDoc,
+        cueCount: cached.cueCount || cached.cues?.length || metadata?.cueCount || 0,
+        fetchedAt: cached.savedAt || metadata?.fetchedAt,
+        markdown: cached.markdown || '',
+        plainText: cached.plainText || ''
+      };
+    }
+    if (metadata?.status === 'ready') {
+      return {
+        ...metadata,
+        status: 'evicted',
+        errorHint: '字幕正文缓存已释放，可点击重新提取'
+      };
+    }
+    return metadata;
+  }
+
+  async function getCachedSubtitlesForItems(requests) {
+    if (!Array.isArray(requests) || !requests.length) return [];
+    const list = await getSubscriptions();
+    const subscriptionById = new Map(list.map((sub) => [sub.id, sub]));
+    const targets = requests.map((request) => {
+      const sub = subscriptionById.get(request?.subscriptionId);
+      const item = (sub?.items || []).find((entry) => entry.id === request?.itemId) || null;
+      return { request, item, mediaKey: getTrackedItemMediaKey(item) };
+    });
+    const mediaKeys = targets.map((target) => target.mediaKey).filter(Boolean);
+    const cachedByMediaKey = mediaKeys.length
+      ? await BSE.Utils?.UnifiedSubtitleCache?.getMany?.(mediaKeys) || {}
+      : {};
+    return targets.map((target) => ({
+      subscriptionId: target.request?.subscriptionId || '',
+      itemId: target.request?.itemId || '',
+      subtitle: target.item ? mergeCachedSubtitleBody(target.item, cachedByMediaKey[target.mediaKey]) : null
+    }));
+  }
+
+  async function getCachedSubtitleForItem(subscriptionId, itemId) {
+    const [result] = await getCachedSubtitlesForItems([{ subscriptionId, itemId }]);
+    return result?.subtitle || null;
+  }
+
+  function subscriptionIdentity(sub) {
+    if (!sub) return '';
+    const platform = String(sub.platform || '').trim().toLowerCase();
+    const type = String(sub.type || '').trim().toLowerCase();
+    const target = String(sub.targetId || sub.resolvedTargetId || sub.id || '').trim().toLowerCase();
+    return `${platform}:${type}:${target}`;
+  }
+
+  function dedupeSubscriptions(subs) {
+    const unique = new Map();
+    for (const raw of subs || []) {
+      if (!raw?.id) continue;
+      const key = subscriptionIdentity(raw) || `id:${raw.id}`;
+      const existing = unique.get(key);
+      if (!existing) {
+        unique.set(key, { ...raw, items: dedupeTrackedItems(raw.items || []) });
+        continue;
+      }
+      const newer = Number(raw.lastCheckedAt || raw.subscribedAt || 0) >= Number(existing.lastCheckedAt || existing.subscribedAt || 0)
+        ? raw
+        : existing;
+      const older = newer === raw ? existing : raw;
+      const subscribedCandidates = [existing.subscribedAt, raw.subscribedAt]
+        .map(Number)
+        .filter((value) => value > 0);
+      const merged = {
+        ...older,
+        ...newer,
+        id: existing.id || raw.id,
+        subscribedAt: subscribedCandidates.length
+          ? Math.min(...subscribedCandidates)
+          : (Number(newer.subscribedAt) || Date.now()),
+        lastCheckedAt: Math.max(Number(existing.lastCheckedAt) || 0, Number(raw.lastCheckedAt) || 0),
+        items: dedupeTrackedItems([...(existing.items || []), ...(raw.items || [])])
+      };
+      normalizeSubscriptionReadState(merged);
+      unique.set(key, merged);
+    }
+    return [...unique.values()];
+  }
+
   async function getSubscriptions() {
     const list = await getStorageItem(STORAGE_KEYS.SUBSCRIPTIONS, []);
-    return Array.isArray(list) ? list : [];
+    if (!Array.isArray(list)) return [];
+    const deduped = dedupeSubscriptions(list);
+    deduped.forEach(normalizeSubscriptionReadState);
+    return deduped;
   }
 
   function compactSubscriptions(subs) {
-    const originalById = new Map((subs || []).map((sub) => [sub.id, sub]));
-    const sanitized = (subs || []).slice(0, MAX_SUBSCRIPTIONS).map((s) => {
+    const sourceSubs = dedupeSubscriptions(subs || []).slice(0, MAX_SUBSCRIPTIONS);
+    sourceSubs.forEach(normalizeSubscriptionReadState);
+    const sanitized = sourceSubs.map((s) => {
       const maxHistory = s.type === 'season' ? 100 : MAX_HISTORY_PER_SUB;
+      const retainedItems = dedupeTrackedItems(Array.isArray(s.items) ? s.items : []).slice(0, maxHistory);
       return {
         ...s,
         id: String(s.id || '').slice(0, 256),
@@ -310,10 +458,10 @@
         targetId: String(s.targetId || '').slice(0, 256),
         bvid: s.bvid ? String(s.bvid).slice(0, 64) : '',
         latestBvid: s.latestBvid ? String(s.latestBvid).slice(0, 64) : '',
-        unreadCount: Math.min(Number(s.unreadCount) || 0, maxHistory),
+        unreadCount: retainedItems.reduce((sum, item) => sum + (item.isRead === false ? 1 : 0), 0),
         lastReadPubdate: Number(s.lastReadPubdate) || 0,
         lastReadItemId: String(s.lastReadItemId || '').slice(0, 256),
-        items: Array.isArray(s.items) ? s.items.slice(0, maxHistory).map((item) => ({
+        items: retainedItems.map((item) => ({
           ...item,
           id: String(item.id || '').slice(0, 256),
           title: String(item.title || '').slice(0, 500),
@@ -322,50 +470,21 @@
           pubdate: Number(item.pubdate) || 0,
           duration: Number(item.duration) || 0,
           isRead: Boolean(item.isRead),
+          // The tracker ledger only owns lightweight extraction metadata.
+          // Transcript bodies live in UnifiedSubtitleCache under per-media keys,
+          // so marking one item read never rewrites megabytes of unrelated text.
           subtitle: item.subtitle ? {
             ...item.subtitle,
             markdown: undefined,
             plainText: undefined
           } : item.subtitle
-        })) : []
+        }))
       };
     });
-
-    const candidates = [];
-    sanitized.forEach((sub, subIndex) => {
-      const originalSub = originalById.get(sub.id) || {};
-      sub.items.forEach((item, itemIndex) => {
-        const original = originalSub.items?.find((entry) => entry.id === item.id);
-        const markdown = String(original?.subtitle?.markdown || '');
-        const plainText = markdown ? '' : String(original?.subtitle?.plainText || '');
-        const content = markdown || plainText;
-        if (!content) return;
-        candidates.push({
-          subIndex,
-          itemIndex,
-          content,
-          field: markdown ? 'markdown' : 'plainText',
-          unread: itemIndex < (sub.unreadCount || 0),
-          fetchedAt: Number(original?.subtitle?.fetchedAt || item.pubdate || 0)
-        });
-      });
-    });
-    candidates.sort((a, b) => Number(b.unread) - Number(a.unread) || b.fetchedAt - a.fetchedAt);
-
-    let remaining = MAX_CACHED_SUBTITLE_CHARS;
-    let evictedCount = 0;
-    for (const candidate of candidates) {
-      const subtitle = sanitized[candidate.subIndex].items[candidate.itemIndex].subtitle;
-      if (candidate.content.length <= MAX_SINGLE_SUBTITLE_CHARS && candidate.content.length <= remaining) {
-        subtitle[candidate.field] = candidate.content;
-        remaining -= candidate.content.length;
-      } else {
-        subtitle.status = 'evicted';
-        subtitle.errorHint = '字幕正文已按缓存容量策略释放，可点击重新提取';
-        evictedCount++;
-      }
-    }
-    return { subscriptions: sanitized, evictedCount, cachedChars: MAX_CACHED_SUBTITLE_CHARS - remaining };
+    return {
+      subscriptions: sanitized,
+      evictedCount: sanitized.reduce((sum, sub) => sum + sub.items.filter((item) => item.subtitle?.status === 'evicted').length, 0)
+    };
   }
 
   function getStorageStats(subs = []) {
@@ -373,13 +492,43 @@
     return {
       subscriptionCount: compacted.subscriptions.length,
       itemCount: compacted.subscriptions.reduce((sum, sub) => sum + sub.items.length, 0),
-      cachedSubtitleCount: compacted.subscriptions.reduce((sum, sub) => sum + sub.items.filter((item) => item.subtitle?.markdown || item.subtitle?.plainText).length, 0),
+      cachedSubtitleCount: compacted.subscriptions.reduce((sum, sub) => sum + sub.items.filter((item) => item.subtitle?.status === 'ready').length, 0),
       evictedCount: compacted.evictedCount,
       approximateBytes: new TextEncoder().encode(JSON.stringify(compacted.subscriptions)).length
     };
   }
 
   async function saveSubscriptions(subs) {
+    // Compatibility bridge for old tracker snapshots that embedded transcript
+    // bodies directly in the subscription ledger. Preserve those bodies in the
+    // per-media cache before stripping them from the lightweight tracker state.
+    const legacyBodies = [];
+    for (const sub of (subs || [])) {
+      for (const item of (sub.items || [])) {
+        const subtitle = item?.subtitle;
+        if (!subtitle?.markdown && !subtitle?.plainText) continue;
+        const mediaKey = getTrackedItemMediaKey(item);
+        if (!mediaKey) continue;
+        legacyBodies.push({
+          mediaKey,
+          payload: {
+            title: item.title || sub.title || '',
+            author: item.author || sub.author || '',
+            language: subtitle.language,
+            langDoc: subtitle.langDoc,
+            cueCount: subtitle.cueCount,
+            markdown: subtitle.markdown || '',
+            plainText: subtitle.plainText || ''
+          }
+        });
+      }
+    }
+    if (legacyBodies.length && BSE.Utils?.UnifiedSubtitleCache?.getMany && BSE.Utils?.UnifiedSubtitleCache?.setMany) {
+      const cached = await BSE.Utils.UnifiedSubtitleCache.getMany(legacyBodies.map((entry) => entry.mediaKey));
+      const missing = legacyBodies.filter((entry) => !cached[entry.mediaKey]);
+      if (missing.length) await BSE.Utils.UnifiedSubtitleCache.setMany(missing);
+    }
+
     const { subscriptions: sanitized } = compactSubscriptions(subs);
     await setStorageItem(STORAGE_KEYS.SUBSCRIPTIONS, sanitized);
     return true;
@@ -395,7 +544,8 @@
       throw new Error('订阅数据缺少必要标识 (id, platform, type)');
     }
     const list = await getSubscriptions();
-    const existingIndex = list.findIndex((s) => s.id === subData.id);
+    const incomingIdentity = subscriptionIdentity(subData);
+    const existingIndex = list.findIndex((s) => s.id === subData.id || (incomingIdentity && subscriptionIdentity(s) === incomingIdentity));
 
     const now = Date.now();
     const prev = existingIndex >= 0 ? list[existingIndex] : null;
@@ -457,22 +607,23 @@
     const list = await getSubscriptions();
     const sub = list.find((s) => s.id === subscriptionId);
     if (!sub) return;
+    normalizeSubscriptionReadState(sub);
 
     if (!itemId) {
-      sub.unreadCount = 0;
-      const maxPub = (sub.items || []).reduce((max, i) => Math.max(max, Number(i.pubdate) || 0), 0);
-      sub.lastReadPubdate = maxPub || Date.now();
-      sub.lastReadItemId = sub.items?.[0]?.id || '';
       (sub.items || []).forEach((item) => { item.isRead = true; });
     } else {
       const item = (sub.items || []).find((i) => i.id === itemId);
-      if (item) item.isRead = true;
-      sub.unreadCount = Math.max(0, (sub.unreadCount || 0) - 1);
-      if (sub.unreadCount === 0) {
-        const maxPub = (sub.items || []).reduce((max, i) => Math.max(max, Number(i.pubdate) || 0), 0);
-        sub.lastReadPubdate = maxPub || Date.now();
-        sub.lastReadItemId = sub.items?.[0]?.id || '';
-      }
+      if (!item || item.isRead === true) return;
+      item.isRead = true;
+    }
+
+    // unreadCount is a materialized summary only. Explicit per-item state is
+    // authoritative, making repeated clicks and cross-window writes idempotent.
+    sub.unreadCount = getUnreadItems(sub).length;
+    if (sub.unreadCount === 0) {
+      const maxPub = (sub.items || []).reduce((max, i) => Math.max(max, Number(i.pubdate) || 0), 0);
+      sub.lastReadPubdate = maxPub || Date.now();
+      sub.lastReadItemId = sub.items?.[0]?.id || '';
     }
     await saveSubscriptions(list);
   }
@@ -480,11 +631,12 @@
   async function markAllAsRead() {
     const list = await getSubscriptions();
     list.forEach((s) => {
+      normalizeSubscriptionReadState(s);
+      (s.items || []).forEach((item) => { item.isRead = true; });
       s.unreadCount = 0;
       const maxPub = (s.items || []).reduce((max, i) => Math.max(max, Number(i.pubdate) || 0), 0);
       s.lastReadPubdate = maxPub || Date.now();
       s.lastReadItemId = s.items?.[0]?.id || '';
-      (s.items || []).forEach((item) => { item.isRead = true; });
     });
     await saveSubscriptions(list);
   }
@@ -543,16 +695,76 @@
     return match[1];
   }
 
-  function normalizeFetchedItems(items) {
+  function trackedItemIdentity(item) {
+    if (!item) return '';
+    const source = `${item.id || ''} ${item.url || ''}`;
+    const bvid = source.match(/BV[a-zA-Z0-9]+/i)?.[0] || '';
+    if (bvid) {
+      // Tracker history is page-oriented, matching getTrackedItemMediaKey().
+      // CID belongs to the playback/transcription identity contract and is not
+      // consistently present in historical tracker rows. Prefer BVID + page so
+      // legacy `BV...`, `BV...:p1`, and newer rows carrying CID collapse safely.
+      const pageMatch = source.match(/[?&]p=(\d+)|:p(\d+)/i);
+      const page = pageMatch ? Number(pageMatch[1] || pageMatch[2]) || 1 : 1;
+      return `bili:${bvid.toLowerCase()}:p${page}`;
+    }
+    const ytMatch = source.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?.*?v=|embed\/|v\/|shorts\/))([a-zA-Z0-9_-]{11})/i);
+    const ytId = ytMatch?.[1] || (/^[a-zA-Z0-9_-]{11}$/.test(String(item.id || '')) ? String(item.id) : '');
+    return ytId ? `yt:${ytId}` : `id:${String(item.id || '')}`;
+  }
+
+  function subtitleStateRank(subtitle) {
+    const status = String(subtitle?.status || '');
+    if (status === 'ready') return 5;
+    if (status === 'pending') return 4;
+    if (status === 'evicted') return 3;
+    if (status === 'not_found') return 2;
+    if (status === 'error') return 1;
+    return 0;
+  }
+
+  function mergeTrackedItem(existing, incoming) {
+    const existingDate = Number(existing?.pubdate) || 0;
+    const incomingDate = Number(incoming?.pubdate) || 0;
+    const primary = incomingDate >= existingDate ? incoming : existing;
+    const secondary = primary === incoming ? existing : incoming;
+    const primarySubtitle = primary?.subtitle;
+    const secondarySubtitle = secondary?.subtitle;
+    const subtitle = subtitleStateRank(secondarySubtitle) > subtitleStateRank(primarySubtitle)
+      ? secondarySubtitle
+      : primarySubtitle;
+    return {
+      ...secondary,
+      ...primary,
+      pubdate: Math.max(existingDate, incomingDate),
+      duration: Math.max(Number(existing?.duration) || 0, Number(incoming?.duration) || 0),
+      isRead: existing?.isRead === false || incoming?.isRead === false ? false : true,
+      ...(subtitle ? { subtitle } : {})
+    };
+  }
+
+  function dedupeTrackedItems(items) {
     const unique = new Map();
-    for (const item of items || []) {
-      if (!item?.id || unique.has(String(item.id))) continue;
-      unique.set(String(item.id), { ...item, id: String(item.id) });
+    for (const raw of items || []) {
+      if (!raw?.id) continue;
+      const item = { ...raw, id: String(raw.id) };
+      const key = trackedItemIdentity(item);
+      const existing = unique.get(key);
+      unique.set(key, existing ? mergeTrackedItem(existing, item) : item);
     }
     return [...unique.values()].sort((a, b) => Number(b.pubdate || 0) - Number(a.pubdate || 0));
   }
 
+  function normalizeFetchedItems(items) {
+    return dedupeTrackedItems(items);
+  }
+
   // === 6. Update Checking Implementation for Bilibili & YouTube ===
+  function extractTrackedBvid(value) {
+    const match = String(value || '').match(/(BV[a-zA-Z0-9]+)/i);
+    return match ? match[1] : '';
+  }
+
   async function fetchBilibiliNavWbiKeys(signal) {
     try {
       const resp = await BSE.Utils.fetchWithTimeout('https://api.bilibili.com/x/web-interface/nav', {
@@ -574,6 +786,7 @@
   async function checkSubscriptionUpdates(sub, options = {}) {
     const signal = options?.signal;
     if (!sub || !sub.id) return { checked: false, updated: false, newItems: [], error: '无效订阅数据' };
+    normalizeSubscriptionReadState(sub);
     const platform = sub.platform;
     const type = sub.type;
     let fetchedItems = [];
@@ -622,12 +835,16 @@
         } else if (type === 'season') {
           // B站 专区/合集与分P连载增量查询 (优先使用 BVID 直连视频拓扑，100%覆盖全量 sections 与 episodes)
           const targetId = String(sub.targetId || '').trim();
-          let candidateBvid = sub.latestBvid || sub.bvid
-            || (/^BV[a-zA-Z0-9]+/i.test(targetId) ? targetId : '')
-            || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(sub.sourceUrl || '') : '')
-            || (/^BV[a-zA-Z0-9]+/i.test(sub.items?.[0]?.id || '') ? sub.items[0].id : '')
-            || (BSE.Utils?.getBvid ? BSE.Utils.getBvid(sub.items?.[0]?.url || '') : '')
-            || (options.activeBvid ? String(options.activeBvid).trim() : '');
+          // `latestBvid` is a navigation/root hint, never a tracked-item key.
+          // Older builds accidentally persisted values such as BV...:p1 here;
+          // strip any page suffix before making the next view API request.
+          let candidateBvid = extractTrackedBvid(sub.latestBvid)
+            || extractTrackedBvid(sub.bvid)
+            || extractTrackedBvid(targetId)
+            || extractTrackedBvid(sub.sourceUrl)
+            || extractTrackedBvid(sub.items?.[0]?.id)
+            || extractTrackedBvid(sub.items?.[0]?.url)
+            || extractTrackedBvid(options.activeBvid);
 
           let bvidSuccess = false;
           if (candidateBvid) {
@@ -643,27 +860,44 @@
                 const pages = resJson.data.pages || [];
 
                 if (ugc?.sections?.length) {
-                  // A. UGC 合集：从所有 section 中精准提取全量 episodes
+                  // A. UGC 合集：从所有 section 中精准提取全量 episodes。
+                  // A nested multi-P episode uses BV:pN for *every* page,
+                  // including p1. A one-page episode keeps the plain BV id.
                   const epList = [];
                   for (const sec of ugc.sections) {
                     for (const ep of (sec.episodes || [])) {
                       const epBvid = ep.bvid || ep.arc?.bvid;
                       if (!epBvid) continue;
-                      epList.push({
-                        id: epBvid,
-                        cid: ep.cid || ep.page?.cid || ep.arc?.cid,
-                        title: String(ep.title || ep.arc?.title || '').trim(),
-                        url: `https://www.bilibili.com/video/${epBvid}`,
-                        pubdate: (Number(ep.arc?.pubdate) || 0) * 1000,
-                        duration: Number(ep.arc?.duration || ep.page?.duration) || 0,
-                        author: ugc.title || sub.title || ''
-                      });
+                      const explicitPages = Array.isArray(ep.pages) && ep.pages.length ? ep.pages : null;
+                      const fallbackPage = ep.page && typeof ep.page === 'object' ? ep.page : null;
+                      const epPages = explicitPages || [fallbackPage || {
+                        cid: ep.cid || ep.arc?.cid,
+                        page: 1,
+                        part: ep.title || ep.arc?.title || '',
+                        duration: ep.arc?.duration || 0
+                      }];
+                      const isMultiPage = epPages.length > 1;
+                      for (let pageIndex = 0; pageIndex < epPages.length; pageIndex++) {
+                        const page = epPages[pageIndex] || {};
+                        const pageNumber = Number(page.page) || pageIndex + 1;
+                        const baseTitle = String(ep.title || ep.arc?.title || '').trim();
+                        const partTitle = String(page.part || '').trim();
+                        epList.push({
+                          id: isMultiPage ? `${epBvid}:p${pageNumber}` : epBvid,
+                          cid: page.cid || ep.cid || ep.arc?.cid,
+                          title: isMultiPage && partTitle ? `${baseTitle} · P${pageNumber} ${partTitle}` : (baseTitle || partTitle),
+                          url: `https://www.bilibili.com/video/${epBvid}${isMultiPage ? `?p=${pageNumber}` : ''}`,
+                          pubdate: (Number(ep.arc?.pubdate) || 0) * 1000,
+                          duration: Number(page.duration || ep.arc?.duration) || 0,
+                          author: ugc.title || sub.title || ''
+                        });
+                      }
                     }
                   }
                   if (epList.length > 0) {
                     epList.sort((a, b) => (b.pubdate || 0) - (a.pubdate || 0));
                     fetchedItems = epList;
-                    sub.latestBvid = epList[0].id;
+                    sub.latestBvid = extractTrackedBvid(epList[0].id) || candidateBvid;
                     sub.bvid = candidateBvid;
                     if (!sub.sourceUrl) sub.sourceUrl = `https://www.bilibili.com/video/${candidateBvid}`;
                     if (!sub.title || sub.title === '视频合集' || sub.title === '合集') {
@@ -682,7 +916,7 @@
                     duration: Number(p.duration) || 0,
                     author: sub.title || resJson.data.title || ''
                   }));
-                  sub.latestBvid = `${candidateBvid}:p1`;
+                  sub.latestBvid = candidateBvid;
                   sub.bvid = candidateBvid;
                   if (!sub.sourceUrl) sub.sourceUrl = `https://www.bilibili.com/video/${candidateBvid}`;
                   bvidSuccess = true;
@@ -745,14 +979,31 @@
       return { checked: true, updated: false, newItems: [] };
     }
 
-    const existingIds = new Set((sub.items || []).map((item) => item.id));
-    const newItems = fetchedItems.filter((item) => !existingIds.has(item.id));
+    // Reconcile the one legacy multi-P identity mismatch before diffing. Older
+    // batch views stored p1 as plain BV while the poller stores BV:p1. When the
+    // current source explicitly returns BV:p1, migrate the old key in place so
+    // its read/subtitle state survives and it cannot be rediscovered as new.
+    const existingItems = Array.isArray(sub.items) ? sub.items : [];
+    const existingById = new Map(existingItems.map((item) => [item.id, item]));
+    for (const fetchedItem of fetchedItems) {
+      const pageOneMatch = String(fetchedItem.id || '').match(/^(BV[a-zA-Z0-9]+):p1$/i);
+      if (!pageOneMatch || existingById.has(fetchedItem.id)) continue;
+      const legacyId = pageOneMatch[1];
+      const legacyItem = existingById.get(legacyId);
+      if (!legacyItem) continue;
+      legacyItem.id = fetchedItem.id;
+      existingById.delete(legacyId);
+      existingById.set(fetchedItem.id, legacyItem);
+    }
+
+    const existingKeys = new Set(existingItems.map(trackedItemIdentity));
+    const newItems = fetchedItems.filter((item) => !existingKeys.has(trackedItemIdentity(item)));
 
     const maxItems = sub.type === 'season' ? 100 : MAX_HISTORY_PER_SUB;
 
     // The first successful poll establishes a baseline. Existing feed entries
     // predate the subscription and must not be reported as unread updates.
-    if (!sub.lastCheckedAt && existingIds.size === 0) {
+    if (!sub.lastCheckedAt && existingKeys.size === 0) {
       sub.items = fetchedItems.slice(0, maxItems);
       sub.lastCheckedAt = Date.now();
       const maxPub = (fetchedItems || []).reduce((max, i) => Math.max(max, Number(i.pubdate) || 0), 0);
@@ -769,43 +1020,47 @@
     }
 
     if (newItems.length > 0) {
-      // 自动在后台拉取新视频的字幕并缓存
-      try {
-        const settings = await getSettings();
-        if (settings.autoExtractSubtitles !== false) {
-          for (const item of newItems) {
-            try {
-              item.subtitle = { status: 'pending' };
-              const subRes = await fetchItemSubtitle(item, { signal });
-              item.subtitle = subRes;
-              item.hasSubtitle = subRes.status === 'ready';
-            } catch {}
-          }
-        }
-      } catch {}
-
-      // 结合已读水位线精确区分新旧内容：早于或等于最后已读时间戳的内容绝不误判为未读
+      // Classify first. A source may backfill or reorder an old entry with a
+      // previously unseen id; content at/below the caught-up watermark is not
+      // a user-visible update and must not trigger expensive subtitle work.
       const lastRead = Number(sub.lastReadPubdate) || 0;
       newItems.forEach((item) => {
-        if (lastRead > 0 && item.pubdate && item.pubdate <= lastRead) {
-          item.isRead = true;
-        } else {
-          item.isRead = false;
-        }
+        item.isRead = Boolean(lastRead > 0 && item.pubdate && item.pubdate <= lastRead);
       });
-      const trulyUnread = newItems.filter((item) => !item.isRead);
+      const trulyUnread = newItems.filter((item) => item.isRead === false);
 
-      // 合并并截断为最近 maxItems 条
-      const merged = [...newItems, ...(sub.items || [])].slice(0, maxItems);
-      sub.items = merged;
-      sub.unreadCount = Math.min(merged.length, (sub.unreadCount || 0) + trulyUnread.length);
-      sub.lastUpdatedItemId = newItems[0].id;
-      sub.lastUpdatedTitle = newItems[0].title;
+      // Only genuinely new/unconsumed items enter the unattended extraction
+      // path. Re-checking the tracker therefore does not recompute content the
+      // user has already consumed.
+      if (trulyUnread.length > 0) {
+        try {
+          const settings = await getSettings();
+          if (settings.autoExtractSubtitles !== false) {
+            for (const item of trulyUnread) {
+              try {
+                item.subtitle = { status: 'pending' };
+                const subRes = await fetchItemSubtitle(item, { signal });
+                item.subtitle = subRes;
+                item.hasSubtitle = subRes.status === 'ready';
+              } catch {}
+            }
+          }
+        } catch {}
+      }
+
+      // Merge once, then derive the materialized unread count from explicit
+      // item state. Never increment/decrement the summary arithmetically.
+      sub.items = dedupeTrackedItems([...newItems, ...(sub.items || [])]).slice(0, maxItems);
+      sub.unreadCount = getUnreadItems(sub).length;
+      if (trulyUnread.length > 0) {
+        sub.lastUpdatedItemId = trulyUnread[0].id;
+        sub.lastUpdatedTitle = trulyUnread[0].title;
+      }
       sub.lastCheckedAt = Date.now();
       if (options.persist !== false && sub.id) {
         await updateStoredSubscription(sub);
       }
-      return { checked: true, updated: true, newItems };
+      return { checked: true, updated: trulyUnread.length > 0, newItems: trulyUnread };
     }
 
     sub.lastCheckedAt = Date.now();
@@ -874,17 +1129,21 @@
     return lines.join('\n');
   }
 
+  /**
+   * @param {import('../types/bse').TrackedItem} item
+   * @param {{ signal?: AbortSignal, force?: boolean }} [options]
+   * @returns {Promise<import('../types/bse').TrackedItemSubtitle>}
+   */
   async function fetchItemSubtitle(item, options = {}) {
     const signal = options.signal;
     if (!item) return { status: 'error', errorHint: '无效条目' };
 
-    const bvidMatch = (item.id || item.url || '').match(/BV[a-zA-Z0-9]+/i);
-    const bvid = bvidMatch ? bvidMatch[0] : null;
-    const pageMatch = String(item.id || item.url || '').match(/[?&]p=(\d+)|:p(\d+)/i);
-    const pageNum = pageMatch ? parseInt(pageMatch[1] || pageMatch[2], 10) : 1;
-    const ytMatch = (item.id || item.url || '').match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/))([a-zA-Z0-9_-]{11})/);
-    const ytVideoId = ytMatch ? ytMatch[1] : (item.id && /^[a-zA-Z0-9_-]{11}$/.test(item.id) ? item.id : null);
-    const unifiedMediaKey = bvid ? `bili:${bvid}:p${pageNum}` : (ytVideoId ? `yt:${ytVideoId}` : null);
+    const unifiedMediaKey = getTrackedItemMediaKey(item);
+    const bvidMatch = unifiedMediaKey.match(/^bili:(BV[a-zA-Z0-9]+):p(\d+)$/i);
+    const bvid = bvidMatch ? bvidMatch[1] : null;
+    const pageNum = bvidMatch ? parseInt(bvidMatch[2], 10) : 1;
+    const ytMatch = unifiedMediaKey.match(/^yt:([a-zA-Z0-9_-]{11})$/);
+    const ytVideoId = ytMatch ? ytMatch[1] : null;
 
     // 0. 优先命中全局统一持久化字幕缓存 (UnifiedSubtitleCache)
     if (unifiedMediaKey && !options.force) {
@@ -1041,6 +1300,7 @@
         const plainText = cues.map((c) => c.content).join(' ');
         const markdown = formatCuesToMarkdown(viewTitle || item.title, item.author, item.url, cues);
 
+        /** @type {import('../types/bse').TrackedItemSubtitle} */
         const bResult = {
           status: 'ready',
           language: chosenSub.lan,
@@ -1104,6 +1364,7 @@
           const cues = nativeRes.cues;
           const plainText = cues.map((c) => c.content).join(' ');
           const markdown = formatCuesToMarkdown(item.title, item.author, ytUrl, cues);
+          /** @type {import('../types/bse').TrackedItemSubtitle} */
           const yResult = {
             status: 'ready',
             language: nativeRes.language || 'zh',
@@ -1137,6 +1398,7 @@
                 const cues = tabRes.state.cues;
                 const plainText = cues.map((c) => c.content).join(' ');
                 const markdown = formatCuesToMarkdown(item.title, item.author, ytUrl, cues);
+                /** @type {import('../types/bse').TrackedItemSubtitle} */
                 const tabResult = {
                   status: 'ready',
                   language: tabRes.state.track?.lan || 'zh',
@@ -1219,6 +1481,8 @@
     return sections.join('\n');
   }
 
+  const TRACKER_CHECK_CONCURRENCY = 3;
+  const TRACKER_CHECK_SPACING_MS = 120;
   let checkAllUpdatesPromise = null;
 
   async function runCheckAllUpdates() {
@@ -1235,24 +1499,40 @@
 
     let hadNetworkSuccess = false;
     const updatedSubs = [];
+    let nextIndex = 0;
 
-    for (const sub of list) {
-      try {
-        const { checked, updated, newItems } = await checkSubscriptionUpdates(sub, { persist: false });
-        if (!checked) continue;
-        hadNetworkSuccess = true;
-        if (updated) {
-          updatedSubs.push({
-            id: sub.id,
-            title: sub.title,
-            newItemCount: newItems.length
-          });
+    // A small worker pool keeps large subscription sets responsive without
+    // turning one alarm tick into a request burst against the same platform.
+    // The in-flight task is still globally deduplicated by checkAllUpdates().
+    async function worker() {
+      while (true) {
+        const currentIndex = nextIndex++;
+        if (currentIndex >= list.length) return;
+        const sub = list[currentIndex];
+        try {
+          const { checked, updated, newItems } = await checkSubscriptionUpdates(sub, { persist: false });
+          if (checked) {
+            hadNetworkSuccess = true;
+            if (updated) {
+              updatedSubs.push({
+                index: currentIndex,
+                id: sub.id,
+                title: sub.title,
+                newItemCount: newItems.length
+              });
+            }
+          }
+        } catch {
+          // Individual failure doesn't break the full loop.
         }
-      } catch {
-        // Individual failure doesn't break the full loop
+        if (nextIndex < list.length) await BSE.Utils.delay(TRACKER_CHECK_SPACING_MS);
       }
-      await BSE.Utils.delay(200); // Gentle spacing between checks
     }
+
+    const workerCount = Math.min(TRACKER_CHECK_CONCURRENCY, list.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    updatedSubs.sort((a, b) => a.index - b.index);
+    updatedSubs.forEach((entry) => { delete entry.index; });
 
     if (hadNetworkSuccess) {
       await resetCheckBackoff();
@@ -1368,6 +1648,10 @@
     renameSubscription,
     markAsRead,
     markAllAsRead,
+    getUnreadItems,
+    getTrackedItemMediaKey,
+    getCachedSubtitleForItem,
+    getCachedSubtitlesForItems,
     getSettings,
     saveSettings,
     getStorageStats,

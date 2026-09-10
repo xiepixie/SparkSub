@@ -2,7 +2,7 @@
   'use strict';
 
   /** @type {import('../types/bse').BSENamespace} */
-  const BSE = globalThis.BSE = globalThis.BSE || /** @type {any} */ ({});
+  const BSE = globalThis.BSE;
 
   /**
    * @param {{ drain?: () => Promise<void> | void }} [options]

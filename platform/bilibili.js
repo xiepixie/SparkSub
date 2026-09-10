@@ -3,9 +3,12 @@
 
   const BSE = globalThis.BSE;
   const { delay, fetchWithTimeout, getBvid, getBilibiliPage } = BSE.Utils;
+  let lastResolvedView = null;
+  let lastMediaContext = null;
 
+  /** @returns {Error & { code: string, hint: string }} */
   function createError(code, message, hint = '') {
-    const error = new Error(message);
+    const error = /** @type {Error & { code: string, hint: string }} */ (new Error(message));
     error.code = code;
     error.hint = hint;
     return error;
@@ -157,6 +160,49 @@
     return null;
   }
 
+  async function fetchMediaContext({ signal, diagnostic } = {}) {
+    if (!BSE.MediaContext) return null;
+    const bvid = getBvid();
+    if (!bvid) return null;
+    const page = getBilibiliPage(location.href);
+    let viewData = lastResolvedView?.bvid?.toLowerCase() === bvid.toLowerCase()
+      ? lastResolvedView.viewData
+      : extractDomVideoData(bvid);
+    if (!viewData) {
+      try {
+        const view = assertApiSuccess(await requestApiJson(
+          `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
+          { signal, diagnostic, stage: '视频语境' }
+        ), '视频语境接口');
+        viewData = view?.data;
+      } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        return null;
+      }
+    }
+    const pageInfo = viewData?.pages?.find((entry) => Number(entry?.page) === Number(page))
+      || viewData?.pages?.[Math.max(0, page - 1)]
+      || viewData?.pages?.[0]
+      || {};
+    const cid = pageInfo?.cid || viewData?.cid;
+    if (!cid) return null;
+    const mediaKey = `bili:${bvid}:cid${cid}`;
+    let tags = BSE.MediaContext.sameOwner(lastMediaContext, { mediaKey }) ? lastMediaContext.tags : [];
+    if (!tags?.length) {
+      try {
+        tags = await BSE.MediaContext.fetchBilibiliTags(bvid, { signal });
+      } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        diagnostic?.('视频语境', 'Bilibili 标签暂时不可用，继续使用标题与分类语境');
+        tags = [];
+      }
+    }
+    const context = BSE.MediaContext.fromBilibiliView({ bvid, cid, page, viewData, tags });
+    lastResolvedView = { bvid, viewData };
+    lastMediaContext = context;
+    return context;
+  }
+
   /**
    * 发现当前 B 站视频分P的所有可用字幕轨道
    * @param {{ signal?: AbortSignal, diagnostic?: (stage: string, message: string) => void }} [options]
@@ -177,6 +223,7 @@
       viewData = view?.data;
     }
     if (!viewData) throw createError('VIEW_DATA_EMPTY', '视频信息接口缺少数据', '接口数据结构可能已更新。');
+    lastResolvedView = { bvid, viewData };
 
     const validCids = new Set([
       String(viewData.cid || ''),
@@ -305,17 +352,32 @@
   /**
    * 解析 B 站当前视频所属的多 P / UGC 合集拓扑树结构
    * @param {string} [currentBvid]
-   * @param {{ signal?: AbortSignal, diagnostic?: (stage: string, message: string) => void }} [options]
+   * @param {{ signal?: AbortSignal, diagnostic?: (stage: string, message: string) => void, pageUrl?: string }} [options]
    * @returns {Promise<import('../types/bse').BilibiliTree>}
    */
-  async function fetchMediaTree(currentBvid = getBvid(), { signal, diagnostic } = {}) {
+  function canonicalPartLabel(page, part) {
+    const pageNumber = Math.max(1, Number(page) || 1);
+    const rawPart = String(part || '').trim();
+    const prefix = new RegExp(`^P\\s*0*${pageNumber}(?=\\s|$|[：:._-])\\s*[：:._-]?\\s*`, 'i');
+    const cleanPart = rawPart.replace(prefix, '').trim();
+    return cleanPart ? `P${pageNumber} ${cleanPart}` : `P${pageNumber}`;
+  }
+
+  async function fetchMediaTree(currentBvid = getBvid(), { signal, diagnostic, pageUrl } = {}) {
+    const mediaPageUrl = pageUrl || (typeof location !== 'undefined' ? location.href : '');
+    const normalizedBvid = typeof currentBvid === 'string' ? getBvid(currentBvid) : null;
+    if (!normalizedBvid) {
+      throw createError('BVID_NOT_FOUND', '未识别到有效的 B 站 BV 号', '批量导出只会向视频接口发送规范化后的 BV 号。');
+    }
+    currentBvid = normalizedBvid;
     // 实验特性：优先检测页面是否存在 BPX 播放器选集菜单
     const eplistDomItems = typeof document !== 'undefined'
-      ? Array.from(document.querySelectorAll('.bpx-player-ctrl-eplist-menu-item'))
+      ? Array.from(/** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.bpx-player-ctrl-eplist-menu-item')))
       : [];
     if (eplistDomItems.length > 1) {
       diagnostic?.('实验特性/BPX拓扑', `从播放器选集 DOM 捕获到 ${eplistDomItems.length} 个专题选集`);
       const pageTitle = (typeof document !== 'undefined' ? document.title.replace(/\s*[-_|]\s*(哔哩哔|bilibili).*$/i, '').trim() : '') || 'B站专题选集';
+      /** @type {import('../types/bse').BilibiliTree} */
       const tree = {
         kind: 'bpx_eplist',
         isCollection: true,
@@ -342,6 +404,7 @@
       eplistDomItems.forEach((el, idx) => {
         const cid = el.getAttribute('data-cid') || el.dataset.cid || '';
         const itemTitle = (el.textContent || '').trim() || `第${idx + 1}讲`;
+        /** @type {import('../types/bse').BilibiliItem} */
         const item = {
           kind: 'episode',
           globalIndex: idx + 1,
@@ -357,7 +420,7 @@
           aid: '',
           cid,
           title: itemTitle,
-          sourceUrl: location.href
+          sourceUrl: mediaPageUrl || `https://www.bilibili.com/video/${currentBvid}?p=${idx + 1}`
         };
         epObj.items.push(item);
         section.items.push(item);
@@ -378,9 +441,11 @@
     if (!viewData) throw createError('VIEW_DATA_EMPTY', '无法获取视频合集拓扑信息');
 
     const ugc = viewData.ugc_season;
-    const pageMatch = location.href.match(/[?&]p=(\d+)/);
-    const currentPage = pageMatch ? parseInt(pageMatch[1], 10) : 1;
+    const currentPage = BSE.Utils?.getBilibiliPage
+      ? BSE.Utils.getBilibiliPage(mediaPageUrl)
+      : (Number(new URL(mediaPageUrl || `https://www.bilibili.com/video/${currentBvid}`).searchParams.get('p')) || 1);
 
+    /** @type {import('../types/bse').BilibiliTree} */
     const tree = {
       kind: ugc?.sections?.length ? 'ugc_season' : ((viewData.pages || []).length > 1 ? 'multi_page' : 'single'),
       isCollection: !!(ugc?.sections?.length),
@@ -439,10 +504,10 @@
             const baseTitle = ep.title || ep.arc?.title || `第${epIdx + 1}集`;
             let itemTitle = baseTitle;
             if (epPages.length > 1) {
-              const partTitle = pObj.part ? pObj.part.trim() : `P${pObj.page || pIdx + 1}`;
-              itemTitle = `${baseTitle} · P${pObj.page || pIdx + 1} ${partTitle}`;
+              itemTitle = `${baseTitle} · ${canonicalPartLabel(pObj.page || pIdx + 1, pObj.part)}`;
             }
 
+            /** @type {import('../types/bse').BilibiliItem} */
             const item = {
               kind: 'episode',
               globalIndex,
@@ -483,6 +548,7 @@
       const section = { index: 1, title: sectionTitle, key: sectionKey, episodes: [epObj], items: [] };
       (viewData.pages || []).forEach((p, idx) => {
         globalIndex += 1;
+        /** @type {import('../types/bse').BilibiliItem} */
         const item = {
           kind: 'page',
           globalIndex,
@@ -497,7 +563,7 @@
           page: p.page || idx + 1,
           part: p.part || `P${idx + 1}`,
           duration: p.duration || 0,
-          title: `P${p.page || idx + 1} ${p.part || ''}`.trim(),
+          title: canonicalPartLabel(p.page || idx + 1, p.part),
           sourceUrl: `https://www.bilibili.com/video/${currentBvid}?p=${p.page || idx + 1}`
         };
         epObj.items.push(item);
@@ -509,6 +575,7 @@
       tree.totalEpisodesCount = 1;
       const sectionTitle = '单视频';
       const sectionKey = '01_单视频';
+      /** @type {import('../types/bse').BilibiliItem} */
       const item = {
         kind: 'single',
         globalIndex: 1,
@@ -565,45 +632,26 @@
     return manual[0] || ai[0] || pool[0] || null;
   }
 
-  function selectBatchItems(tree, config) {
-    const items = tree.items || [];
-    if (config.scope === 'current-page') {
-      const cur = items.find(item => item.bvid === tree.currentBvid && (tree.currentPage ? item.page === tree.currentPage : true)) || items[0];
-      return cur ? [cur] : items.slice(0, 1);
-    }
-    if (config.scope === 'current-video' || config.scope === 'video') {
-      const targetBvid = config.targetBvid || tree.currentBvid;
-      const same = items.filter(item => item.bvid === targetBvid);
-      return same.length ? same : items.slice(0, 1);
-    }
-    if (config.scope === 'section') {
-      const targetKey = config.sectionKey;
-      if (targetKey) {
-        const secItems = items.filter(item => item.sectionKey === targetKey);
-        if (secItems.length) return secItems;
-      }
-      const cur = items.find(item => item.bvid === tree.currentBvid) || items[0];
-      return cur ? items.filter(item => item.sectionKey === cur.sectionKey) : items;
-    }
-    if (config.scope === 'range') {
-      const start = Math.min(items.length, Math.max(1, Number(config.rangeStart) || 1));
-      const end = Math.min(items.length, Math.max(1, Number(config.rangeEnd) || items.length));
-      return items.filter(item => item.globalIndex >= Math.min(start, end) && item.globalIndex <= Math.max(start, end));
-    }
-    if (config.scope === 'custom' && config.customIndices) {
-      const set = config.customIndices instanceof Set ? config.customIndices : new Set(config.customIndices);
-      return items.filter(item => set.has(item.globalIndex));
-    }
-    return items.slice();
-  }
-
-  async function fetchItemSubtitle(item, preference, signal) {
+  async function fetchItemSubtitle(item, preference, signal, diagnostic) {
     const queryUrl = `https://api.bilibili.com/x/player/wbi/v2?bvid=${encodeURIComponent(item.bvid || '')}&cid=${encodeURIComponent(item.cid)}&aid=${encodeURIComponent(item.aid || '')}`;
     let resp;
     try {
-      resp = await requestApiJson(queryUrl, { signal, stage: `分P${item.page}播放器` });
-    } catch {
-      resp = await requestApiJson(`https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(item.bvid || '')}&cid=${encodeURIComponent(item.cid)}&aid=${encodeURIComponent(item.aid || '')}`, { signal, stage: `分P${item.page}兼容` });
+      resp = assertApiSuccess(await requestApiJson(queryUrl, {
+        signal,
+        diagnostic,
+        stage: `分P${item.page || item.globalIndex}播放器/WBI`
+      }), `分P${item.page || item.globalIndex}播放器/WBI`);
+    } catch (wbiError) {
+      if (wbiError?.name === 'AbortError') throw wbiError;
+      diagnostic?.('批量字幕通道', `WBI 播放器接口不可用，切换兼容接口 · ${wbiError.message}`);
+      resp = assertApiSuccess(await requestApiJson(
+        `https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(item.bvid || '')}&cid=${encodeURIComponent(item.cid)}&aid=${encodeURIComponent(item.aid || '')}`,
+        {
+          signal,
+          diagnostic,
+          stage: `分P${item.page || item.globalIndex}播放器/兼容`
+        }
+      ), `分P${item.page || item.globalIndex}播放器/兼容`);
     }
     const rawSubs = resp?.data?.subtitle?.subtitles;
     if (!rawSubs || !rawSubs.length) return { status: 'no_subtitle', item, reason: '未返回字幕轨道（UP主未上传且未生成AI字幕）' };
@@ -612,14 +660,19 @@
     if (!chosen) return { status: 'no_subtitle', item, reason: '未找到符合偏好的字幕语言' };
 
     const trackObj = {
-      id: chosen.id,
+      id: String(chosen.id || chosen.lan || 'batch-subtitle'),
+      lan: chosen.lan || 'unknown',
+      lanDoc: chosen.lan_doc || chosen.lan || '字幕',
+      subtitleUrl: chosen.subtitle_url,
+      isAuto: isAiSubtitleTrack(chosen),
+      isCC: !isAiSubtitleTrack(chosen),
+      platform: BSE.PLATFORM.BILIBILI,
       language: chosen.lan,
       label: chosen.lan_doc || chosen.lan,
-      subtitleUrl: chosen.subtitle_url,
       isAI: isAiSubtitleTrack(chosen)
     };
     try {
-      const cues = await loadTrack(trackObj, { signal });
+      const cues = await loadTrack(trackObj, { signal, diagnostic });
       if (!cues || !cues.length) return { status: 'no_subtitle', item, track: trackObj, reason: '字幕内容为空' };
       return { status: 'success', item, track: trackObj, body: cues };
     } catch (trackErr) {
@@ -638,7 +691,7 @@
    */
   async function runBatchExport(tree, config, onProgress, controlTask = {}, options = {}) {
     const diagnostic = options.diagnostic || controlTask.diagnostic;
-    const selectedItems = selectBatchItems(tree, config);
+    const selectedItems = BSE.BatchExport.selectItems(tree, config);
     if (!selectedItems.length) throw createError('NO_ITEMS', '当前范围没有可导出的条目');
 
     diagnostic?.('批量导出', `启动导出任务 · 范围: ${config.scope} · 选中 ${selectedItems.length} 个分P · 输出: ${config.outputMode}`);
@@ -674,7 +727,7 @@
         for (let attempt = 0; attempt < 2; attempt++) {
           if (controlTask.cancelled || controller.signal.aborted) return;
           try {
-            res = await fetchItemSubtitle(item, config.preference || 'manual-first', controller.signal);
+            res = await fetchItemSubtitle(item, config.preference || 'manual-first', controller.signal, diagnostic);
             if (res.status === 'success' || res.status === 'no_subtitle') {
               break;
             }
@@ -704,62 +757,26 @@
     await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
 
     if (controlTask.cancelled) {
+      controlTask.running = false;
       report(null, 'cancelled');
       diagnostic?.('批量导出', '用户中断了批量导出任务');
       return { selectedItems, results, stats, cancelled: true };
     }
 
     report(null, 'building');
-    const manifest = BSE.Formatters.buildBatchManifest(tree, selectedItems, results, stats, config);
-
-    if (config.outputMode === 'merged-md') {
-      const text = BSE.Formatters.toMergedMarkdown(tree, results, stats, { withTimestamp: config.withTimestamp });
-      const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
-      BSE.Utils.downloadBlob(blob, `${tree.title}_合集字幕.md`);
-      diagnostic?.('批量完成', `已合并生成 Markdown 并下载 · 成功 ${stats.success} · 无字幕 ${stats.noSub} · 失败 ${stats.failed}`);
-    } else {
-      const JSZipClass = globalThis.JSZip;
-      if (!JSZipClass) throw createError('NO_ZIP', 'JSZip 模块未加载');
-      const zip = new JSZipClass();
-      const hasMultipleSections = (tree.sections || []).length > 1;
-
-      for (const res of results) {
-        if (!res) continue;
-        const targetContainer = hasMultipleSections
-          ? zip.folder(BSE.Utils.sanitizeFilename(res.item.sectionTitle || res.item.sectionKey || '全集'))
-          : zip;
-        const baseName = `${String(res.item.globalIndex || 1).padStart(3, '0')}_${BSE.Utils.sanitizeFilename((res.item.title || '').replace(/^\s*\d+\s*[.、:_-]\s*/, '').trim() || '未命名')}`;
-
-        if (res.status === 'success') {
-          const content = BSE.Formatters.format(config.format || 'srt', res.body, {
-            title: res.item.title,
-            url: res.item.sourceUrl,
-            platform: 'B站',
-            language: res.track?.label || ''
-          }, { withTimestamp: config.withTimestamp });
-          targetContainer.file(`${baseName}.${config.format || 'srt'}`, content);
-        } else if (res.status === 'no_subtitle') {
-          targetContainer.file(`${baseName} (无字幕).txt`, `标题：${res.item.title}\n分P：${res.item.page}\nBV号：${res.item.bvid}\nCID：${res.item.cid}\n视频链接：${res.item.sourceUrl}\n状态：本集未检测到可用字幕轨道（UP主未上传且未生成AI字幕）\n`);
-        } else if (res.status === 'failed') {
-          targetContainer.file(`${baseName} (下载失败).error.txt`, `标题：${res.item.title}\n分P：${res.item.page}\nBV号：${res.item.bvid}\nCID：${res.item.cid}\n视频链接：${res.item.sourceUrl}\n状态：字幕提取失败\n原因：${res.reason || '网络或接口异常'}\n`);
-        }
+    const output = await BSE.BatchExport.createOutput(tree, selectedItems, results, stats, config, {
+      onPackProgress: (percent) => {
+        onProgress?.({ ...stats, packPercent: percent }, null, 'packing', controlTask);
       }
+    });
+    const outputLabel = output.mode === 'copy-text'
+      ? `复制用长文本 · ${output.text.length} 字符`
+      : (output.mode === 'merged-file' ? `单一${config.format === 'txt' ? '纯文本' : ' Markdown'}长文件` : 'ZIP 压缩包');
+    diagnostic?.('批量完成', `已生成${outputLabel} · 成功 ${stats.success} · 无字幕 ${stats.noSub} · 失败 ${stats.failed}`);
 
-      // Automatically generate a companion README markdown with table of contents
-      const readmeMd = BSE.Formatters.toMergedMarkdown(tree, results, stats, { withTimestamp: config.withTimestamp });
-      zip.file('_README.md', readmeMd);
-      zip.file('manifest.json', JSON.stringify(manifest, null, 2));
-
-      report(null, 'packing');
-      const blob = await zip.generateAsync({ type: 'blob' }, (meta) => {
-        onProgress?.({ ...stats, packPercent: meta.percent }, null, 'packing', controlTask);
-      });
-      BSE.Utils.downloadBlob(blob, `${tree.title}_字幕.zip`);
-      diagnostic?.('批量完成', `ZIP 压缩包打包完成并触发下载 · 成功 ${stats.success} · 无字幕 ${stats.noSub} · 失败 ${stats.failed}`);
-    }
-
+    controlTask.running = false;
     report(null, 'done');
-    return { selectedItems, results, stats };
+    return { selectedItems, results, stats, output };
   }
 
   /**
@@ -927,6 +944,7 @@
     fetchMediaTree,
     runBatchExport,
     fetchAudioStream,
+    fetchMediaContext,
     downloadAudioFile,
     chooseBilibiliSubtitle
   });

@@ -16,7 +16,7 @@
         <h1 id="video-title">等待视频…</h1>
       </div>
       <div class="header-actions">
-        <button class="icon-btn settings-toggle" id="settings-toggle" title="偏好设置 (主题/语言)">
+        <button class="icon-btn settings-toggle" id="settings-toggle" title="偏好设置" aria-controls="settings-drawer" aria-expanded="false">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
         <button class="icon-btn refresh" id="refresh-button" title="重新解析字幕">
@@ -26,67 +26,82 @@
     </header>
 
     <!-- Settings Drawer (Global Extension Preferences) -->
-    <section class="settings-drawer" id="settings-drawer" hidden>
+    <section class="settings-drawer" id="settings-drawer" role="region" aria-labelledby="settings-title" hidden>
       <div class="drawer-header">
-        <span class="drawer-title" id="settings-title">⚙️ 偏好设置</span>
+        <span class="drawer-title" id="settings-title">偏好设置</span>
       </div>
-      <div class="drawer-grid">
-        <div class="drawer-card">
-          <span class="drawer-card-label" id="label-theme">主题</span>
-          <select id="theme-select" name="theme-select" class="drawer-select" aria-label="主题模式">
-            <option value="auto">🌓 自动</option>
-            <option value="dark">🌑 暗曜</option>
-            <option value="light">☀️ 浅色</option>
-            <option value="bilibili">哔哩碧蓝</option>
-            <option value="youtube">油管猩红</option>
-          </select>
-        </div>
-        <div class="drawer-card">
-          <span class="drawer-card-label" id="label-lang">语言</span>
-          <select id="lang-select" name="lang-select" class="drawer-select" aria-label="界面语言">
-            <option value="auto">🌐 自动</option>
-            <option value="zh-CN">简体中文</option>
-            <option value="zh-TW">繁體中文</option>
-            <option value="en">English</option>
-          </select>
-        </div>
-        <div class="drawer-card">
-          <span class="drawer-card-label" id="label-pref">字幕偏好</span>
-          <select id="pref-select" name="pref-select" class="drawer-select" aria-label="默认字幕偏好">
-            <option value="manual-first">中文人工优先，AI兜底</option>
-            <option value="manual-only">仅人工中文</option>
-            <option value="ai-first">AI 优先</option>
-          </select>
-        </div>
-        <div class="drawer-card">
-          <span class="drawer-card-label" id="label-size">正文字号</span>
-          <select id="size-select" name="size-select" class="drawer-select" aria-label="正文字号">
-            <option value="13">小 (13px)</option>
-            <option value="14.5" selected>中 (14.5px)</option>
-            <option value="16.5">大 (16.5px)</option>
-          </select>
-        </div>
-        <div class="drawer-card">
-          <span class="drawer-card-label" id="label-interval">巡检周期</span>
-          <select id="tracker-interval-select" class="drawer-select" aria-label="订阅巡检周期">
-            <option value="30">每 30 分钟</option>
-            <option value="60" selected>每 1 小时 (推荐)</option>
-            <option value="180">每 3 小时</option>
-            <option value="0">仅手动刷新</option>
-          </select>
-        </div>
-        <div class="drawer-card">
-          <span class="drawer-card-label" id="label-notify">桌面通知</span>
-          <select id="tracker-notify-select" class="drawer-select" aria-label="更新桌面通知">
-            <option value="true" selected>🔔 开启桌面通知</option>
-            <option value="false">🔕 仅角标红点</option>
-          </select>
+
+      <div class="drawer-section">
+        <div class="drawer-section-title" id="settings-general-title">通用</div>
+        <div class="drawer-grid">
+          <div class="drawer-card">
+            <span class="drawer-card-label" id="label-theme">主题</span>
+            <select id="theme-select" name="theme-select" class="drawer-select" aria-label="主题">
+              <option value="auto">自动</option>
+              <option value="dark">暗曜</option>
+              <option value="light">浅色</option>
+              <option value="bilibili">哔哩碧蓝</option>
+              <option value="youtube">油管猩红</option>
+            </select>
+          </div>
+          <div class="drawer-card">
+            <span class="drawer-card-label" id="label-lang">语言</span>
+            <select id="lang-select" name="lang-select" class="drawer-select" aria-label="语言">
+              <option value="auto">自动</option>
+              <option value="zh-CN">简体中文</option>
+              <option value="zh-TW">繁體中文</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+          <div class="drawer-card">
+            <span class="drawer-card-label" id="label-pref">默认字幕策略</span>
+            <select id="pref-select" name="pref-select" class="drawer-select" aria-label="默认字幕策略">
+              <option value="manual-first">人工字幕优先，AI 兜底</option>
+              <option value="manual-only">仅人工字幕</option>
+              <option value="ai-first">AI 字幕优先</option>
+            </select>
+          </div>
+          <div class="drawer-card">
+            <span class="drawer-card-label" id="label-size">正文字号</span>
+            <select id="size-select" name="size-select" class="drawer-select" aria-label="正文字号">
+              <option value="13">小 (13px)</option>
+              <option value="14.5" selected>中 (14.5px)</option>
+              <option value="16.5">大 (16.5px)</option>
+            </select>
+          </div>
         </div>
       </div>
-      <div class="drawer-footer-actions">
-        <button class="drawer-action-btn" id="tracker-export-btn" title="导出所有订阅为 JSON 备份">📤 导出订阅配置</button>
-        <button class="drawer-action-btn" id="tracker-import-btn" title="从 JSON 导入订阅">📥 导入订阅配置</button>
-        <input type="file" id="tracker-import-file" accept=".json" hidden>
+
+      <div class="drawer-section">
+        <div class="drawer-section-title" id="settings-tracker-title">追踪更新</div>
+        <div class="drawer-grid">
+          <div class="drawer-card">
+            <span class="drawer-card-label" id="label-interval">巡检周期</span>
+            <select id="tracker-interval-select" class="drawer-select" aria-label="巡检周期">
+              <option value="30">每 30 分钟</option>
+              <option value="60" selected>每 1 小时 (推荐)</option>
+              <option value="180">每 3 小时</option>
+              <option value="0">仅手动刷新</option>
+            </select>
+          </div>
+          <div class="drawer-card">
+            <span class="drawer-card-label" id="label-notify">更新提醒</span>
+            <select id="tracker-notify-select" class="drawer-select" aria-label="更新提醒">
+              <option value="desktop" selected>桌面通知与角标</option>
+              <option value="badge">仅角标</option>
+              <option value="off">关闭提醒</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="drawer-section drawer-data-section">
+        <div class="drawer-section-title" id="settings-data-title">订阅数据</div>
+        <div class="drawer-footer-actions">
+          <button class="drawer-action-btn" id="tracker-export-btn" title="导出所有订阅为 JSON 备份">导出订阅配置</button>
+          <button class="drawer-action-btn" id="tracker-import-btn" title="从 JSON 导入订阅">导入订阅配置</button>
+          <input type="file" id="tracker-import-file" accept=".json" hidden>
+        </div>
       </div>
     </section>
 
@@ -121,7 +136,7 @@
             <option value="txt">TXT</option>
             <option value="srt">SRT</option>
             <option value="md">MD</option>
-            <option value="audio">🎵 音频直链</option>
+            <option value="audio">音频直链</option>
           </select>
           <button id="download-button" class="btn-action btn-download" title="下载字幕文件" disabled>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -155,91 +170,101 @@
     <section class="ai-section" id="ai-section" hidden>
       <div class="ai-header">
         <div class="ai-header-left">
-          <span class="ai-title" id="ai-title">🤖 课程图文分解与学习助手</span>
-          <div class="ai-model-badge" id="ai-model-badge" title="大模型连接状态">
+          <span class="ai-title" id="ai-title">AI 学习产物</span>
+          <div class="ai-model-badge" id="ai-model-badge" title="当前生成模型与连接状态，点击打开配置">
             <span class="badge-dot" id="ai-status-dot"></span>
-            <span class="ai-model-name" id="ai-model-name">Gemini 3.7 Flash Thinking</span>
+            <span class="ai-model-name" id="ai-model-name">正在读取 AI 配置…</span>
           </div>
         </div>
-        <button class="ai-btn-icon" id="ai-settings-toggle" title="配置 AI 端点与 API Key">⚙️</button>
+        <button class="ai-btn-icon" id="ai-settings-toggle" title="配置 AI 端点与 API Key" aria-label="配置 AI 端点与 API Key"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
       </div>
 
       <!-- AI Settings Panel Drawer -->
       <div class="ai-settings-drawer" id="ai-settings-drawer" hidden>
-        <div class="ai-settings-title">⚙️ 大模型端点与凭证配置</div>
+        <div class="ai-settings-title">大模型端点与凭证配置</div>
         <div class="ai-field-group">
-          <label class="ai-field-label" for="ai-input-endpoint">API 端点 (Base URL)</label>
-          <input type="text" id="ai-input-endpoint" class="ai-text-input" placeholder="http://localhost:8083/v1" />
+          <label class="ai-field-label" for="ai-input-endpoint">本地 AI 网关 (Base URL)</label>
+          <input type="url" id="ai-input-endpoint" class="ai-text-input" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://localhost:8083/v1" />
+          <div class="ai-field-hint">当前扩展网络权限只直连 <code>http://localhost</code> / <code>http://127.0.0.1</code>。云端模型请由本地 OpenAI-compatible 网关转发，避免扩展申请全网访问权限。</div>
         </div>
         <div class="ai-field-group">
           <label class="ai-field-label" for="ai-input-apikey">API Key (令牌)</label>
           <input type="password" id="ai-input-apikey" class="ai-text-input" placeholder="sk-..." />
         </div>
         <div class="ai-field-group">
-          <label class="ai-field-label" for="ai-input-model">模型名称 (Model)</label>
-          <input type="text" id="ai-input-model" class="ai-text-input" placeholder="gemini-3.7-flash-thinking" />
+          <label class="ai-field-label" for="ai-input-model">生成模型 (Model)</label>
+          <input type="text" id="ai-input-model" class="ai-text-input" list="ai-model-options" autocomplete="off" spellcheck="false" placeholder="gemini-3.7-flash-thinking" />
+          <datalist id="ai-model-options"></datalist>
+          <div class="ai-field-hint">服务探测后会补全可见模型；生成时始终使用这里填写的模型，不会自动切换。测试会真实发送一条极小文本请求；图文讲义还要求该模型支持图片输入。</div>
         </div>
         <div class="ai-settings-actions">
-          <button class="btn-ai-action-secondary" id="ai-btn-test-conn">测试连接</button>
+          <button class="btn-ai-action-secondary" id="ai-btn-test-conn">测试当前模型</button>
           <button class="btn-ai-action-primary" id="ai-btn-save-settings">保存配置</button>
         </div>
-        <div class="ai-test-status" id="ai-test-status"></div>
+        <div class="ai-test-status" id="ai-test-status" role="status" aria-live="polite"></div>
       </div>
 
       <!-- Mode Selector Tabs -->
-      <div class="ai-modes-bar">
-        <button class="ai-mode-pill active" data-mode="course_notes">🎓 课程图文分解</button>
-        <button class="ai-mode-pill" data-mode="summary">📝 核心主旨脉络</button>
-        <button class="ai-mode-pill" data-mode="deep_qa">💡 难点辨析与自测</button>
-        <button class="ai-mode-pill" data-mode="prompts">📋 提示词库</button>
+      <div class="ai-modes-shell">
+        <div class="ai-modes-bar" role="tablist" aria-label="AI 学习产物">
+          <button class="ai-mode-pill active" data-mode="course_notes" role="tab" aria-selected="true" tabindex="0" title="适合系统学习与长期留存；会规划并筛选真正有信息增量的画面">学习讲义 <span class="ai-mode-kind">图文 · 深度</span></button>
+          <button class="ai-mode-pill" data-mode="summary" role="tab" aria-selected="false" tabindex="-1" title="适合看完后快速回忆；只处理字幕文本，不截图">快速回顾 <span class="ai-mode-kind">文本 · 快速</span></button>
+          <button class="ai-mode-pill" data-mode="deep_qa" role="tab" aria-selected="false" tabindex="-1" title="适合复习、自测与查漏补缺；题目和参考答案分开组织">复盘自测 <span class="ai-mode-kind">文本 · 练习</span></button>
+        </div>
+        <button class="ai-prompts-toggle" id="ai-prompts-toggle" type="button" aria-expanded="false" title="展开可复制到 ChatGPT、Claude 等外部 AI 的提示词模板">外部 AI 模板</button>
       </div>
 
       <!-- Action Toolbar -->
       <div class="ai-action-toolbar" id="ai-action-toolbar">
         <button class="btn-ai-run" id="ai-btn-generate">
-          <span class="btn-icon">✨</span>
-          <span id="ai-btn-generate-text">生成图文课程讲义</span>
+          <span id="ai-btn-generate-text">生成学习讲义</span>
         </button>
         <button class="btn-ai-tool" id="ai-btn-snip-frame" title="截取当前播放位置的高清原画并加入笔记">
-          <span>📸 截当前帧</span>
+          <span>截当前帧</span>
         </button>
         <button class="btn-ai-tool" id="ai-btn-copy-note" title="复制生成的 Markdown 笔记" disabled>
-          <span>📋 复制笔记</span>
+          <span>复制当前产物</span>
         </button>
         <button class="btn-ai-tool" id="ai-btn-export-zip" title="打包导出为包含图片的 Markdown 压缩包 (Obsidian/Notion 直读)" disabled>
-          <span>📦 导出图文包</span>
+          <span>导出图文包</span>
         </button>
       </div>
 
       <!-- External Web AI Copilot Toolbar -->
       <div class="ai-external-toolbar" id="ai-external-toolbar">
-        <button class="btn-ai-subtool" id="ai-btn-copy-plan-prompt" title="【阶段一：视觉规划】复制大纲规划提示词与字幕，发给网页版 AI 获取截图时间点 JSON">
-          <span class="subtool-icon">📋</span>
-          <span>1. 复制规划词</span>
-        </button>
-        <button class="btn-ai-subtool" id="ai-btn-copy-synth-prompt" title="【阶段二：讲义合成】复制图文合成提示词（已自动打包已截取的画面清单与标签），发给网页版 AI 编写完整讲义">
-          <span class="subtool-icon">📝</span>
-          <span>2. 复制讲义词</span>
-        </button>
-        <button class="btn-ai-subtool" id="ai-btn-open-import-modal" title="【回流】导入外部 AI 返回的规划 JSON（自动定向截取原画）或最终 Markdown 讲义（直接图文渲染）">
-          <span class="subtool-icon">📥</span>
-          <span>3. 导入结果</span>
-        </button>
+        <div class="ai-external-flow-head">
+          <div>
+            <strong class="ai-external-flow-title">外部 AI 协作</strong>
+            <span class="ai-external-flow-desc">规划 → 导入取帧 → 投递画面 → 合成 → 再导入</span>
+          </div>
+          <span class="ai-external-flow-badge">可选</span>
+        </div>
+        <div class="ai-external-steps">
+          <button class="btn-ai-subtool" id="ai-btn-copy-plan-prompt" title="复制带时间戳字幕与规划提示词，发给网页版 AI 获取播放器取样窗口 JSON">
+            <span class="subtool-step">规划</span>
+            <span>复制规划词</span>
+          </button>
+          <button class="btn-ai-subtool" id="ai-btn-open-import-modal" title="导入外部 AI 返回的规划 JSON 以自动取帧；完成合成后也从这里导入最终 Markdown 报告">
+            <span class="subtool-step">回流</span>
+            <span>导入 AI 返回</span>
+          </button>
+          <button class="btn-ai-subtool" id="ai-btn-copy-synth-prompt" title="图片投递后复制报告合成提示词；提示词与最近一次“复制精选拼图”或“原图打包”的图片集合保持一致">
+            <span class="subtool-step">合成</span>
+            <span>复制报告词</span>
+          </button>
+        </div>
       </div>
 
       <!-- Manual Snipped Frames Tray (Pre-generation) -->
       <div class="ai-manual-tray" id="ai-manual-tray" hidden>
         <div class="ai-manual-tray-header">
-          <span class="ai-manual-tray-title">🖼️ 已捕获画面 (<span id="ai-manual-tray-count">0</span>)</span>
+          <span class="ai-manual-tray-title">已捕获画面 (<span id="ai-manual-tray-count">0</span>)</span>
           <div class="ai-manual-tray-actions">
-            <div class="btn-tray-drag" id="btn-drag-all-tray" draggable="true" title="按住直接拖入左侧网页版 ChatGPT / Claude / DeepSeek 对话框，一次性无损上传全部独立原画！">
-              <span>🖐️ 拖拽全部</span>
-            </div>
-            <button class="btn-tray-action" id="btn-copy-stitched-tray" title="将所有截图自动拼成一张带时间戳的高清板书长图，直接复制到剪贴板（去网页 AI 直接按 Ctrl+V 粘贴即可）">
-              <span>🖼️ 复制长图</span>
+            <button class="btn-tray-action" id="btn-copy-stitched-tray" title="从当前截图中精选最多 4 张，生成受控尺寸的高清联系表并复制到剪贴板；避免超长图被视觉模型整体缩小">
+              <span>复制精选拼图</span>
             </button>
-            <button class="btn-tray-action" id="btn-download-tray-images" title="将所有截图打包为 ZIP 压缩包下载到本地，可直接批量拖入网页版 AI">
-              <span>📦 打包下载</span>
+            <button class="btn-tray-action" id="btn-download-tray-images" title="将所有截图按原图打包为 ZIP；需要完整画质或超过 4 张时使用此方式">
+              <span>原图打包</span>
             </button>
             <button class="btn-clear-manual-tray" id="btn-clear-manual-tray" title="清空所有预选截图">清空</button>
           </div>
@@ -250,15 +275,17 @@
       <!-- Live Generation Status / Progress -->
       <div class="ai-progress-box" id="ai-progress-box" hidden>
         <div class="ai-spinner"></div>
-        <span class="ai-progress-text" id="ai-progress-text">正在分析视频时间轴与关键板书…</span>
+        <span class="ai-progress-text" id="ai-progress-text">正在分析视频时间轴与关键画面…</span>
       </div>
 
       <!-- Rendered Note Container -->
       <div class="ai-note-result-container" id="ai-note-result-container">
         <div class="ai-note-placeholder" id="ai-note-placeholder">
-          <div class="placeholder-icon">💡</div>
-          <div class="placeholder-title">点击上方「生成图文课程讲义」</div>
-          <p class="placeholder-desc">AI 将自动解构视频知识脉络，提取核心公式、定理推导与避坑边界，并在关键节点自动截取原画板书，生成图文并茂的交互式讲义。</p>
+          <div class="placeholder-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M8.5 14.5A6 6 0 1 1 15.5 14.5C14.5 15.2 14 16 14 17h-4c0-1-.5-1.8-1.5-2.5z"/></svg></div>
+          <div class="placeholder-body">
+            <div class="placeholder-title" id="ai-note-placeholder-title">生成一份可长期留存的学习讲义</div>
+            <p class="placeholder-desc" id="ai-note-placeholder-desc">先梳理字幕主线，再按需要规划和筛选关键画面，适合系统学习、课程复习和归档。</p>
+          </div>
         </div>
         <div class="ai-note-content" id="ai-note-content" hidden></div>
       </div>
@@ -302,7 +329,7 @@
     <section class="tracker-section" id="tracker-section" hidden>
       <div class="tracker-quick-bar" id="tracker-quick-bar">
         <div class="tracker-quick-media">
-          <div class="tracker-quick-avatar" id="tracker-quick-avatar" aria-hidden="true">📺</div>
+          <div class="tracker-quick-avatar" id="tracker-quick-avatar" aria-hidden="true">B</div>
           <div class="tracker-quick-info">
             <div class="tracker-quick-title" id="tracker-current-source" title="等待视频连接…">等待视频连接…</div>
             <div class="tracker-quick-meta">
@@ -359,7 +386,6 @@
       </div>
 
       <div class="tracker-empty" id="tracker-empty">
-        <div class="tracker-empty-icon">📭</div>
         <p class="tracker-empty-title" id="tracker-empty-title">暂无关注的 UP 主或课程合集</p>
         <p class="tracker-empty-desc" id="tracker-empty-desc">在任意视频播放页，点击上方的「关注 UP 主」或「订阅本合集」即可开启自动更新追踪与新集提醒！</p>
       </div>
@@ -417,9 +443,8 @@
       </div>
 
       <div class="queue-empty" id="queue-empty">
-        <div class="queue-empty-icon">📥</div>
         <p class="queue-empty-title" id="queue-empty-title">转录队列为空</p>
-        <p class="queue-empty-desc" id="queue-empty-desc">在 B站 / YouTube 推荐页悬浮点击「📥 转文字」，或点击上方「批量添加 URL」，即可在后台静默提取字幕与转文字，无需打开视频播放！</p>
+        <p class="queue-empty-desc" id="queue-empty-desc">在 B站 / YouTube 推荐页悬浮点击「转文字」，或点击上方「批量添加 URL」，即可在后台静默提取字幕与转文字，无需打开视频播放。</p>
       </div>
     </section>
 
@@ -431,7 +456,7 @@
         </div>
         <p id="empty-message">打开 YouTube 或哔哩哔哩视频后，字幕将自动同步出现在这里。</p>
         <div class="empty-actions" id="empty-actions" hidden>
-          <button class="empty-btn empty-btn-transcribe" id="empty-transcribe-btn" type="button" title="优先尝试从网络获取官方/AI字幕，无字幕时自动进行离线转录">
+          <button class="empty-btn empty-btn-transcribe" id="empty-transcribe-btn" type="button" title="直接使用 SparkScribe 对当前视频进行本地离线转录，不复用平台字幕缓存">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
             <span>获取字幕 / 转文字</span>
           </button>
@@ -475,13 +500,12 @@
       <div class="batch-header">
         <div class="batch-header-info">
           <div class="batch-title-row">
-            <span class="batch-icon">📦</span>
             <strong id="batch-modal-title">批量导出字幕</strong>
             <span class="batch-type-pill" id="batch-type-pill">合集</span>
           </div>
           <span class="batch-selected-summary" id="batch-selected-summary">共 0 个分P</span>
         </div>
-        <button class="batch-close-btn" id="batch-close-btn" title="关闭">✕</button>
+        <button class="batch-close-btn" id="batch-close-btn" title="关闭">×</button>
       </div>
       <div class="batch-body">
         <!-- Card 1: Main Hierarchy Tree Card with Granular Selection -->
@@ -489,7 +513,7 @@
           <div class="batch-card-header">
             <div class="batch-tree-header-top">
               <div class="batch-tree-title-group">
-                <span class="batch-card-title">📂 分P与合集架构</span>
+                <span class="batch-card-title">分P与合集架构</span>
               </div>
               <span class="batch-tree-selected-summary" id="batch-tree-selected-summary">已选 0 集</span>
             </div>
@@ -514,7 +538,6 @@
           </div>
           <div class="batch-quick-range-bar">
             <div class="batch-quick-range-badge">
-              <span>⚡️</span>
               <span class="batch-quick-range-label">区间速选</span>
             </div>
             <div class="batch-quick-range-inputs">
@@ -532,23 +555,24 @@
         <!-- Card 2: Output & Format Settings (Focused and Streamlined) -->
         <div class="batch-card" id="batch-settings-card">
           <div class="batch-card-header">
-            <span class="batch-card-title">⚙️ 输出与格式设置</span>
+            <span class="batch-card-title">输出与格式设置</span>
           </div>
           <div class="batch-settings-stacked">
             <div class="batch-settings-row">
-              <span class="batch-setting-title">打包输出形式</span>
-              <div class="batch-radio-group">
-                <label class="batch-radio-pill"><input type="radio" name="batch-output" value="zip" checked> <span>ZIP 压缩包（每集独立文件 · 推荐）</span></label>
-                <label class="batch-radio-pill"><input type="radio" name="batch-output" value="merged-md"> <span>合并为一个 Markdown（带目录与总览）</span></label>
+              <span class="batch-setting-title">完成后怎么用</span>
+              <div class="batch-radio-group batch-output-group">
+                <label class="batch-radio-pill batch-output-pill"><input type="radio" name="batch-output" value="copy-text" checked> <span><strong>复制全文</strong><small>把所选视频按顺序合并后直接复制，不产生文件</small></span></label>
+                <label class="batch-radio-pill batch-output-pill"><input type="radio" name="batch-output" value="merged-file"> <span><strong>合并为一个长文件</strong><small>下载一份 Markdown 或 TXT，适合归档、阅读与交给 AI</small></span></label>
+                <label class="batch-radio-pill batch-output-pill"><input type="radio" name="batch-output" value="zip"> <span><strong>每集独立打包 ZIP</strong><small>保留每个视频/分P的独立文件，适合播放器、剪辑与批量归档</small></span></label>
               </div>
             </div>
 
-            <div class="batch-settings-row" id="batch-format-row">
-              <span class="batch-setting-title">ZIP 内单文件格式</span>
+            <div class="batch-settings-row" id="batch-format-row" hidden>
+              <span class="batch-setting-title" id="batch-format-label">合并文件格式</span>
               <div class="batch-radio-group">
-                <label class="batch-radio-pill"><input type="radio" name="batch-format" value="srt" checked> <span>SRT 字幕（播放器/剪辑外挂）</span></label>
-                <label class="batch-radio-pill"><input type="radio" name="batch-format" value="md"> <span>Markdown 笔记（结构化文档）</span></label>
-                <label class="batch-radio-pill"><input type="radio" name="batch-format" value="txt"> <span>TXT 纯文本（纯文本讲稿）</span></label>
+                <label class="batch-radio-pill batch-format-srt" hidden><input type="radio" name="batch-format" value="srt"> <span>SRT 字幕（播放器/剪辑外挂）</span></label>
+                <label class="batch-radio-pill"><input type="radio" name="batch-format" value="md" checked> <span>Markdown（保留标题与来源结构）</span></label>
+                <label class="batch-radio-pill"><input type="radio" name="batch-format" value="txt"> <span>TXT（纯文本长文稿）</span></label>
               </div>
             </div>
 
@@ -602,10 +626,9 @@
     <div class="ai-import-modal-card">
       <div class="ai-import-modal-header">
         <div class="ai-import-modal-title">
-          <span class="modal-icon">📥</span>
           <strong>导入外部 AI 结果</strong>
         </div>
-        <button class="btn-modal-close" id="ai-btn-close-import-modal" title="关闭">✕</button>
+        <button class="btn-modal-close" id="ai-btn-close-import-modal" title="关闭">×</button>
       </div>
       <p class="ai-import-modal-desc">
         在此粘贴外部大模型（ChatGPT / DeepSeek / Claude / Kimi 等）返回的 <b>规划 JSON</b>（扩展将自动在视频中为您精准定向截取原画），或直接粘贴已写好的 <b>Markdown 讲义</b>。
@@ -630,10 +653,13 @@
   <script src="../core/queue-ui.js"></script>
   <script src="../core/parsers.js"></script>
   <script src="../core/media.js"></script>
+  <script src="../core/media-context.js"></script>
   <script src="../core/visual-state-detector.js"></script>
   <script src="../core/katex.min.js"></script>
   <script src="../core/formatters.js"></script>
+  <script src="../core/batch-export.js"></script>
   <script src="../core/asr-polisher.js"></script>
+  <script src="../core/ai-note-cache.js"></script>
   <script src="../platform/bilibili.js"></script>
   <script src="../platform/youtube.js"></script>
   <script src="../core/tracker.js"></script>

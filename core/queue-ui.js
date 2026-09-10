@@ -9,24 +9,17 @@
   const REQUIRED_I18N_KEYS = Object.freeze([
     'queue_source_language_label', 'queue_source_language_hint', 'queue_language_auto', 'queue_language_zh', 'queue_language_yue',
     'queue_capabilities_title', 'queue_capability_checking', 'queue_capability_refresh', 'queue_capability_ready', 'queue_capability_partial', 'queue_capability_not_installed', 'queue_capability_incompatible',
-    'queue_capability_ytdlp', 'queue_capability_parakeet', 'queue_capability_cohere', 'queue_capability_bilibili_note',
-    'queue_source_platform_bilibili', 'queue_source_platform_youtube', 'queue_engine_parakeet', 'queue_engine_cohere',
+    'queue_capability_local_asr', 'queue_capability_youtube_captions', 'queue_capability_remote_media', 'queue_capability_bilibili_note',
+    'queue_source_platform_bilibili', 'queue_source_platform_youtube', 'queue_engine_local_asr',
     'queue_error_retriable', 'queue_error_not_retriable', 'queue_error_safe_hint'
   ]);
-
-  function nativeEngineFor(item = {}) {
-    return ROUTING?.engineFor(item.sourceLanguage, item.platformLanguage || item.metaCache?.platformLanguage, item.platform === 'bilibili' ? 'remote' : 'youtube') || null;
-  }
 
   function sourceEngineLabel(item = {}) {
     const subtitle = item.subtitle || {};
     if (subtitle.source === 'platform') {
       return { key: item.platform === 'bilibili' ? 'queue_source_platform_bilibili' : 'queue_source_platform_youtube' };
     }
-    const engine = subtitle.engine === 'cohere' || subtitle.engine === 'parakeet'
-      ? subtitle.engine
-      : nativeEngineFor(item);
-    return { key: engine === 'cohere' ? 'queue_engine_cohere' : 'queue_engine_parakeet' };
+    return { key: 'queue_engine_local_asr' };
   }
 
   function safeText(value, fallback = '') {
@@ -45,17 +38,20 @@
     };
   }
 
-  function componentState(name, component = {}) {
+  function componentState(_name, component = {}) {
     const detail = safeText(component.detail, '');
     if (component.available) return { key: 'queue_capability_ready', detail };
-    if (name === 'cohere' && /k_cache_0|vocabulary/i.test(detail)) return { key: 'queue_capability_incompatible', detail };
     return { key: 'queue_capability_partial', detail };
   }
 
   function capabilityState(capabilities, error) {
     if (!capabilities) return { key: error?.code === 'NATIVE_HOST_NOT_INSTALLED' ? 'queue_capability_not_installed' : 'queue_capability_partial' };
-    const components = [capabilities.ytDLP, capabilities.models?.parakeet, capabilities.models?.cohere];
-    if (capabilities.hostReady && components.every((component) => component?.available)) return { key: 'queue_capability_ready' };
+    const features = capabilities.features || {};
+    const localASR = features.localASR?.available === true;
+    const hasMediaPath = features.youtubeCaptions?.available === true
+      || features.remoteMedia?.youtube === true
+      || features.remoteMedia?.bilibili === true;
+    if (localASR && hasMediaPath) return { key: 'queue_capability_ready' };
     return { key: 'queue_capability_partial' };
   }
 
@@ -111,11 +107,20 @@
     if (panel.tagName === 'DETAILS') {
       panel.open = state.key !== 'queue_capability_ready';
     }
-    const parts = capabilities ? [
-      ['queue_capability_ytdlp', capabilities.ytDLP],
-      ['queue_capability_parakeet', capabilities.models?.parakeet],
-      ['queue_capability_cohere', capabilities.models?.cohere]
-    ].map(([key, component]) => `${t(key)}: ${t(componentState(key.replace('queue_capability_', ''), component).key)}${safeText(component?.detail) ? ` — ${safeText(component.detail)}` : ''}`) : [t(state.key)];
+
+    const features = capabilities?.features;
+    const localLanguages = Array.isArray(features?.localASR?.languages)
+      ? features.localASR.languages.map((value) => safeText(value)).filter(Boolean).join(', ')
+      : '';
+    const remotePlatforms = [
+      features?.remoteMedia?.youtube === true ? 'YouTube' : '',
+      features?.remoteMedia?.bilibili === true ? 'Bilibili' : ''
+    ].filter(Boolean).join(', ');
+    const parts = features ? [
+      `${t('queue_capability_local_asr')}: ${t(componentState('localASR', features.localASR).key)}${localLanguages ? ` — ${localLanguages}` : ''}`,
+      `${t('queue_capability_youtube_captions')}: ${t(componentState('youtubeCaptions', features.youtubeCaptions).key)}`,
+      `${t('queue_capability_remote_media')}: ${remotePlatforms || t('queue_capability_partial')}`
+    ] : [t(state.key)];
     parts.push(t('queue_capability_bilibili_note'));
     detailsElement.textContent = parts.join('\n');
   }
@@ -128,7 +133,6 @@
   BSE.QueueUI = Object.freeze({
     SUPPORTED_SOURCE_LANGUAGES,
     requiredI18nKeys: () => [...REQUIRED_I18N_KEYS],
-    nativeEngineFor,
     sourceEngineLabel,
     safeFailurePresentation,
     componentState,

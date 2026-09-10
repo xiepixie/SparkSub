@@ -3,6 +3,52 @@
 
   const BSE = globalThis.BSE;
 
+  /**
+   * The panel template and its bindings are one contract. Fail fast if a required
+   * control disappears instead of letting a distant interaction crash later.
+   * @template {Element} T
+   * @param {ParentNode} root
+   * @param {string} selector
+   * @param {{ new (...args: any[]): T }} ctor
+   * @returns {T}
+   */
+  function requireElement(root, selector, ctor) {
+    const node = root.querySelector(selector);
+    if (!(node instanceof ctor)) {
+      throw new Error(`SparkSub RollingPanel template mismatch: ${selector}`);
+    }
+    return node;
+  }
+
+  /**
+   * @param {Event} event
+   * @returns {Element | null}
+   */
+  function eventTargetElement(event) {
+    return event.target instanceof Element ? event.target : null;
+  }
+
+  /** @returns {HTMLElement | null} */
+  function closestHtml(event, selector) {
+    const node = eventTargetElement(event)?.closest(selector) || null;
+    return node instanceof HTMLElement ? node : null;
+  }
+
+  /** @returns {HTMLButtonElement | null} */
+  function closestButton(event, selector) {
+    const node = closestHtml(event, selector);
+    return node instanceof HTMLButtonElement ? node : null;
+  }
+
+  /**
+   * @param {ParentNode} root
+   * @param {string} selector
+   * @returns {HTMLInputElement[]}
+   */
+  function queryInputs(root, selector) {
+    return Array.from(root.querySelectorAll(selector)).filter((node) => node instanceof HTMLInputElement);
+  }
+
   class RollingPanel {
     constructor(actions = {}) {
       this.actions = actions;
@@ -41,15 +87,39 @@
       }
       if (typeof chrome !== 'undefined' && chrome?.runtime?.id && chrome?.storage?.sync?.get) {
         try {
-          chrome.storage.sync.get({ rollingPanelCollapsed: false, cueFontSize: '14.5' }).then((settings) => {
+          chrome.storage.sync.get({ rollingPanelCollapsed: false, cueFontSize: '14.5', bseSubtitlePreference: 'manual-first' }).then((settings) => {
             this.collapsed = Boolean(settings?.rollingPanelCollapsed);
             this.updateCollapsed();
             if (settings?.cueFontSize) {
               if (this.menuSize) this.menuSize.value = settings.cueFontSize;
               this.panel.style.setProperty('--bse-cue-font-size', `${settings.cueFontSize}px`);
             }
+            if (settings?.bseSubtitlePreference && this.menuPref) {
+              this.menuPref.value = settings.bseSubtitlePreference;
+            }
           }).catch(() => {});
         } catch {}
+      }
+      if (typeof chrome !== 'undefined' && chrome?.storage?.onChanged) {
+        try {
+          chrome.storage.onChanged.addListener((changes, areaName) => {
+            if (areaName !== 'sync') return;
+            if (changes?.cueFontSize?.newValue) {
+              const size = String(changes.cueFontSize.newValue);
+              if (this.menuSize) this.menuSize.value = size;
+              this.panel.style.setProperty('--bse-cue-font-size', `${size}px`);
+            }
+            if (changes?.bseSubtitlePreference?.newValue && this.menuPref) {
+              this.menuPref.value = String(changes.bseSubtitlePreference.newValue);
+            }
+          });
+        } catch {}
+      }
+      if (typeof matchMedia === 'function') {
+        const systemThemeQuery = matchMedia('(prefers-color-scheme: light)');
+        systemThemeQuery.addEventListener?.('change', () => {
+          if ((BSE.I18n?.getTheme?.() || 'auto') === 'auto') this.applyTheme('auto');
+        });
       }
     }
 
@@ -81,19 +151,19 @@
           }
           .panel[data-theme="light"] {
             color-scheme: light;
-            --primary:#2563eb; --bg:#f8fafc; --card:#ffffff; --surface-2:#edf2f7;
-            --border:rgba(0,0,0,.09); --border-focus:rgba(37,99,235,.35);
+            --primary:#5044cf; --bg:#f8fafc; --card:#ffffff; --surface-2:#f1f5f9;
+            --border:rgba(0,0,0,.08); --border-focus:rgba(80,68,207,.36);
             --text:#0f172a; --text-body:#334155; --dim:#64748b;
-            --active-bg:rgba(37,99,235,.09); --active-border:rgba(37,99,235,.26);
+            --active-bg:rgba(80,68,207,.08); --active-border:rgba(80,68,207,.26);
             --active-shadow:none;
             box-shadow:0 8px 20px rgba(0,0,0,.06);
           }
           .panel[data-theme="bilibili"] {
             color-scheme: dark;
-            --primary:#00aeec; --bg:#18191c; --card:#23252a; --surface-2:#2c2e35;
+            --primary:#00aeec; --bg:#12151d; --card:#191e28; --surface-2:#212836;
             --border:rgba(255,255,255,0.08); --border-focus:rgba(0,174,236,.48);
             --text:#ffffff; --text-body:#e3e5e7; --dim:#9499a0;
-            --active-bg:rgba(0,174,236,.12); --active-border:rgba(0,174,236,.36);
+            --active-bg:rgba(0,174,236,.14); --active-border:rgba(0,174,236,.38);
             --active-shadow:none;
           }
           .panel[data-theme="youtube"] {
@@ -587,7 +657,12 @@
             border-color:var(--primary); background:var(--active-bg); color:var(--text); font-weight:600;
             box-shadow:0 0 0 1px var(--primary) inset, 0 2px 6px rgba(0,0,0,0.1);
           }
-          .batch-radio-pill input[type="radio"] { accent-color:var(--primary); margin:0; width:13px; height:13px; }
+          .batch-radio-pill input[type="radio"] { accent-color:var(--primary); margin:0; width:13px; height:13px; flex-shrink:0; }
+          .batch-output-pill { align-items:flex-start; padding:7px 9px; }
+          .batch-output-pill > span { display:flex; min-width:0; flex-direction:column; gap:2px; }
+          .batch-output-pill strong { color:var(--text); font-size:11px; font-weight:650; }
+          .batch-output-pill small { color:var(--dim); font-size:10px; font-weight:450; line-height:1.3; }
+          .batch-radio-pill:has(input:checked) small { color:var(--text-body); }
           .batch-footer {
             padding:10px 14px; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:8px; background:var(--surface);
           }
@@ -674,7 +749,7 @@
               <button class="icon-btn search-toggle" title="搜索文稿">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
               </button>
-              <button class="icon-btn settings-toggle" title="偏好设置 (主题/语言/字号)">
+              <button class="icon-btn settings-toggle" title="偏好设置" aria-controls="rp-settings-drawer" aria-expanded="false">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
               </button>
               <button class="icon-btn collapse" title="收起或展开">
@@ -688,39 +763,39 @@
             <span class="search-badge"></span>
             <button class="icon-btn-sm search-prev" title="上一个">▲</button>
             <button class="icon-btn-sm search-next" title="下一个">▼</button>
-            <button class="icon-btn-sm search-close" title="关闭搜索">✕</button>
+            <button class="icon-btn-sm search-close" title="关闭搜索">×</button>
           </div>
-          <div class="settings-drawer" hidden>
+          <div class="settings-drawer" id="rp-settings-drawer" hidden>
             <div class="settings-grid">
               <div class="settings-card">
-                <span class="settings-card-label">主题风格</span>
-                <select id="rp-menu-theme" name="rp-menu-theme" class="settings-select menu-theme" aria-label="主题风格">
-                  <option value="auto">🌓 自动</option>
-                  <option value="dark">🌑 暗曜</option>
-                  <option value="light">☀️ 浅色</option>
+                <span class="settings-card-label" id="rp-label-theme">主题</span>
+                <select id="rp-menu-theme" name="rp-menu-theme" class="settings-select menu-theme" aria-label="主题">
+                  <option value="auto">自动</option>
+                  <option value="dark">暗曜</option>
+                  <option value="light">浅色</option>
                   <option value="bilibili">哔哩碧蓝</option>
                   <option value="youtube">油管猩红</option>
                 </select>
               </div>
               <div class="settings-card">
-                <span class="settings-card-label">界面语言</span>
-                <select id="rp-menu-lang" name="rp-menu-lang" class="settings-select menu-lang" aria-label="界面语言">
-                  <option value="auto">🌐 自动</option>
-                  <option value="zh-CN">简体</option>
-                  <option value="zh-TW">繁體</option>
-                  <option value="en">EN</option>
+                <span class="settings-card-label" id="rp-label-lang">语言</span>
+                <select id="rp-menu-lang" name="rp-menu-lang" class="settings-select menu-lang" aria-label="语言">
+                  <option value="auto">自动</option>
+                  <option value="zh-CN">简体中文</option>
+                  <option value="zh-TW">繁體中文</option>
+                  <option value="en">English</option>
                 </select>
               </div>
               <div class="settings-card">
-                <span class="settings-card-label">字幕偏好</span>
-                <select id="rp-menu-pref" name="rp-menu-pref" class="settings-select menu-pref" aria-label="字幕偏好">
-                  <option value="manual-first">中文人工优先，AI兜底</option>
-                  <option value="manual-only">仅人工中文</option>
-                  <option value="ai-first">AI 优先</option>
+                <span class="settings-card-label" id="rp-label-pref">默认字幕策略</span>
+                <select id="rp-menu-pref" name="rp-menu-pref" class="settings-select menu-pref" aria-label="默认字幕策略">
+                  <option value="manual-first">人工字幕优先，AI 字幕兜底</option>
+                  <option value="manual-only">仅人工字幕</option>
+                  <option value="ai-first">AI 字幕优先</option>
                 </select>
               </div>
               <div class="settings-card">
-                <span class="settings-card-label">正文字号</span>
+                <span class="settings-card-label" id="rp-label-size">正文字号</span>
                 <select id="rp-menu-size" name="rp-menu-size" class="settings-select menu-size" aria-label="正文字号">
                   <option value="13">小 (13px)</option>
                   <option value="14.5" selected>中 (14.5px)</option>
@@ -736,14 +811,14 @@
           <!-- AI Prompts Drawer (Slide Up) -->
           <div class="ai-drawer" hidden>
             <div class="ai-drawer-header">
-              <span class="ai-drawer-title">🤖 AI 总结与学习提示词</span>
-              <button class="icon-btn-sm ai-close" title="收起 AI 工具">✕</button>
+              <span class="ai-drawer-title">AI 总结与学习提示词</span>
+              <button class="icon-btn-sm ai-close" title="收起 AI 工具">×</button>
             </div>
             <div class="ai-prompts-grid">
-              <button class="ai-btn" data-prompt="notes">🎯 深度讲义</button>
-              <button class="ai-btn" data-prompt="summary">📝 核心总结</button>
-              <button class="ai-btn" data-prompt="keypoints">📋 关键要点</button>
-              <button class="ai-btn" data-prompt="questions">❓ 思考复盘</button>
+              <button class="ai-btn" data-prompt="notes">深度讲义</button>
+              <button class="ai-btn" data-prompt="summary">核心总结</button>
+              <button class="ai-btn" data-prompt="keypoints">关键要点</button>
+              <button class="ai-btn" data-prompt="questions">思考复盘</button>
             </div>
           </div>
 
@@ -751,7 +826,6 @@
           <footer class="footer-bar">
             <div class="footer-left">
               <button class="footer-btn btn-ai-toggle" title="AI 总结与学习助手">
-                <span>🤖</span>
                 <span>AI 总结</span>
               </button>
               <div class="footer-export-group">
@@ -759,7 +833,7 @@
                   <option value="txt">TXT</option>
                   <option value="srt">SRT</option>
                   <option value="md">MD</option>
-                  <option value="audio">🎵 音频直链</option>
+                  <option value="audio">音频直链</option>
                 </select>
                 <button class="footer-btn btn-download-single" title="下载当前字幕文件">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -767,7 +841,7 @@
                 </button>
               </div>
               <button class="footer-btn btn-batch-export" title="批量导出合集/多P字幕" hidden>
-                <span>📦 批量</span>
+                <span>批量</span>
               </button>
             </div>
             <div class="footer-right">
@@ -790,13 +864,12 @@
               <div class="batch-header">
                 <div class="batch-header-info">
                   <div class="batch-title-row">
-                    <span class="batch-icon">📦</span>
                     <strong class="batch-title">批量导出字幕</strong>
                     <span class="batch-type-pill">合集</span>
                   </div>
                   <div class="batch-summary">正在读取合集架构…</div>
                 </div>
-                <button class="icon-btn-sm batch-close" title="关闭">✕</button>
+                <button class="icon-btn-sm batch-close" title="关闭">×</button>
               </div>
               <div class="batch-body">
                 <!-- Card 1: Tree Preview & Granular Selection -->
@@ -804,7 +877,7 @@
                   <div class="batch-card-header">
                     <div class="batch-tree-header-top">
                       <div class="batch-tree-title-group">
-                        <span class="batch-card-title">📂 分P与合集架构</span>
+                        <span class="batch-card-title">分P与合集架构</span>
                       </div>
                       <span class="batch-tree-selected-summary">已选 0 集</span>
                     </div>
@@ -829,7 +902,6 @@
                   </div>
                   <div class="batch-quick-range-bar">
                     <div class="batch-quick-range-badge">
-                      <span>⚡️</span>
                       <span style="font-weight:600;color:var(--text);">区间速选</span>
                     </div>
                     <div class="batch-quick-range-inputs">
@@ -847,22 +919,23 @@
                 <!-- Card 2: Output & Format Settings -->
                 <div class="batch-card">
                   <div class="batch-card-header">
-                    <span class="batch-card-title">⚙️ 输出与格式设置</span>
+                    <span class="batch-card-title">输出与格式设置</span>
                   </div>
                   <div class="batch-settings-stacked">
                     <div class="batch-settings-row">
-                      <span class="batch-setting-title">打包输出形式</span>
+                      <span class="batch-setting-title">完成后怎么用</span>
                       <div class="batch-radio-group">
-                        <label class="batch-radio-pill"><input type="radio" name="rp-output" value="zip" checked> <span>ZIP 压缩包（每集独立文件 · 推荐）</span></label>
-                        <label class="batch-radio-pill"><input type="radio" name="rp-output" value="merged-md"> <span>合并为一个 Markdown（带目录与总览）</span></label>
+                        <label class="batch-radio-pill batch-output-pill"><input type="radio" name="rp-output" value="copy-text" checked> <span><strong>复制全文</strong><small>按目录顺序合并所选字幕，直接复制到剪贴板</small></span></label>
+                        <label class="batch-radio-pill batch-output-pill"><input type="radio" name="rp-output" value="merged-file"> <span><strong>合并为一个长文件</strong><small>下载 Markdown 或 TXT，适合阅读、归档与 AI</small></span></label>
+                        <label class="batch-radio-pill batch-output-pill"><input type="radio" name="rp-output" value="zip"> <span><strong>每集独立打包 ZIP</strong><small>保留独立文件，适合播放器、剪辑和批量归档</small></span></label>
                       </div>
                     </div>
-                    <div class="batch-settings-row rp-format-row">
-                      <span class="batch-setting-title">ZIP 内单文件格式</span>
+                    <div class="batch-settings-row rp-format-row" hidden>
+                      <span class="batch-setting-title rp-format-label">合并文件格式</span>
                       <div class="batch-radio-group">
-                        <label class="batch-radio-pill"><input type="radio" name="rp-format" value="srt" checked> <span>SRT 字幕（播放器/剪辑外挂）</span></label>
-                        <label class="batch-radio-pill"><input type="radio" name="rp-format" value="md"> <span>Markdown 笔记（结构化文档）</span></label>
-                        <label class="batch-radio-pill"><input type="radio" name="rp-format" value="txt"> <span>TXT 纯文本（纯文本讲稿）</span></label>
+                        <label class="batch-radio-pill rp-format-srt" hidden><input type="radio" name="rp-format" value="srt"> <span>SRT 字幕（播放器/剪辑外挂）</span></label>
+                        <label class="batch-radio-pill"><input type="radio" name="rp-format" value="md" checked> <span>Markdown（保留标题与来源结构）</span></label>
+                        <label class="batch-radio-pill"><input type="radio" name="rp-format" value="txt"> <span>TXT（纯文本长文稿）</span></label>
                       </div>
                     </div>
                     <div class="batch-settings-row rp-timestamp-row">
@@ -888,50 +961,50 @@
           </div>
         </section>
       `;
-      this.panel = this.shadow.querySelector('.panel');
-      this.dot = this.shadow.querySelector('.dot');
-      this.trackSelect = this.shadow.querySelector('.tracks');
-      this.list = this.shadow.querySelector('.list');
-      this.empty = this.shadow.querySelector('.empty');
-      this.followButton = this.shadow.querySelector('.follow');
-      this.searchToggle = this.shadow.querySelector('.search-toggle');
-      this.settingsToggle = this.shadow.querySelector('.settings-toggle');
-      this.collapseButton = this.shadow.querySelector('.collapse');
-      this.searchDrawer = this.shadow.querySelector('.search-drawer');
-      this.searchInput = this.shadow.querySelector('.search-input');
-      this.searchBadge = this.shadow.querySelector('.search-badge');
-      this.searchPrev = this.shadow.querySelector('.search-prev');
-      this.searchNext = this.shadow.querySelector('.search-next');
-      this.searchClose = this.shadow.querySelector('.search-close');
-      this.settingsDrawer = this.shadow.querySelector('.settings-drawer');
-      this.menuTheme = this.shadow.querySelector('.menu-theme');
-      this.menuLang = this.shadow.querySelector('.menu-lang');
-      this.menuPref = this.shadow.querySelector('.menu-pref');
-      this.menuSize = this.shadow.querySelector('.menu-size');
-      this.aiDrawer = this.shadow.querySelector('.ai-drawer');
-      this.aiBtnToggle = this.shadow.querySelector('.btn-ai-toggle');
-      this.aiClose = this.shadow.querySelector('.ai-close');
-      this.formatSelect = this.shadow.querySelector('.format-select');
-      this.btnDownloadSingle = this.shadow.querySelector('.btn-download-single');
-      this.btnBatchExport = this.shadow.querySelector('.btn-batch-export');
-      this.copyAllButton = this.shadow.querySelector('.copy-all');
-      this.btnOpenSidebar = this.shadow.querySelector('.btn-open-sidebar');
-      this.btnRefreshSub = this.shadow.querySelector('.btn-refresh-sub');
-      this.refreshButton = this.shadow.querySelector('.btn-refresh-sub');
-      this.toastEl = this.shadow.querySelector('.toast');
+      this.panel = requireElement(this.shadow, '.panel', HTMLElement);
+      this.dot = requireElement(this.shadow, '.dot', HTMLElement);
+      this.trackSelect = requireElement(this.shadow, '.tracks', HTMLSelectElement);
+      this.list = requireElement(this.shadow, '.list', HTMLElement);
+      this.empty = requireElement(this.shadow, '.empty', HTMLElement);
+      this.followButton = requireElement(this.shadow, '.follow', HTMLButtonElement);
+      this.searchToggle = requireElement(this.shadow, '.search-toggle', HTMLButtonElement);
+      this.settingsToggle = requireElement(this.shadow, '.settings-toggle', HTMLButtonElement);
+      this.collapseButton = requireElement(this.shadow, '.collapse', HTMLButtonElement);
+      this.searchDrawer = requireElement(this.shadow, '.search-drawer', HTMLElement);
+      this.searchInput = requireElement(this.shadow, '.search-input', HTMLInputElement);
+      this.searchBadge = requireElement(this.shadow, '.search-badge', HTMLElement);
+      this.searchPrev = requireElement(this.shadow, '.search-prev', HTMLButtonElement);
+      this.searchNext = requireElement(this.shadow, '.search-next', HTMLButtonElement);
+      this.searchClose = requireElement(this.shadow, '.search-close', HTMLButtonElement);
+      this.settingsDrawer = requireElement(this.shadow, '.settings-drawer', HTMLElement);
+      this.menuTheme = requireElement(this.shadow, '.menu-theme', HTMLSelectElement);
+      this.menuLang = requireElement(this.shadow, '.menu-lang', HTMLSelectElement);
+      this.menuPref = requireElement(this.shadow, '.menu-pref', HTMLSelectElement);
+      this.menuSize = requireElement(this.shadow, '.menu-size', HTMLSelectElement);
+      this.aiDrawer = requireElement(this.shadow, '.ai-drawer', HTMLElement);
+      this.aiBtnToggle = requireElement(this.shadow, '.btn-ai-toggle', HTMLButtonElement);
+      this.aiClose = requireElement(this.shadow, '.ai-close', HTMLButtonElement);
+      this.formatSelect = requireElement(this.shadow, '.format-select', HTMLSelectElement);
+      this.btnDownloadSingle = requireElement(this.shadow, '.btn-download-single', HTMLButtonElement);
+      this.btnBatchExport = requireElement(this.shadow, '.btn-batch-export', HTMLButtonElement);
+      this.copyAllButton = requireElement(this.shadow, '.copy-all', HTMLButtonElement);
+      this.btnOpenSidebar = requireElement(this.shadow, '.btn-open-sidebar', HTMLButtonElement);
+      this.btnRefreshSub = requireElement(this.shadow, '.btn-refresh-sub', HTMLButtonElement);
+      this.refreshButton = this.btnRefreshSub;
+      this.toastEl = requireElement(this.shadow, '.toast', HTMLElement);
       // Batch Modal in Shadow DOM
-      this.batchOverlay = this.shadow.querySelector('.batch-overlay');
-      this.batchClose = this.shadow.querySelector('.batch-close');
-      this.batchSummary = this.shadow.querySelector('.batch-summary');
-      this.batchTree = this.shadow.querySelector('.batch-tree');
-      this.batchTreeSummary = this.shadow.querySelector('.batch-tree-selected-summary');
-      this.batchRangeStart = this.shadow.querySelector('.rp-range-start');
-      this.batchRangeEnd = this.shadow.querySelector('.rp-range-end');
-      this.batchRangeApply = this.shadow.querySelector('.rp-range-apply');
-      this.batchProgressWrapper = this.shadow.querySelector('.batch-progress-wrapper');
-      this.batchProgText = this.shadow.querySelector('.batch-prog-text');
-      this.batchBar = this.shadow.querySelector('.batch-bar');
-      this.batchStart = this.shadow.querySelector('.batch-start');
+      this.batchOverlay = requireElement(this.shadow, '.batch-overlay', HTMLElement);
+      this.batchClose = requireElement(this.shadow, '.batch-close', HTMLButtonElement);
+      this.batchSummary = requireElement(this.shadow, '.batch-summary', HTMLElement);
+      this.batchTree = requireElement(this.shadow, '.batch-tree', HTMLElement);
+      this.batchTreeSummary = requireElement(this.shadow, '.batch-tree-selected-summary', HTMLElement);
+      this.batchRangeStart = requireElement(this.shadow, '.rp-range-start', HTMLInputElement);
+      this.batchRangeEnd = requireElement(this.shadow, '.rp-range-end', HTMLInputElement);
+      this.batchRangeApply = requireElement(this.shadow, '.rp-range-apply', HTMLButtonElement);
+      this.batchProgressWrapper = requireElement(this.shadow, '.batch-progress-wrapper', HTMLElement);
+      this.batchProgText = requireElement(this.shadow, '.batch-prog-text', HTMLElement);
+      this.batchBar = requireElement(this.shadow, '.batch-bar', HTMLElement);
+      this.batchStart = requireElement(this.shadow, '.batch-start', HTMLButtonElement);
       this.searchQuery = '';
       this.searchMatches = [];
       this.currentMatchIndex = -1;
@@ -974,16 +1047,19 @@
       });
 
       // AI Prompt Buttons
-      this.shadow.querySelectorAll('.ai-btn').forEach((btn) => {
+      /** @type {NodeListOf<HTMLElement>} */ (this.shadow.querySelectorAll('.ai-btn')).forEach((btn) => {
         btn.addEventListener('click', async () => {
           if (!this.state?.cues?.length) {
             this.showToast('暂无字幕内容可供总结');
             return;
           }
           const promptId = btn.dataset.prompt;
-          const text = BSE.Formatters.generateAiPrompt(promptId, this.state.cues, false);
+          const text = BSE.Formatters.generateAiPrompt(promptId, this.state.cues, false, {
+            title: this.state.title,
+            mediaContext: this.state.mediaContext || null
+          });
           await navigator.clipboard.writeText(text);
-          this.showToast(BSE.I18n?.t('ai_copied_toast') || '✓ 已复制 AI 提示词与文稿');
+          this.showToast(BSE.I18n?.t('ai_copied_toast') || '已复制 AI 提示词与文稿');
         });
       });
 
@@ -1002,11 +1078,11 @@
             const audioData = await BSE.Bilibili.fetchAudioStream();
             const bitrateKbps = Math.round((audioData.bandwidth || 0) / 1000);
             await navigator.clipboard.writeText(audioData.audioUrl);
-            this.showToast(`✓ 已提取 ${bitrateKbps}kbps 音频直链并复制，正在下载文件…`, 'success');
+            this.showToast(`已提取 ${bitrateKbps}kbps 音频直链并复制，正在下载文件…`, 'success');
 
             // 通过后台通道带 Referer 下载完整音频文件
             await BSE.Bilibili.downloadAudioFile(audioData, this.state?.title || '音频');
-            this.showToast(`✓ 音频文件已开始下载！(${bitrateKbps}kbps M4A)`, 'success');
+            this.showToast(`音频文件已开始下载 (${bitrateKbps}kbps M4A)`, 'success');
           } catch (err) {
             this.showToast(`音频提取下载失败: ${err.message || '未知错误'}`, 'error');
           }
@@ -1039,111 +1115,115 @@
       this.batchClose.addEventListener('click', () => {
         if (this.batchControlTask?.running) {
           this.batchControlTask.cancelled = true;
+          this.batchControlTask.controller?.abort();
         }
         this.batchOverlay.hidden = true;
       });
 
-      // Output mode toggle
-      this.shadow.querySelectorAll('input[name="rp-output"]').forEach((radio) => {
-        radio.addEventListener('change', () => {
-          const isZip = this.shadow.querySelector('input[name="rp-output"]:checked')?.value === 'zip';
-          const formatRow = this.shadow.querySelector('.rp-format-row');
-          if (formatRow) formatRow.style.display = isZip ? 'flex' : 'none';
-        });
+      queryInputs(this.shadow, 'input[name="rp-output"]').forEach((radio) => {
+        radio.addEventListener('change', () => this.syncBatchOutputControls());
       });
+      queryInputs(this.shadow, 'input[name="rp-format"]').forEach((radio) => {
+        radio.addEventListener('change', () => this.syncBatchOutputControls());
+      });
+      this.syncBatchOutputControls();
 
       // Toolbar buttons
       this.shadow.querySelector('.batch-tree-btn-all')?.addEventListener('click', () => {
-        this.batchTree.querySelectorAll('.batch-tree-cb').forEach(cb => cb.checked = true);
+        queryInputs(this.batchTree, '.batch-tree-cb').forEach((cb) => { cb.checked = true; });
         this.updateTreeSummaryAndScope();
       });
 
       this.shadow.querySelector('.batch-tree-btn-cur')?.addEventListener('click', () => {
         if (!this.currentTree) return;
-        this.batchTree.querySelectorAll('.batch-tree-cb').forEach(cb => {
-          cb.checked = (cb.dataset.bvid === this.currentTree.currentBvid);
+        queryInputs(this.batchTree, '.batch-tree-cb').forEach((cb) => {
+          cb.checked = cb.dataset.bvid === this.currentTree.currentBvid;
         });
         this.updateTreeSummaryAndScope();
       });
 
       this.shadow.querySelector('.batch-tree-btn-none')?.addEventListener('click', () => {
-        this.batchTree.querySelectorAll('.batch-tree-cb').forEach(cb => cb.checked = false);
+        queryInputs(this.batchTree, '.batch-tree-cb').forEach((cb) => { cb.checked = false; });
         this.updateTreeSummaryAndScope();
       });
 
       this.shadow.querySelector('.batch-tree-btn-invert')?.addEventListener('click', () => {
-        this.batchTree.querySelectorAll('.batch-tree-cb').forEach(cb => cb.checked = !cb.checked);
+        queryInputs(this.batchTree, '.batch-tree-cb').forEach((cb) => { cb.checked = !cb.checked; });
         this.updateTreeSummaryAndScope();
       });
 
       // Quick Range Apply Button
       this.shadow.querySelector('.rp-range-apply')?.addEventListener('click', () => {
         if (!this.currentTree) return;
-        const startInput = this.shadow.querySelector('.rp-range-start');
-        const endInput = this.shadow.querySelector('.rp-range-end');
-        const start = Math.max(1, Number(startInput?.value) || 1);
-        const end = Math.min(this.currentTree.items.length, Number(endInput?.value) || this.currentTree.items.length);
+        const start = Math.max(1, Number(this.batchRangeStart.value) || 1);
+        const end = Math.min(this.currentTree.items.length, Number(this.batchRangeEnd.value) || this.currentTree.items.length);
         const min = Math.min(start, end);
         const max = Math.max(start, end);
-        this.batchTree.querySelectorAll('.batch-tree-cb').forEach(cb => {
+        queryInputs(this.batchTree, '.batch-tree-cb').forEach((cb) => {
           const idx = Number(cb.dataset.globalIndex);
-          cb.checked = (idx >= min && idx <= max);
+          cb.checked = idx >= min && idx <= max;
         });
         this.updateTreeSummaryAndScope();
       });
 
       // Tree delegation
       this.batchTree.addEventListener('change', (e) => {
-        const target = e.target;
+        const target = e.target instanceof HTMLInputElement ? e.target : null;
+        if (!target) return;
         if (target.classList.contains('batch-tree-cb')) {
           this.updateTreeSummaryAndScope();
         } else if (target.classList.contains('batch-tree-sec-cb')) {
-          const secKey = target.dataset.secKey;
-          const cbs = this.batchTree.querySelectorAll(`.batch-tree-cb[data-sec-key="${secKey}"]`);
-          cbs.forEach(cb => cb.checked = target.checked);
+          const secKey = target.dataset.secKey || '';
+          queryInputs(this.batchTree, `.batch-tree-cb[data-sec-key="${secKey}"]`).forEach((cb) => {
+            cb.checked = target.checked;
+          });
           this.updateTreeSummaryAndScope();
         } else if (target.classList.contains('batch-tree-video-cb')) {
-          const bvid = target.dataset.bvid;
-          const cbs = this.batchTree.querySelectorAll(`.batch-tree-cb[data-bvid="${bvid}"]`);
-          cbs.forEach(cb => cb.checked = target.checked);
+          const bvid = target.dataset.bvid || '';
+          queryInputs(this.batchTree, `.batch-tree-cb[data-bvid="${bvid}"]`).forEach((cb) => {
+            cb.checked = target.checked;
+          });
           this.updateTreeSummaryAndScope();
         }
       });
 
       this.batchTree.addEventListener('click', (e) => {
-        const chevron = e.target.closest('.batch-tree-sec-chevron');
-        if (chevron) {
+        const target = eventTargetElement(e);
+        if (!target) return;
+
+        const chevron = target.closest('.batch-tree-sec-chevron');
+        if (chevron instanceof HTMLElement) {
           e.stopPropagation();
           const secGroup = chevron.closest('.batch-tree-sec-group');
           secGroup?.classList.toggle('collapsed');
           return;
         }
 
-        const secBtn = e.target.closest('.batch-tree-sec-btn');
-        if (secBtn) {
+        const secBtn = target.closest('.batch-tree-sec-btn');
+        if (secBtn instanceof HTMLElement) {
           e.stopPropagation();
           const secKey = secBtn.dataset.secKey;
-          this.batchTree.querySelectorAll('.batch-tree-cb').forEach(cb => {
+          queryInputs(this.batchTree, '.batch-tree-cb').forEach((cb) => {
             cb.checked = cb.dataset.secKey === secKey;
           });
           this.updateTreeSummaryAndScope();
           return;
         }
-        const videoBtn = e.target.closest('.batch-tree-video-btn');
-        if (videoBtn) {
+        const videoBtn = target.closest('.batch-tree-video-btn');
+        if (videoBtn instanceof HTMLElement) {
           e.stopPropagation();
           const bvid = videoBtn.dataset.bvid;
-          this.batchTree.querySelectorAll('.batch-tree-cb').forEach(cb => {
+          queryInputs(this.batchTree, '.batch-tree-cb').forEach((cb) => {
             cb.checked = cb.dataset.bvid === bvid;
           });
           this.updateTreeSummaryAndScope();
           return;
         }
 
-        const itemNode = e.target.closest('.batch-tree-item-node');
-        if (itemNode && !e.target.matches('input[type="checkbox"]')) {
+        const itemNode = target.closest('.batch-tree-item-node');
+        if (itemNode && !target.matches('input[type="checkbox"]')) {
           const cb = itemNode.querySelector('.batch-tree-cb');
-          if (cb) {
+          if (cb instanceof HTMLInputElement) {
             cb.checked = !cb.checked;
             this.updateTreeSummaryAndScope();
           }
@@ -1152,18 +1232,31 @@
 
       this.batchStart.addEventListener('click', async () => {
         if (!this.currentTree) return;
-        const checkedCbs = [...this.batchTree.querySelectorAll('.batch-tree-cb:checked')];
+        const checkedCbs = queryInputs(this.batchTree, '.batch-tree-cb:checked');
         if (!checkedCbs.length) {
           this.showToast('请至少在目录中勾选 1 个分P');
           return;
         }
 
-        const customIndices = new Set(checkedCbs.map(cb => Number(cb.dataset.globalIndex)));
-        const outputMode = this.shadow.querySelector('input[name="rp-output"]:checked')?.value || 'zip';
-        const format = this.shadow.querySelector('input[name="rp-format"]:checked')?.value || 'srt';
-        const preference = this.menuPref?.value || 'manual-first';
-        const withTimestamp = this.shadow.querySelector('input[name="rp-timestamp"]:checked')?.value === 'true';
+        const customIndices = new Set(checkedCbs.map((cb) => Number(cb.dataset.globalIndex)));
+        const outputRadio = this.shadow.querySelector('input[name="rp-output"]:checked');
+        const formatRadio = this.shadow.querySelector('input[name="rp-format"]:checked');
+        const timestampRadio = this.shadow.querySelector('input[name="rp-timestamp"]:checked');
+        const outputMode = outputRadio instanceof HTMLInputElement && ['merged-file', 'zip'].includes(outputRadio.value)
+          ? /** @type {'merged-file'|'zip'} */ (outputRadio.value)
+          : 'copy-text';
+        let format = formatRadio instanceof HTMLInputElement && ['srt', 'txt', 'md'].includes(formatRadio.value)
+          ? /** @type {'srt'|'txt'|'md'} */ (formatRadio.value)
+          : 'md';
+        if (outputMode === 'copy-text') format = 'txt';
+        else if (outputMode === 'merged-file' && format === 'srt') format = 'md';
+        const rawPreference = this.menuPref.value;
+        const preference = ['manual-first', 'manual-only', 'ai-first'].includes(rawPreference)
+          ? /** @type {'manual-first'|'manual-only'|'ai-first'} */ (rawPreference)
+          : 'manual-first';
+        const withTimestamp = timestampRadio instanceof HTMLInputElement && timestampRadio.value === 'true';
 
+        /** @type {import('../types/bse').BatchConfig} */
         const config = {
           scope: 'custom',
           customIndices,
@@ -1181,44 +1274,59 @@
             if (phase === 'packing') {
               this.batchProgText.textContent = `打包中 (${stats.packPercent || 0}%)…`;
               this.batchBar.style.width = `${stats.packPercent || 0}%`;
+            } else if (phase === 'building') {
+              this.batchProgText.textContent = outputMode === 'copy-text'
+                ? '正在整理可复制的合并全文…'
+                : (outputMode === 'merged-file' ? '正在生成合并长文件…' : '正在整理打包清单…');
             } else if (phase === 'fetching') {
               const percent = Math.round((stats.completed / (stats.total || 1)) * 100);
               this.batchProgText.textContent = currentItem ? `读取中: ${currentItem.title}` : `抓取中 (${stats.completed}/${stats.total})`;
               this.batchBar.style.width = `${percent}%`;
             } else if (phase === 'done') {
+              const completionVerb = outputMode === 'copy-text'
+                ? '已整理为可复制全文'
+                : (outputMode === 'merged-file' ? '已合并为长文件' : '已打包为 ZIP');
               const summaryText = stats.failed > 0 || stats.noSub > 0
-                ? `✓ 导出完成：成功 ${stats.success} · 无字幕 ${stats.noSub} · 失败 ${stats.failed}`
-                : `✓ 批量导出完成：全部 ${stats.success} 集已下载`;
+                ? `任务完成：成功 ${stats.success} · 无字幕 ${stats.noSub} · 失败 ${stats.failed}`
+                : `任务完成：${stats.success} 项字幕${completionVerb}`;
               this.batchProgText.textContent = summaryText;
               this.batchBar.style.width = '100%';
             }
           }, this.batchControlTask);
 
+          if (exportResult?.cancelled) return;
           const finalStats = exportResult?.stats || {};
-          if (finalStats.failed > 0 || finalStats.noSub > 0) {
-            this.showToast(`导出完成：成功 ${finalStats.success || 0}，无字幕 ${finalStats.noSub || 0}，失败 ${finalStats.failed || 0}`);
-          } else {
-            this.showToast(BSE.I18n?.t('batch_completed_toast') || '✓ 批量导出完成并开始下载');
+          if (outputMode === 'copy-text' && !finalStats.success) {
+            throw new Error('所选视频没有可复制的字幕，请调整选择范围或字幕偏好');
           }
+          await BSE.BatchExport.deliver(exportResult?.output, {
+            writeText: (text) => navigator.clipboard.writeText(text),
+            downloadText: (text, filename, mime) => BSE.Utils.downloadText(text, filename, mime),
+            downloadBlob: (blob, filename) => BSE.Utils.downloadBlob(blob, filename)
+          });
+
+          const partial = finalStats.failed > 0 || finalStats.noSub > 0;
+          const resultLabel = outputMode === 'copy-text'
+            ? `已复制 ${finalStats.success || 0} 项字幕全文`
+            : (outputMode === 'merged-file' ? '合并长文件已开始下载' : 'ZIP 已开始下载');
+          this.showToast(partial
+            ? `${resultLabel}；无字幕 ${finalStats.noSub || 0}，失败 ${finalStats.failed || 0}`
+            : resultLabel);
           setTimeout(() => {
             this.batchOverlay.hidden = true;
             this.batchStart.disabled = false;
-          }, 2500);
+          }, 1800);
         } catch (err) {
           this.showToast(err.message || '批量导出失败');
+        } finally {
+          if (this.batchControlTask) this.batchControlTask.running = false;
           this.batchStart.disabled = false;
+          this.syncBatchOutputControls();
         }
       });
 
       // Settings Subtitle Preference
       if (this.menuPref) {
-        try {
-          chrome?.storage?.sync?.get(['bseSubtitlePreference'], (res) => {
-            if (res?.bseSubtitlePreference) {
-              this.menuPref.value = res.bseSubtitlePreference;
-            }
-          });
-        } catch {}
         this.menuPref.addEventListener('change', () => {
           try {
             chrome?.storage?.sync?.set({ bseSubtitlePreference: this.menuPref.value });
@@ -1228,10 +1336,11 @@
 
       // Settings Drawer Toggle
       this.settingsToggle.addEventListener('click', () => {
-        const isHidden = !this.settingsDrawer.hidden;
-        this.settingsDrawer.hidden = isHidden;
-        this.settingsToggle.classList.toggle('active', !isHidden);
-        if (!isHidden) {
+        const shouldClose = !this.settingsDrawer.hidden;
+        this.settingsDrawer.hidden = shouldClose;
+        this.settingsToggle.classList.toggle('active', !shouldClose);
+        this.settingsToggle.setAttribute('aria-expanded', String(!shouldClose));
+        if (!shouldClose) {
           this.searchDrawer.hidden = true;
           this.clearSearchHighlight();
         }
@@ -1246,20 +1355,11 @@
       });
 
       this.menuTheme.addEventListener('change', () => {
-        const theme = this.menuTheme.value;
-        BSE.I18n?.setTheme(theme);
-        this.applyTheme(theme);
-        if (typeof chrome !== 'undefined' && chrome?.storage?.sync?.set) {
-          try { chrome.storage.sync.set({ theme }).catch(() => {}); } catch {}
-        }
+        BSE.I18n?.setTheme(this.menuTheme.value);
       });
 
       this.menuLang.addEventListener('change', () => {
-        const uiLang = this.menuLang.value;
-        BSE.I18n?.setLocale(uiLang);
-        if (typeof chrome !== 'undefined' && chrome?.storage?.sync?.set) {
-          try { chrome.storage.sync.set({ uiLang }).catch(() => {}); } catch {}
-        }
+        BSE.I18n?.setLocale(this.menuLang.value);
       });
 
       this.menuSize.addEventListener('change', () => {
@@ -1285,6 +1385,7 @@
         }, 100);
       });
       this.searchInput.addEventListener('keydown', (e) => {
+        if (!(e instanceof KeyboardEvent)) return;
         if (e.key === 'Enter') {
           e.preventDefault();
           if (e.shiftKey) this.prevMatch();
@@ -1296,9 +1397,13 @@
       this.searchPrev.addEventListener('click', () => this.prevMatch());
       this.searchNext.addEventListener('click', () => this.nextMatch());
       this.shadow.addEventListener('keydown', (e) => {
+        if (!(e instanceof KeyboardEvent)) return;
         if (e.key === 'Escape') {
           if (!this.batchOverlay.hidden) {
-            if (this.batchControlTask?.running) this.batchControlTask.cancelled = true;
+            if (this.batchControlTask?.running) {
+              this.batchControlTask.cancelled = true;
+              this.batchControlTask.controller?.abort();
+            }
             this.batchOverlay.hidden = true;
           }
           if (!this.searchDrawer.hidden) this.toggleSearch(false);
@@ -1335,7 +1440,9 @@
         handleUserScrollInteraction();
       }, { passive: true });
       this.list.addEventListener('click', async (event) => {
-        const copyBtn = event.target.closest('.paragraph-copy');
+        const target = eventTargetElement(event);
+        if (!target) return;
+        const copyBtn = target.closest('.paragraph-copy');
         if (copyBtn) {
           event.stopPropagation();
           const paragraph = copyBtn.closest('.paragraph');
@@ -1347,8 +1454,8 @@
           }
         }
 
-        const pTime = event.target.closest('.paragraph-time');
-        if (pTime) {
+        const pTime = target.closest('.paragraph-time');
+        if (pTime instanceof HTMLElement) {
           event.stopPropagation();
           const time = Number(pTime.dataset.time || 0);
           this.actions.seek?.(time);
@@ -1360,8 +1467,8 @@
 
         const selection = window.getSelection()?.toString();
         if (selection && selection.trim().length > 0) return;
-        const cue = event.target.closest('.cue');
-        if (!cue) return;
+        const cue = target.closest('.cue');
+        if (!(cue instanceof HTMLElement)) return;
         this.actions.seek?.(Number(cue.dataset.time));
         this.following = true;
         this.updateFollowButton();
@@ -1369,10 +1476,43 @@
       });
     }
 
+    syncBatchOutputControls() {
+      const outputRadio = this.shadow.querySelector('input[name="rp-output"]:checked');
+      const mode = outputRadio instanceof HTMLInputElement && ['merged-file', 'zip'].includes(outputRadio.value)
+        ? outputRadio.value
+        : 'copy-text';
+      const formatRadio = this.shadow.querySelector('input[name="rp-format"]:checked');
+      const formatRow = this.shadow.querySelector('.rp-format-row');
+      const formatLabel = this.shadow.querySelector('.rp-format-label');
+      const srtOption = this.shadow.querySelector('.rp-format-srt');
+      const timestampRow = this.shadow.querySelector('.rp-timestamp-row');
+      const allowSrt = mode === 'zip';
+
+      if (formatRow instanceof HTMLElement) formatRow.hidden = mode === 'copy-text';
+      if (formatLabel) formatLabel.textContent = allowSrt ? 'ZIP 内单文件格式' : '合并文件格式';
+      if (srtOption instanceof HTMLElement) srtOption.hidden = !allowSrt;
+      if (!allowSrt && formatRadio instanceof HTMLInputElement && formatRadio.value === 'srt') {
+        const mdInput = this.shadow.querySelector('input[name="rp-format"][value="md"]');
+        if (mdInput instanceof HTMLInputElement) mdInput.checked = true;
+      }
+
+      const activeFormat = this.shadow.querySelector('input[name="rp-format"]:checked');
+      const showTimestamp = mode !== 'zip' || !(activeFormat instanceof HTMLInputElement) || activeFormat.value !== 'srt';
+      if (timestampRow instanceof HTMLElement) timestampRow.hidden = !showTimestamp;
+
+      const checkedCount = queryInputs(this.batchTree, '.batch-tree-cb:checked').length;
+      if (!this.batchControlTask?.running) {
+        this.batchStart.disabled = checkedCount === 0 && Boolean(this.currentTree);
+        this.batchStart.textContent = mode === 'copy-text'
+          ? `复制 ${checkedCount || ''} 项字幕`.replace(/\s+/g, ' ').trim()
+          : (mode === 'merged-file' ? '下载合并长文件' : '导出独立文件 ZIP');
+      }
+    }
+
     updateTreeSummaryAndScope() {
       if (!this.currentTree || !this.batchTree) return;
-      const allCbs = [...this.batchTree.querySelectorAll('.batch-tree-cb')];
-      const checkedCbs = allCbs.filter(cb => cb.checked);
+      const allCbs = queryInputs(this.batchTree, '.batch-tree-cb');
+      const checkedCbs = allCbs.filter((cb) => cb.checked);
       const total = allCbs.length;
       const checkedCount = checkedCbs.length;
 
@@ -1390,10 +1530,10 @@
       }
 
       // Sync section checkboxes (checked, unchecked, indeterminate)
-      this.batchTree.querySelectorAll('.batch-tree-sec-cb').forEach(secCb => {
-        const secKey = secCb.dataset.secKey;
-        const childCbs = [...this.batchTree.querySelectorAll(`.batch-tree-cb[data-sec-key="${secKey}"]`)];
-        const checkedChildren = childCbs.filter(c => c.checked).length;
+      queryInputs(this.batchTree, '.batch-tree-sec-cb').forEach((secCb) => {
+        const secKey = secCb.dataset.secKey || '';
+        const childCbs = queryInputs(this.batchTree, `.batch-tree-cb[data-sec-key="${secKey}"]`);
+        const checkedChildren = childCbs.filter((c) => c.checked).length;
         if (checkedChildren === 0) {
           secCb.checked = false;
           secCb.indeterminate = false;
@@ -1407,10 +1547,10 @@
       });
 
       // Sync video checkboxes
-      this.batchTree.querySelectorAll('.batch-tree-video-cb').forEach(vCb => {
-        const bvid = vCb.dataset.bvid;
-        const childCbs = [...this.batchTree.querySelectorAll(`.batch-tree-cb[data-bvid="${bvid}"]`)];
-        const checkedChildren = childCbs.filter(c => c.checked).length;
+      queryInputs(this.batchTree, '.batch-tree-video-cb').forEach((vCb) => {
+        const bvid = vCb.dataset.bvid || '';
+        const childCbs = queryInputs(this.batchTree, `.batch-tree-cb[data-bvid="${bvid}"]`);
+        const checkedChildren = childCbs.filter((c) => c.checked).length;
         if (checkedChildren === 0) {
           vCb.checked = false;
           vCb.indeterminate = false;
@@ -1422,6 +1562,7 @@
           vCb.indeterminate = true;
         }
       });
+      this.syncBatchOutputControls();
     }
 
     generateTreeHtml(tree) {
@@ -1436,7 +1577,7 @@
               <label class="batch-tree-sec-label">
                 <span class="batch-tree-sec-chevron" data-sec-toggle="${BSE.Utils.escapeHtml(sec.key)}" title="折叠/展开分组">▼</span>
                 <input type="checkbox" class="batch-tree-sec-cb" data-sec-key="${BSE.Utils.escapeHtml(sec.key)}" checked>
-                <span>📁 ${hasMultipleSections ? `第 ${sIdx + 1} 章 · ` : ''}${BSE.Utils.escapeHtml(sec.title)}</span>
+                <span>${hasMultipleSections ? `第 ${sIdx + 1} 章 · ` : ''}${BSE.Utils.escapeHtml(sec.title)}</span>
               </label>
               <div class="batch-tree-sec-actions">
                 <span class="batch-tree-node-meta">${countLabel}</span>
@@ -1453,7 +1594,7 @@
               <div class="batch-tree-video-node" data-bvid="${BSE.Utils.escapeHtml(ep.bvid)}">
                 <label class="batch-tree-video-label">
                   <input type="checkbox" class="batch-tree-video-cb" data-bvid="${BSE.Utils.escapeHtml(ep.bvid)}" checked>
-                  <span>🎬 视频 ${ep.index}：${BSE.Utils.escapeHtml(ep.title)}</span>
+                  <span>视频 ${ep.index}：${BSE.Utils.escapeHtml(ep.title)}</span>
                 </label>
                 <div class="batch-tree-sec-actions">
                   <span class="batch-tree-node-meta">${ep.pagesCount} P</span>
@@ -1470,7 +1611,7 @@
                   <label class="batch-tree-item-label" title="${BSE.Utils.escapeHtml(item.title)}">
                     <input type="checkbox" class="batch-tree-cb" data-global-index="${item.globalIndex}" data-duration="${item.duration || 0}" data-bvid="${BSE.Utils.escapeHtml(item.bvid)}" data-sec-key="${BSE.Utils.escapeHtml(sec.key)}" checked>
                     <span class="batch-tree-item-text">
-                      ${isCur ? '▶' : '·'} <span class="batch-tree-item-idx">#${String(item.globalIndex).padStart(2, '0')}</span> <strong>${BSE.Utils.escapeHtml(pLabel)}</strong>
+                      <span class="batch-tree-item-idx">#${String(item.globalIndex).padStart(2, '0')}</span> <strong>${BSE.Utils.escapeHtml(pLabel)}</strong>
                       ${isCur ? '<span class="batch-tree-tag-cur">当前播放</span>' : ''}
                     </span>
                   </label>
@@ -1487,7 +1628,7 @@
                 <label class="batch-tree-item-label" title="${BSE.Utils.escapeHtml(item.title)}">
                   <input type="checkbox" class="batch-tree-cb" data-global-index="${item.globalIndex}" data-duration="${item.duration || 0}" data-bvid="${BSE.Utils.escapeHtml(item.bvid)}" data-sec-key="${BSE.Utils.escapeHtml(sec.key)}" checked>
                   <span class="batch-tree-item-text">
-                    ${isCur ? '▶' : '·'} <span class="batch-tree-item-idx">#${String(item.globalIndex).padStart(2, '0')}</span> ${BSE.Utils.escapeHtml(ep.title)}
+                    <span class="batch-tree-item-idx">#${String(item.globalIndex).padStart(2, '0')}</span> ${BSE.Utils.escapeHtml(ep.title)}
                     ${isCur ? '<span class="batch-tree-tag-cur">当前播放</span>' : ''}
                   </span>
                 </label>
@@ -1512,23 +1653,27 @@
           this.showToast('未识别到 B 站视频 BV 号');
           return;
         }
+        if (this.batchControlTask?.running) {
+          this.batchControlTask.cancelled = true;
+          this.batchControlTask.controller?.abort();
+        }
+        this.batchControlTask = null;
+        this.currentTree = null;
         this.batchOverlay.hidden = false;
         this.batchProgressWrapper.hidden = true;
+        this.batchProgText.textContent = '准备开始…';
+        this.batchBar.style.width = '0%';
+        this.batchStart.disabled = true;
+        this.batchStart.textContent = '正在读取目录…';
         this.batchSummary.textContent = '正在读取合集架构…';
         this.currentTree = await BSE.Bilibili.fetchMediaTree(bvid);
         this.batchSummary.textContent = `${this.currentTree.title} · 共 ${this.currentTree.items.length} 个分P`;
 
         // Initialize quick range inputs
-        const rangeStart = this.shadow.querySelector('.rp-range-start');
-        const rangeEnd = this.shadow.querySelector('.rp-range-end');
-        if (rangeStart) {
-          rangeStart.max = String(this.currentTree.items.length);
-          rangeStart.value = '1';
-        }
-        if (rangeEnd) {
-          rangeEnd.max = String(this.currentTree.items.length);
-          rangeEnd.value = String(this.currentTree.items.length);
-        }
+        this.batchRangeStart.max = String(this.currentTree.items.length);
+        this.batchRangeStart.value = '1';
+        this.batchRangeEnd.max = String(this.currentTree.items.length);
+        this.batchRangeEnd.value = String(this.currentTree.items.length);
 
         this.batchTree.innerHTML = this.generateTreeHtml(this.currentTree);
 
@@ -1547,15 +1692,11 @@
 
     showToast(message, type = 'info') {
       if (!this.toastEl) return;
-      const isError = type === 'error' || message.includes('失败') || message.includes('错误');
-      const isSuccess = !isError && (type === 'success' || message.includes('✓') || message.includes('已复制') || message.includes('完成') || message.includes('OK'));
+      const text = String(message || '').replace(/^(?:\p{Extended_Pictographic}\uFE0F?|\p{Emoji_Presentation}|\s)+/gu, '');
+      const isError = type === 'error' || text.includes('失败') || text.includes('错误');
+      const isSuccess = !isError && (type === 'success' || text.includes('已复制') || text.includes('完成') || text.includes('成功') || text.includes('OK'));
 
-      let icon = 'ℹ️';
-      if (isSuccess) icon = '✓';
-      else if (isError) icon = '⚠️';
-
-      const cleanText = message.replace(/^[✓⚠️ℹ️🤖📦📋\s]+/, '');
-      this.toastEl.innerHTML = `<span style="font-weight:700; color:${isError ? '#ff8b83' : (isSuccess ? '#20c978' : 'var(--primary)')}; font-size:12px;">${icon}</span> <span>${cleanText}</span>`;
+      this.toastEl.textContent = text;
       this.toastEl.className = `toast show ${isError ? 'error' : (isSuccess ? 'success' : 'info')}`;
       clearTimeout(this.toastTimer);
       this.toastTimer = setTimeout(() => this.toastEl.classList.remove('show'), 2200);
@@ -1677,15 +1818,62 @@
       } else if (theme === 'youtube') {
         this.panel.dataset.theme = 'youtube';
       } else {
-        this.panel.dataset.theme = this.platform === BSE.PLATFORM.BILIBILI ? 'bilibili' : 'dark';
+        const systemLight = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: light)').matches;
+        this.panel.dataset.theme = systemLight ? 'light' : 'dark';
       }
     }
 
     applyI18nAndTheme() {
       const theme = BSE.I18n?.getTheme() || 'auto';
+      const effectiveLocale = BSE.I18n?.getLocale?.() || 'zh-CN';
+      const t = (key) => BSE.I18n?.t(key) || key;
+      if (this.panel) this.panel.lang = effectiveLocale;
+      const setOption = (select, value, text) => {
+        const option = Array.from(select?.options || []).find((entry) => entry.value === value);
+        if (option) option.textContent = text;
+      };
       this.applyTheme(theme);
-      if (this.menuTheme) this.menuTheme.value = theme;
-      if (this.menuLang) this.menuLang.value = BSE.I18n?.getLocale() || 'auto';
+      if (this.menuTheme) {
+        this.menuTheme.value = theme;
+        this.menuTheme.setAttribute('aria-label', t('theme_label'));
+        setOption(this.menuTheme, 'auto', t('theme_auto'));
+        setOption(this.menuTheme, 'dark', t('theme_dark'));
+        setOption(this.menuTheme, 'light', t('theme_light'));
+        setOption(this.menuTheme, 'bilibili', t('theme_bilibili'));
+        setOption(this.menuTheme, 'youtube', t('theme_youtube'));
+      }
+      if (this.menuLang) {
+        this.menuLang.value = BSE.I18n?.getLocalePreference?.() || BSE.I18n?.getLocale() || 'auto';
+        this.menuLang.setAttribute('aria-label', t('lang_label'));
+        setOption(this.menuLang, 'auto', t('lang_auto'));
+        setOption(this.menuLang, 'zh-CN', t('lang_zh_cn'));
+        setOption(this.menuLang, 'zh-TW', t('lang_zh_tw'));
+        setOption(this.menuLang, 'en', t('lang_en'));
+      }
+      if (this.menuPref) {
+        this.menuPref.setAttribute('aria-label', t('pref_subtitle_label'));
+        setOption(this.menuPref, 'manual-first', t('batch_pref_manual_first'));
+        setOption(this.menuPref, 'manual-only', t('batch_pref_manual_only'));
+        setOption(this.menuPref, 'ai-first', t('batch_pref_ai_first'));
+      }
+      if (this.menuSize) {
+        this.menuSize.setAttribute('aria-label', t('pref_size_label'));
+        setOption(this.menuSize, '13', t('size_small'));
+        setOption(this.menuSize, '14.5', t('size_medium'));
+        setOption(this.menuSize, '16.5', t('size_large'));
+      }
+      const themeLabel = this.shadow.querySelector('#rp-label-theme');
+      const langLabel = this.shadow.querySelector('#rp-label-lang');
+      const prefLabel = this.shadow.querySelector('#rp-label-pref');
+      const sizeLabel = this.shadow.querySelector('#rp-label-size');
+      if (themeLabel) themeLabel.textContent = t('theme_label');
+      if (langLabel) langLabel.textContent = t('lang_label');
+      if (prefLabel) prefLabel.textContent = t('pref_subtitle_label');
+      if (sizeLabel) sizeLabel.textContent = t('pref_size_label');
+      if (this.settingsToggle) {
+        this.settingsToggle.title = t('settings_title');
+        this.settingsToggle.setAttribute('aria-label', t('settings_title'));
+      }
       if (this.btnBatchExport) {
         this.btnBatchExport.hidden = this.platform !== BSE.PLATFORM.BILIBILI;
       }
@@ -1841,7 +2029,8 @@
       }
 
       // === For Bilibili: High-Precision Read-Only DOM Measurement + Responsive Geometry Sync ===
-      const isFullscreen = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+      const legacyDocument = /** @type {Document & { webkitFullscreenElement?: Element | null }} */ (document);
+      const isFullscreen = Boolean(document.fullscreenElement || legacyDocument.webkitFullscreenElement);
       if (isFullscreen) {
         if (this.wrapper) this.wrapper.style.display = 'none';
         document.documentElement.classList.remove('bse-docked');
@@ -2137,7 +2326,7 @@
           <div class="empty-desc">${BSE.Utils.escapeHtml(hint)}</div>
           ${isEmpty ? `
             <div class="empty-actions">
-              <button class="empty-btn btn-transcribe-asr" type="button" title="优先尝试从网络获取官方/AI字幕，无字幕时自动进行离线转录">
+              <button class="empty-btn btn-transcribe-asr" type="button" title="直接使用 SparkScribe 对当前视频进行本地离线转录，不复用其他页面或平台字幕缓存">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
                 <span>获取字幕 / 转文字</span>
               </button>
@@ -2170,19 +2359,21 @@
         if (isEmpty) {
           this.empty.querySelector('.btn-transcribe-asr')?.addEventListener('click', async () => {
             try {
-              this.showToast('正在探测网络官方/AI字幕…');
-              if (typeof this.actions.refresh === 'function') {
-                await this.actions.refresh();
-                await new Promise((r) => setTimeout(r, 650));
-                if (this.currentCues?.length) {
-                  this.showToast(`已成功获取网络字幕（共 ${this.currentCues.length} 条）`);
-                  return;
-                }
+              const mediaKey = String(this.state?.mediaKey || '').trim();
+              const stateMatchesCurrentVideo = BSE.Utils?.mediaStateMatchesUrl?.(this.state, window.location.href) === true;
+              if (!mediaKey || !stateMatchesCurrentVideo) {
+                this.showToast('当前视频身份仍在切换，请等待播放器稳定后再点离线转录');
+                return;
               }
+              this.showToast('正在为当前视频启动 SparkScribe 离线转录…');
               const res = await chrome.runtime.sendMessage({
                 type: 'BSE_QUEUE_ENQUEUE',
-                urls: [window.location.href],
-                options: { sourceLanguage: 'auto' }
+                urls: [{
+                  url: window.location.href,
+                  mediaKey,
+                  processingIntent: 'local-asr'
+                }],
+                options: { sourceLanguage: 'auto', processingIntent: 'local-asr' }
               });
               if (res?.ok) {
                 chrome.runtime.sendMessage({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});

@@ -46,15 +46,17 @@ let writer = NativeMessageWriter(output: .standardOutput)
 let downloader = MediaDownloader(ytDLPExecutableURL: ytDLPURL)
 let youtubeCaptionFetcher = YouTubeCaptionFetcher(ytDLPExecutableURL: ytDLPURL)
 let engine = TranscriptionEngine(modelLocator: modelLocator)
+let workspaceManager = JobWorkspaceManager(
+    rootURL: support.sparkSub.appendingPathComponent("Temporary", isDirectory: true)
+)
+try? workspaceManager.sweepStaleWorkspaces()
 let controller = HostController(
     writer: writer,
     mediaDownloader: downloader,
     youtubeCaptionFetcher: youtubeCaptionFetcher,
     transcriptionEngine: engine,
     capabilityProvider: modelLocator,
-    workspaceManager: JobWorkspaceManager(
-        rootURL: support.sparkSub.appendingPathComponent("Temporary", isDirectory: true)
-    )
+    workspaceManager: workspaceManager
 )
 
 do {

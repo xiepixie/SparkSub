@@ -1,90 +1,83 @@
-# Background Native Transcription Validation
+# Native Browser Integration Validation
 
-Date: 2026-08-27
+Updated: 2026-09-10
+Contract: `sparkscribe.browser-native/2`
+Native Messaging host: `com.sparksub.transcriber`
+Preferred native execution: `/Applications/SparkScribe.app/Contents/Helpers/SparkSubNativeHost`
+Compatibility fallback: `native/SparkSubHost`
 
-Branch: `feat/background-native-transcription`
+This report records the currently verified SparkSub ↔ SparkScribe native boundary. It distinguishes deterministic contract/process tests from the final browser-UI smoke so a direct helper test is never mistaken for Chrome end-to-end evidence.
 
-This report separates checks completed in the current Linux workspace from the macOS-only release gates that still require execution on Apple Silicon. A green JavaScript suite does not imply that the Swift host builds or that the physical user models load.
+## Current architecture state
 
-## Verified in this workspace
+SparkSub consumes capability semantics, timed cues, progress, cancellation and stable errors. It does not select Qwen, Parakeet, Cohere or another concrete model. The default installer runs in `auto` mode: it selects the SparkScribe-bundled helper only when `--browser-native-readiness` succeeds; otherwise it installs/uses the standalone compatibility host. `--sparkscribe` and `--standalone` provide explicit diagnosis and rollback paths.
 
-| Area | Command or evidence | Result |
+SparkScribe owns the preferred execution path:
+
+```text
+SparkSub Extension
+        ↓ Chrome Native Messaging
+com.sparksub.transcriber
+        ↓
+SparkSubNativeHost (bundled, lightweight)
+        ├─ BrowserIntegration — framing, validation, cancellation identity
+        ├─ BrowserMedia — restricted YouTube/Bilibili acquisition + verified yt-dlp
+        ├─ BrowserCaptions — YouTube manual/auto/translated captions
+        └─ BrowserHostCore — lifecycle, progress, result chunking, worker client
+                           ↓
+             SparkScribe --browser-inference-worker
+                           ↓
+             existing FFmpeg + local ASR stack
+```
+
+Media Queue, Live Captions and Browser Worker share one cross-process inference lease. A competing local inference session returns `BUSY` instead of loading a second heavy model session.
+
+## Verified on Apple Silicon macOS
+
+| Area | Evidence | Result |
 | --- | --- | --- |
-| Extension unit and fallback scenarios | `node tests/run-tests.mjs` | Pass, exit 0 |
-| Service Worker queue ownership and wake coalescing | `node tests/orchestrator-tests.mjs` | Pass, exit 0 |
-| JavaScript syntax | `node --check` on the native client, media adapter, queue/orchestrator, Service Worker, Bilibili adapter, side panel, and offscreen controller | Pass, exit 0 |
-| Installer behavior | `bash tests/install-host-tests.sh` | Pass, exit 0 |
-| Shell syntax | `bash -n native/scripts/install-host.sh native/scripts/uninstall-host.sh tests/install-host-tests.sh` | Pass, exit 0 |
-| Patch whitespace | `git diff --check` | Pass, exit 0 |
-| Runtime | Linux 6.18 x86_64, Node.js v24.19.0 | Recorded |
+| SparkSub runtime/contract suite | `node tests/run-tests.mjs` | Pass |
+| Installer contract | `bash tests/install-host-tests.sh` | Pass |
+| Standalone compatibility host | `swift test --package-path native/SparkSubHost` | 58 tests, 0 failures, 2 fixture-dependent skips |
+| SparkScribe suite | `bash ./build.sh --check` in SparkScribe | 365 tests across 58 suites, pass |
+| Release helper signing | `codesign --verify --strict` | Pass |
+| Worker capability probe | packaged `SparkScribe --browser-inference-capabilities` | `localASR` available for installed en/zh models |
+| Helper capability projection | framed v2 `capabilities` smoke | Correct feature projection, no unframed stdout |
+| Real headless ASR | macOS `say` fixture → packaged worker | Qwen3-ASR 1.7B returned one valid timed English cue |
+| Third-party stdout isolation | real Qwen worker smoke | model loader diagnostics redirected away from worker JSON stdout |
+| Runtime adoption | bundled helper readiness | verified legacy SparkSub yt-dlp copied into SparkScribe runtime without mutating source |
+| Native manifest handoff | real Chrome Profile extension ID | manifest now points to SparkScribe bundled helper; standalone binary remains available for rollback |
 
-The extension tests cover these release-critical paths:
+The two skipped standalone Swift tests require `/tmp/test_speech.wav` for real legacy Parakeet/Cohere inference. They do not skip protocol, media-security, cancellation, platform-caption or result-framing coverage. Preferred SparkScribe inference is separately covered by its worker tests and the real packaged-worker smoke above.
 
-- a captioned YouTube item completes from platform captions and does not call the native host;
-- a closed-tab Cantonese YouTube item completes through the native host's public-caption path without invoking local ASR;
-- a captionless YouTube item falls back to the native host without an open tab;
-- a captionless Bilibili item uses an ephemeral remote-media descriptor;
-- explicit Cantonese aliases fail with `ASR_LANGUAGE_UNSUPPORTED` instead of entering local ASR;
-- manual captions outrank automatic captions, which outrank translated captions and local ASR;
-- disconnect, retry, cancellation, inactivity timeout, stale-lease recovery, and concurrent queue ownership;
-- removing, clearing, or retrying active work aborts the owning Service Worker execution exactly once, and stale completion cannot overwrite or resurrect queue state;
-- host-returned YouTube caption metadata is validated and persisted as `manual`, `auto`, or `translated`;
-- a malformed/unavailable higher-priority YouTube track is removed and the host continues through later automatic and translated candidates;
-- requested Cantonese aliases (`yue`, `zh-HK`, `zh-yue`, `zh-Hant-HK`, and `yue-*`) rank consistently in both extension and native caption paths;
-- sidepanel enqueue, retry, remove, and clear mutations are routed through the Service Worker rather than a sidepanel-local queue instance;
-- Native Messaging remains open during active/concurrent work but disconnects after a 250 ms idle grace period while retaining the capability snapshot;
-- out-of-order result assembly, missing/duplicate chunks, mismatched chunk counts, mismatched cue counts, invalid cues, and the strict `< 900 KiB` host-message limit;
-- `done` requires at least one normalized cue and non-empty plain text;
-- Bilibili signed media URLs and signing fragments are removed before every queue-storage write and during legacy-state migration.
+## Release-critical properties
 
-## Architecture audit
+The combined suites and process smokes verify that `com.sparksub.transcriber` remains the stable integration identity; v2 is attempted before v1; only explicit `PROTOCOL_MISMATCH` permits one legacy retry; local-ASR support comes from `features.localASR.languages`; request/job correlation and cancellation are scoped; result chunks are bounded, complete and validated; browser requests never transport media bytes, Cookie/Authorization headers, arbitrary output paths or model-selection instructions; YouTube/Bilibili acquisition obeys canonical URL/header/workspace restrictions; yt-dlp readiness requires the pinned version and actual payload SHA-256; and Native Messaging stdout contains only framed protocol messages.
 
-`processPendingJobs` has one runtime caller: `background/service-worker.js`. Its other two production references are the function definition and the exported queue method. The side panel, content scripts, and offscreen document only wake or message the Service Worker.
+SparkScribe's private worker protocol is intentionally separate from the browser contract. The helper locates the main SparkScribe executable, sends a bounded private JSON request, bounds worker output to 32 MiB, terminates the worker on cancellation, and treats a valid worker failure envelope as authoritative even when the child exits non-zero.
 
-Every production `item.stage = 'done'` path is preceded by a non-empty result guard. The active Service Worker paths both call `setCompletedSubtitle`, which rejects unless normalized cues, `cueCount`, and trimmed `plainText` are non-empty. The two retained legacy offscreen paths perform the same checks and are not connected to a queue-processing message.
+## Installer / rollback contract
 
-Queue persistence is centralized through `sanitizeQueueItemForPersistence`. It recursively drops remote media descriptors, audio caches, Bilibili CDN media URLs, and known signing fragments. Signed URLs exist only in the in-memory native request needed for the current download.
+The default install command is:
 
-The idle-port rule follows the official [Chrome extension service-worker lifecycle guidance](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle): an open `connectNative()` port keeps the Service Worker alive. SparkSub therefore retains the port only while requests are pending (plus a short reuse grace period).
+```bash
+./native/scripts/install-host.sh --extension-id <id> --chrome
+```
 
-## FluidAudio 0.15.6 API review
+`auto` selection prefers SparkScribe only when the installed helper is executable and its readiness probe succeeds. `--sparkscribe` requires that readiness and fails rather than silently falling back. `--standalone` forces the compatibility host. Dry-run never executes readiness probes or mutates the filesystem.
 
-`Package.swift` pins FluidAudio exactly to `0.15.6`. The host calls were checked against the upstream [`v0.15.6` Parakeet CLI implementation](https://github.com/FluidInference/FluidAudio/blob/v0.15.6/Sources/FluidAudioCLI/Commands/ASR/Parakeet/SlidingWindow/TranscribeCommand.swift), [`CoherePipeline`](https://github.com/FluidInference/FluidAudio/blob/v0.15.6/Sources/FluidAudio/ASR/Cohere/CoherePipeline.swift), and [`ModelHub` offline behavior](https://github.com/FluidInference/FluidAudio/blob/v0.15.6/Sources/FluidAudio/Shared/Download/DownloadTypes.swift). The reviewed signatures match the implementation for:
+Uninstall removes SparkSub-owned manifests and standalone compatibility artifacts only. It must never remove `/Applications/SparkScribe.app` or SparkScribe-owned runtime/model data.
 
-- `AsrModels.load(from:configuration:version:encoderPrecision:)`;
-- `AsrManager.loadModels`, `decoderLayerCount`, `TdtDecoderState.make`, and file transcription with a language filter;
-- `CoherePipeline.loadModels` and `transcribe(audio:models:language:)`;
-- `ModelHub.offlineMode`.
+## Platform boundary
 
-This is source-level API evidence only; it does not replace compiling the pinned package on macOS.
+The SparkScribe-bundled helper follows SparkScribe's macOS 15+ baseline. The standalone SparkSubHost remains the macOS 14+ compatibility path. Browser-only SparkSub features remain independent of either native option.
 
-## yt-dlp 2026.08.19 caption path review
+## Type-check status
 
-The host first runs a metadata-only `--dump-single-json --skip-download --ignore-no-formats-error` request, classifies `subtitles` as manual tracks and `automatic_captions` entries with a `tlang` URL parameter as translations, then tries parseable JSON3/VTT candidates in manual → automatic → translated order using `--write-subs` or `--write-auto-subs`. Each failed candidate's output is removed before the next attempt. Both invocations use `Process.arguments`, `--no-config`, `--no-playlist`, no cookies, bounded stdout/stderr, cancellation, and a job-owned output directory. `live_chat` and formats the host cannot parse are excluded from caption selection.
+A TypeScript compiler is still not pinned in this repository. `npx tsc -p tsconfig.json` therefore cannot be treated as a reproducible release gate until `typescript` is added at a fixed repository version. The current runtime JS suite exercises the edited Native Messaging client, capability normalization, queue integration, errors, cancellation and v1 fallback.
 
-## Type-check baseline
+## Remaining manual acceptance
 
-The repository-wide JavaScript type configuration is not currently green on the base branch.
+One browser-driven check remains intentionally separate from deterministic tests: from the installed unpacked SparkSub extension, trigger an actual native subtitle job and verify Chrome extension → Native Messaging → SparkScribe helper → media/caption or worker path → cues return to the extension UI. The manifest itself has already been switched on the current Chrome profile, but direct helper/worker process smokes are not labeled as a substitute for this browser-UI E2E.
 
-- `typescript@latest` resolved to 7.0.2. `tsc -p tsconfig.json` exits 1 because the existing `moduleResolution: "node"` maps to the removed `node10` mode (`TS5108`).
-- With TypeScript 5.9.2, the feature branch reports 570 existing `checkJs` diagnostics, while the local base checkout reports 592.
-- After normalizing file names, diagnostic codes, and messages (to ignore shifted line numbers), the feature branch introduces no branch-only TypeScript diagnostic. The remaining errors are existing ambient Chrome API, DOM element, and legacy namespace typing debt.
-
-The type check therefore remains a known repository baseline failure, not a passed gate. This feature adds and corrects declarations for its new queue, native-host, media, routing, and orchestrator surfaces without disabling `checkJs` or adding `@ts-nocheck`.
-
-## macOS-only release gates — not yet verified
-
-The current workspace has no Swift toolchain (`swift --version` exits 127). Before release, run all of the following on an Apple Silicon Mac:
-
-1. `swift test --package-path native/SparkSubHost`
-2. `swift run --package-path native/SparkSubHost -c release sparksub-native-host --diagnose`
-3. `native/scripts/install-host.sh --extension-id <real-unpacked-extension-id> --browser chrome --dry-run`
-4. Install the host and reload the unpacked extension.
-5. Run one public, captionless European-language YouTube video through Parakeet with the video tab closed.
-6. Run one public, captionless Mandarin video through a compatible Cohere cache-external decoder.
-7. With the video tab closed, confirm a public Cantonese video completes from a YouTube manual/automatic caption without invoking ASR.
-8. Confirm a Cantonese video with no public caption returns `ASR_LANGUAGE_UNSUPPORTED` and never invokes a local model.
-
-The Cohere smoke test requires a non-empty `vocab.json` and a decoder whose CoreML inputs contain `k_cache_0`. Merely finding a timestamped `.mlmodelc` directory is intentionally not treated as readiness. The host creates compatibility symlinks under SparkSub Application Support and never modifies the user's model directories.
-
-`.github/workflows/native-host.yml` provides a `macos-14` `swift test` job for pushes and pull requests that touch the native host. It has not run for these local-only commits.
+See `docs/native-contract-v2.md` and `docs/decisions/ADR-001-capability-driven-native-contract.md` for the stable consumer contract and decision rationale.

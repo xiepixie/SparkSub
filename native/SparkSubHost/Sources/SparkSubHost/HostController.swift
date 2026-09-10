@@ -188,12 +188,19 @@ final class HostController: @unchecked Sendable {
 
         switch request.type {
         case .capabilities:
-            writeResponse(requestId: request.requestId, result: capabilityProvider.capabilities().jsonObject)
+            writeResponse(
+                requestId: request.requestId,
+                result: capabilityProvider.capabilities().jsonObject(forProtocolVersion: request.protocolVersion)
+            )
         case .ping:
-            writeResponse(requestId: request.requestId, result: [
+            var result: [String: Any] = [
                 "alive": true,
-                "protocolVersion": NativeRequest.protocolVersion,
-            ])
+                "protocolVersion": request.protocolVersion,
+            ]
+            if request.protocolVersion == NativeRequest.currentProtocolVersion {
+                result["contract"] = NativeRequest.contractIdentifier
+            }
+            writeResponse(requestId: request.requestId, result: result)
         case .cancel:
             let cancelled = await coordinator.cancel(jobId: request.jobId ?? "")
             writeResponse(requestId: request.requestId, result: ["cancelled": cancelled])
@@ -363,6 +370,7 @@ final class HostController: @unchecked Sendable {
                 return try await youtubeCaptionFetcher.fetch(
                     source: source,
                     sourceLanguage: sourceLanguage,
+                    subtitlePreference: request.subtitlePreference ?? .manualFirst,
                     workspace: workspace,
                     cancellation: token,
                     onProgress: { [weak self] fraction in

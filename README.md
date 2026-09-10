@@ -71,12 +71,18 @@
   - **核心准则**：`原声保真 > ASR 纠错 > 可读性 > 语法规范`；
   - 精准修复连读吞音、轻读弱读与领域技术专有名词（如 PyTorch, Qwen, LoRA, Codex, GPU 等），保留 1:1 毫秒级时间戳，绝不破坏说话人原本的口吻和交谈感！
 
-### 6. 🤖 AI 课程图文分解与多模态学习工作台 (Visual Course Notes)
-- **两阶段视觉证据规划**：大模型主动规划章节知识结构与关键板书/架构图时间点，避免盲盒抽帧。
-- **通道 A 自动高清截帧**：利用 DOM Canvas 毫秒级抓取 1080P/4K 原画并自动复位原播放位置，支持随时手工「📸 截当前帧」。
-- **交互式图文卡片与 LaTeX**：讲义内嵌高清板书与数学公式，点击图片右上角 `▶ MM:SS` 秒级跳转回放。
-- **Obsidian / Notion 专属图文包**：一键打包导出包含 `images/` 子目录的 `.zip` 压缩包（图片智能去重）。
-- **持久化本地缓存**：讲义按视频自动落盘，切换标签页或重启扩展秒级恢复。
+### 6. 🤖 AI 图文报告与多模态学习工作台 (Visual Course Notes)
+- **文本规划与媒体执行分层**：学习提示词使用普通 Markdown 与自然中文；字幕时间写成 `00:12  文本`，ASR 回填用 `L0001 | 文本`，图片引用用 `![说明](frame://00:12)`。阶段一只根据字幕语义输出 `samplingWindows` 时间窗口 JSON，播放器后续才负责真实取样与筛帧；历史 `visualRequests / visualEvidence` 只在兼容层接受。
+- **跨学科内容自适应**：数学/理工、软件教程、人文社科、访谈演讲、艺术设计和纪录片按各自的信息结构组织报告，不把所有视频硬套成“定理 + 避坑 + 解题动作”。
+- **宽覆盖截图 + 两级筛选**：模型可以为重要内容给出较多候选窗口；每个窗口先用低分辨率像素签名选出 1 张代表图，再用保留二维空间结构的紧凑 fingerprint 做跨窗口去重与时间覆盖筛选。显式 seek 必须确认目标画面已完成寻道/解码才允许截图；最终证据帧约 `1536px / WebP 0.90`，用户手动截图优先保留。
+- **候选不等于缓存**：低分辨率 fingerprint、评分和未入选候选只存在当前运行内存；只有最终选中的图片进入多模态请求与 IndexedDB，因此可以提高截图覆盖率而不让长期存储随候选数膨胀。
+- **精选拼图替代跨站拖拽**：移除 Side Panel 中不可靠的“拖拽全部”。直接给网页版 AI 时底层硬限制最多 4 张生成受控尺寸联系表并复制到剪贴板；需要全部原图则使用 ZIP 打包。阶段二合成提示词只引用最后一次真正投递的图片集合，避免提示词与网页端实际收到的图片数量不一致。
+- **报告图片完整显示**：图片卡片使用 `contain`，不再用固定高度裁图；点击缩略图打开原图预览，时间按钮单独负责跳回视频。
+- **可验证的模型配置**：顶部始终显示已保存的生成模型；“测试当前模型”会真实调用输入框里的准确模型，并显示服务实际返回模型、延迟和短响应。目录探测不会自动替用户切换模型，未保存配置也不会悄悄用于生成。
+- **本地 AI 网关与最小权限**：扩展只直连 `http://localhost` / `http://127.0.0.1` 的 OpenAI-compatible / Ollama 网关；云端模型通过用户自己的本地网关转发，不申请任意公网访问权限。文本测试不等同于多模态图片能力验证。
+- **安全图文渲染与兼容导出**：AI/外部导入 Markdown 默认按不可信文本处理；`frame://` 图片引用和历史 `[SCREENSHOT: ...]` 共用帧解析 seam，精确时间缺失时只在约 ±5 秒内选择真正最近帧，渲染、删除和 ZIP 导出保持一致。
+- **媒体身份防串流**：截图与生成任务锁定启动时的 `tabId + mediaKey`；Bilibili 离线转录进一步以精确 `BVID + CID` 为身份，执行前会重新解析并验证当前分P，字幕缓存也必须带相同 owner。播放器/Side Panel 的“离线转录”是独立 `local-asr` 意图，不会再先复用打开标签页或平台字幕缓存；切视频/切标签页后旧任务和晚到结果都不能覆盖新媒体。
+- **持久化本地缓存**：讲义按视频自动落盘，图片以版本集写入 IndexedDB；Markdown 指针与 LRU 索引提交成功后才清旧图片，同一视频保存串行执行。缓存继续受数量、总容量和有效期回收策略约束。
 
 ---
 
@@ -84,11 +90,13 @@
 
 > [!NOTE]
 > 普通在线官方字幕提取、双语机翻、合集导出与订阅追踪**完全开箱即用，无需配置本机服务**。  
-> 本机服务仅在“视频本身完全没有字幕轨，需要借助 Mac 本机芯片算力跑离线 CoreML 语音转文字”时使用。
+> 本机服务仅在“视频本身完全没有字幕轨，需要借助 Mac 本机芯片算力跑离线语音转文字”时使用。
+>
+> 浏览器与本机执行层统一使用能力导向的 `sparkscribe.browser-native/2` Contract。SparkSub 不依赖 Parakeet、Cohere、Qwen 等具体模型名；实际可转录语言由 Native Host capability 决定。当前安装脚本会优先使用 `/Applications/SparkScribe.app` 内置的 `SparkSubNativeHost`，只有 SparkScribe readiness 不完整或用户显式要求时才回退到 `native/SparkSubHost`。详见 `docs/native-contract-v2.md`。视频身份与 AI 语义上下文严格分离；Bilibili 标题/UP主/分区/标签/简介及 YouTube 标题/频道/keywords 等如何进入动态 AI context，见 `docs/media-context-contract.md`。
 
-### 方式一：懒人一键配置脚本（小白强烈推荐 🌟）
+### 方式一：一键配置
 
-项目根目录已内置全自动交互式引导脚本，会自动检测环境、编译服务、部署独立引擎并绑定浏览器：
+项目根目录的安装流程会自动选择可用执行层、绑定浏览器并完成就绪检查：
 
 ```bash
 # 终端进入项目主目录，直接运行：
@@ -98,8 +106,8 @@
 **交互流程**：
 1. 脚本自动检测系统与 Apple Silicon 芯片架构；
 2. 提示输入 Chrome 扩展的 32 位 ID（若之前已绑定过，直接**敲回车**即可沿用）；
-3. 自动完成本机服务编译与独立 `yt-dlp` 抓取引擎安装；
-4. 自动运行自检诊断，输出绿色成功对勾！
+3. 若 SparkScribe 的 bundled helper readiness 完整，则直接绑定它；否则构建并安装 standalone 兼容 Host；
+4. 自动运行当前 Host 的 capability/诊断检查并报告实际可用能力。
 
 > **自动化命令（非交互）**：  
 > 若要无人值守或自动化部署，可执行：`./setup.sh --id <你的32位扩展ID> --yes`
@@ -113,11 +121,12 @@
    ```bash
    ./native/scripts/install-host.sh --extension-id <你的扩展ID> --chrome
    ```
-   *(非 Chrome 浏览器用户可将 `--chrome` 替换为 `--chromium`)*
-3. 运行自检诊断命令检查就绪状态：
+   默认 `auto` 模式优先 SparkScribe；可用 `--sparkscribe` 强制 bundled helper，或用 `--standalone` 强制兼容 Host。非 Chrome 浏览器可将 `--chrome` 替换为 `--chromium`。
+3. SparkScribe 接管时可直接检查 readiness：
    ```bash
-   "$HOME/Library/Application Support/SparkSub/SparkSubHost" --diagnose
+   /Applications/SparkScribe.app/Contents/Helpers/SparkSubNativeHost --browser-native-readiness
    ```
+   若安装器回退到 standalone Host，则继续使用其 `--diagnose` 诊断入口。
 
 ---
 

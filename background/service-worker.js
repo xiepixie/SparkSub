@@ -9,9 +9,11 @@ try {
     '../core/i18n.js',
     '../core/parsers.js',
     '../core/media.js',
+    '../core/media-context.js',
     '../core/formatters.js',
     '../core/asr-polisher.js',
     '../core/tracker.js',
+    '../core/language-routing.js',
     '../core/native-host.js',
     '../core/queue-orchestrator.js',
     '../core/queue.js'
@@ -20,7 +22,7 @@ try {
   console.error('[BSE Worker] importScripts 致命异常:', e);
 }
 
-const BSE = globalThis.BSE || {};
+/** `core/namespace.js` above initializes the shared global BSE namespace. */
 
 /** @type {Map<number, import('../types/bse').AppState>} */
 const tabStates = new Map();
@@ -47,7 +49,7 @@ function setupContextMenus() {
     chrome.contextMenus.removeAll(() => {
       chrome.contextMenus.create({
         id: 'sparksub_add_to_queue',
-        title: '📥 加入 SparkSub 离线转录队列',
+        title: '加入 SparkSub 离线转录队列',
         contexts: ['link', 'page', 'video']
       });
     });
@@ -91,7 +93,7 @@ if (chrome.contextMenus?.onClicked) {
 async function updateBadgeFromUnread() {
   try {
     const subs = await BSE.Tracker?.getSubscriptions?.() || [];
-    const totalUnread = subs.reduce((sum, s) => sum + (s.unreadCount || 0), 0);
+    const totalUnread = subs.reduce((sum, s) => sum + (BSE.Tracker?.getUnreadItems?.(s)?.length ?? (Number(s.unreadCount) || 0)), 0);
     const settings = await BSE.Tracker?.getSettings?.() || { enableBadge: true };
 
     if (chrome.action) {
@@ -109,7 +111,8 @@ async function setupSubscriptionAlarm() {
   if (!chrome.alarms) return;
   try {
     const settings = await BSE.Tracker?.getSettings?.() || { checkIntervalMinutes: 60 };
-    const periodInMinutes = Number(settings.checkIntervalMinutes) || 60;
+    const configuredInterval = Number(settings.checkIntervalMinutes);
+    const periodInMinutes = Number.isFinite(configuredInterval) ? configuredInterval : 60;
     if (periodInMinutes <= 0) {
       await chrome.alarms.clear(ALARM_SUBSCRIPTION_CHECK);
       return;
@@ -179,9 +182,16 @@ setupBilibiliNetRules().catch(() => {});
 
 if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== 'local') return;
-    const hasQueueChange = Object.keys(changes || {}).some((key) => key === 'bse_transcription_queue_v1' || key.startsWith('bse_transcription_queue_v1:item:'));
-    if (hasQueueChange) startQueueExecutor().catch((err) => console.warn('[SparkSub ServiceWorker] 队列执行异常:', err));
+    if (areaName === 'local') {
+      const hasQueueChange = Object.keys(changes || {}).some((key) => key === 'bse_transcription_queue_v1' || key.startsWith('bse_transcription_queue_v1:item:'));
+      if (hasQueueChange) startQueueExecutor().catch((err) => console.warn('[SparkSub ServiceWorker] 队列执行异常:', err));
+      if (changes?.bse_subscriptions) updateBadgeFromUnread().catch(() => {});
+      return;
+    }
+    if (areaName === 'sync' && changes?.bse_tracker_settings) {
+      setupSubscriptionAlarm().catch(() => {});
+      updateBadgeFromUnread().catch(() => {});
+    }
   });
 }
 
@@ -626,16 +636,31 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 
 function isSameMediaOrUrl(cached, tabUrl) {
   if (!cached || !tabUrl) return false;
-  if (cached.url === tabUrl) return true;
+
+  const youtubeId = BSE.Utils?.getYouTubeVideoId?.(tabUrl);
+  if (youtubeId) {
+    return cached.mediaKey === `yt:${youtubeId}`
+      && (!cached.url || BSE.Utils.getYouTubeVideoId(cached.url) === youtubeId);
+  }
+
+  const bvid = BSE.Utils?.getBvid?.(tabUrl);
+  if (bvid) {
+    const keyMatch = String(cached.mediaKey || '').match(/^bili:(BV[a-zA-Z0-9]+):(?:cid[^:]+|p(\d+))$/i);
+    if (!keyMatch || keyMatch[1].toLowerCase() !== bvid.toLowerCase()) return false;
+    if (cached.url) {
+      const cachedBvid = BSE.Utils.getBvid(cached.url);
+      if (!cachedBvid || cachedBvid.toLowerCase() !== bvid.toLowerCase()) return false;
+      if (BSE.Utils.getBilibiliPage(cached.url) !== BSE.Utils.getBilibiliPage(tabUrl)) return false;
+    }
+    // A URL can prove BVID/page but not a CID. CID-backed state must be refreshed
+    // from the content script instead of trusting a background cache snapshot.
+    if (/^bili:[^:]+:cid/i.test(String(cached.mediaKey || ''))) return false;
+    return Number(keyMatch[2] || 1) === BSE.Utils.getBilibiliPage(tabUrl);
+  }
+
   const cleanCached = String(cached.url || '').split('#')[0];
   const cleanTab = String(tabUrl).split('#')[0];
-  if (cleanCached && cleanTab && cleanCached === cleanTab) return true;
-
-  const currentMediaKey = BSE.Utils?.getMediaKey ? (BSE.Utils.getMediaKey('bilibili', tabUrl) || BSE.Utils.getMediaKey('youtube', tabUrl)) : null;
-  if (currentMediaKey && cached.mediaKey && currentMediaKey === cached.mediaKey) {
-    return true;
-  }
-  return false;
+  return Boolean(cleanCached && cleanTab && cleanCached === cleanTab);
 }
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
@@ -687,13 +712,15 @@ async function getTabState(tabId) {
   if (!tab) return null;
 
   const cached = tabStates.get(tabId);
-  if (cached && isSameMediaOrUrl(cached, tab.url)) {
+  const cachedMatchesCurrentMedia = Boolean(cached && isSameMediaOrUrl(cached, tab.url));
+  if (cachedMatchesCurrentMedia) {
     return cached;
   }
 
   try {
     const state = await chrome.tabs.sendMessage(tabId, { type: 'BSE_GET_STATE' });
-    if (state && (state.status === 'ready' || state.cues?.length > 0 || state.status === 'loading')) {
+    const identityMatches = !tab.url || BSE.Utils?.mediaStateMatchesUrl?.(state, tab.url) === true;
+    if (identityMatches && state && (state.status === 'ready' || state.cues?.length > 0 || state.status === 'loading')) {
       tabStates.set(tabId, state);
       return state;
     }
@@ -701,28 +728,28 @@ async function getTabState(tabId) {
     // Content script not ready yet
   }
 
-  if (cached && tab.url && isMatchingVideoUrl(tab.url)) {
-    return cached;
-  }
-
   if (tab.url && isMatchingSiteUrl(tab.url)) {
     const injected = await injectContentScripts(tabId, tab.url);
     if (injected) {
       await new Promise((r) => setTimeout(r, 220));
       const state = await chrome.tabs.sendMessage(tabId, { type: 'BSE_GET_STATE' }).catch(() => null);
-      if (state) {
+      if (state && (!tab.url || BSE.Utils?.mediaStateMatchesUrl?.(state, tab.url) === true)) {
         tabStates.set(tabId, state);
         return state;
       }
     }
   }
-  return cached || null;
+  return cachedMatchesCurrentMedia ? cached : null;
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message?.type) return false;
 
   if (message.type === 'BSE_STATE_UPDATE' && sender.tab?.id != null) {
+    if (sender.tab.url && BSE.Utils?.mediaStateMatchesUrl?.(message.state, sender.tab.url) !== true) {
+      sendResponse({ ok: true, ignored: 'media_mismatch' });
+      return false;
+    }
     const previous = tabStates.get(sender.tab.id);
     if (previous && Number(message.state?.revision || 0) < Number(previous.revision || 0)) {
       sendResponse({ ok: true, ignored: 'stale_revision' });
@@ -801,7 +828,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'BSE_FETCH_LOCAL_LLM') {
     const url = message.url;
     const body = message.body;
-    const timeoutMs = Math.max(60000, Number(message.timeoutMs) || 120000);
+    const requestedTimeoutMs = Number(message.timeoutMs) || 120000;
+    const timeoutMs = Math.min(300000, Math.max(1000, requestedTimeoutMs));
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const headers = {
@@ -941,16 +969,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         throw error;
       }
     })().then(sendResponse).catch((error) => sendResponse({ ok: false, error: error.message }));
-    return true;
-  }
-
-  if (message.type === 'BSE_TRACKER_UPDATE_BADGE') {
-    updateBadgeFromUnread().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
-    return true;
-  }
-
-  if (message.type === 'BSE_TRACKER_RESET_ALARM') {
-    setupSubscriptionAlarm().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
     return true;
   }
 

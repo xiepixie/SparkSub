@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const BSE = globalThis.BSE = globalThis.BSE || /** @type {any} */ ({});
+  const BSE = globalThis.BSE;
 
   /**
    * 识别当前视频平台类型
@@ -61,13 +61,13 @@
     try {
       if (typeof document === 'undefined') return null;
       const currentBvid = getBvid();
-      const activeEl = document.querySelector(
+      const activeEl = /** @type {HTMLElement | null} */ (document.querySelector(
         '.bpx-player-ctrl-eplist-menu-item.bpx-state-active, ' +
         '.cur-list li.on, ' +
         '.bili-video-pod__item--active, ' +
         '.video-episode-card.active, ' +
         '#multi_page .cur-list li.on'
-      );
+      ));
       if (!activeEl) return null;
 
       // 严防 SPA 页面跳转残留：若节点自身或链接包含 BVID，必须与当前视频一致
@@ -96,14 +96,14 @@
 
     try {
       if (typeof document !== 'undefined') {
-        const activeEl = document.querySelector(
+        const activeEl = /** @type {HTMLElement | null} */ (document.querySelector(
           '.bpx-player-ctrl-eplist-menu-item.bpx-state-active, ' +
           '#multi_page .cur-list li.on, ' +
           '.video-pod__list .active, ' +
           '.video-episode-card.active, ' +
           '.cur-list li.on, ' +
           '.bili-video-pod__item--active'
-        );
+        ));
         if (activeEl) {
           const pAttr = activeEl.dataset.page || activeEl.getAttribute('data-page') || activeEl.getAttribute('page');
           if (pAttr && Number(pAttr) > 0) return Number(pAttr);
@@ -119,17 +119,34 @@
 
   let lastKnownBilibiliCid = null;
   let lastKnownBilibiliBvid = null;
+  let lastKnownBilibiliPage = null;
 
-  function getMediaKey(platform = detectPlatform()) {
+  /**
+   * 生成稳定媒体键。传入显式 URL 时只依据 URL 本身解析，避免 Service Worker
+   * 或其他非页面上下文误用当前 document/location 的 DOM 状态。
+   * @param {import('../types/bse').Platform | null} [platform]
+   * @param {string} [url]
+   * @returns {string | null}
+   */
+  function getMediaKey(platform = detectPlatform(), url = (typeof location !== 'undefined' ? location.href : '')) {
     if (platform === BSE.PLATFORM.YOUTUBE) {
-      const videoId = getYouTubeVideoId();
+      const videoId = getYouTubeVideoId(url);
       return videoId ? `yt:${videoId}` : null;
     }
     if (platform === BSE.PLATFORM.BILIBILI) {
-      const bvid = getBvid();
+      const bvid = getBvid(url);
       if (!bvid) return null;
-      if (bvid !== lastKnownBilibiliBvid) {
+
+      const hasCurrentDocument = typeof location !== 'undefined' && typeof document !== 'undefined';
+      const isCurrentDocumentUrl = hasCurrentDocument && url === location.href;
+      if (!isCurrentDocumentUrl) {
+        return `bili:${bvid}:p${getBilibiliPage(url)}`;
+      }
+
+      const currentPage = getBilibiliPage(url);
+      if (bvid !== lastKnownBilibiliBvid || currentPage !== lastKnownBilibiliPage) {
         lastKnownBilibiliBvid = bvid;
+        lastKnownBilibiliPage = currentPage;
         lastKnownBilibiliCid = null;
       }
       const activeCid = getActiveCidFromDom();
@@ -139,10 +156,43 @@
       if (lastKnownBilibiliCid) {
         return `bili:${bvid}:cid${lastKnownBilibiliCid}`;
       }
-      const page = getBilibiliPage();
-      return `bili:${bvid}:p${page}`;
+      return `bili:${bvid}:p${currentPage}`;
     }
     return null;
+  }
+
+  function mediaStateMatchesUrl(candidateState, targetUrl) {
+    if (!candidateState || !targetUrl) return false;
+    const mediaKey = String(candidateState.mediaKey || '').trim();
+    if (!mediaKey) return false;
+
+    const targetYouTubeId = getYouTubeVideoId(targetUrl);
+    if (targetYouTubeId) {
+      if (mediaKey !== `yt:${targetYouTubeId}`) return false;
+      const stateVideoId = candidateState.url ? getYouTubeVideoId(candidateState.url) : targetYouTubeId;
+      return stateVideoId === targetYouTubeId;
+    }
+
+    const targetBvid = getBvid(targetUrl);
+    if (targetBvid) {
+      const isCurrentDocumentUrl = typeof location !== 'undefined'
+        && typeof document !== 'undefined'
+        && targetUrl === location.href;
+      if (isCurrentDocumentUrl) {
+        const liveMediaKey = getMediaKey(BSE.PLATFORM.BILIBILI, targetUrl);
+        if (!liveMediaKey || mediaKey !== liveMediaKey) return false;
+      }
+      const mediaMatch = mediaKey.match(/^bili:(BV[a-zA-Z0-9]+):(?:cid[^:]+|p(\d+))$/i);
+      if (!mediaMatch || mediaMatch[1].toLowerCase() !== targetBvid.toLowerCase()) return false;
+      if (candidateState.url) {
+        const stateBvid = getBvid(candidateState.url);
+        if (!stateBvid || stateBvid.toLowerCase() !== targetBvid.toLowerCase()) return false;
+        if (getBilibiliPage(candidateState.url) !== getBilibiliPage(targetUrl)) return false;
+      }
+      return true;
+    }
+
+    return false;
   }
 
   function delay(ms, signal) {
@@ -383,57 +433,160 @@
   const UNIFIED_CACHE_KEY_PREFIX = 'bse_sub_cache_';
   const UNIFIED_CACHE_INDEX_KEY = 'bse_sub_cache_index';
   const MAX_UNIFIED_CACHE_ITEMS = 60;
+  const MAX_UNIFIED_CACHE_BYTES = 6_000_000;
+  const MAX_UNIFIED_CACHE_RECORD_BYTES = 900_000;
   const MAX_UNIFIED_CACHE_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+
+  function buildUnifiedSubtitleRecord(mediaKey, payload) {
+    const cleanKey = String(mediaKey || '').trim();
+    const cues = Array.isArray(payload?.cues) ? payload.cues : [];
+    const markdown = String(payload?.markdown || '');
+    const plainText = String(payload?.plainText || '');
+    if (!cleanKey || (!cues.length && !markdown && !plainText)) return null;
+    return {
+      mediaKey: cleanKey,
+      title: payload?.title || '',
+      author: payload?.author || '',
+      language: payload?.language || payload?.lang || 'zh',
+      langDoc: payload?.langDoc || '中文',
+      cues,
+      cueCount: Number(payload?.cueCount) || cues.length,
+      // Plain text is deterministic from cues. Persist it only for text-only
+      // legacy/migration records to avoid duplicating every subtitle body.
+      plainText: cues.length ? '' : plainText,
+      markdown,
+      savedAt: Date.now()
+    };
+  }
+
+  function estimateUnifiedCacheBytes(record) {
+    try {
+      return new TextEncoder().encode(JSON.stringify(record)).length;
+    } catch {
+      return 0;
+    }
+  }
+
+  function fitUnifiedCacheRecord(record) {
+    if (!record) return null;
+    let candidate = record;
+    let bytes = estimateUnifiedCacheBytes(candidate);
+    if (bytes <= MAX_UNIFIED_CACHE_RECORD_BYTES) return { record: candidate, bytes };
+
+    // Markdown is a derived/export representation when cues are present. Drop
+    // it before giving up on a useful cue cache entry.
+    if (candidate.cues?.length && candidate.markdown) {
+      candidate = { ...candidate, markdown: '' };
+      bytes = estimateUnifiedCacheBytes(candidate);
+    }
+    if (bytes > MAX_UNIFIED_CACHE_RECORD_BYTES) return null;
+    return { record: candidate, bytes };
+  }
+
+  async function normalizeUnifiedCacheIndex(rawIndex) {
+    if (!Array.isArray(rawIndex) || !rawIndex.length) return [];
+    const normalized = rawIndex.map((entry) => (
+      typeof entry === 'string'
+        ? { key: entry, bytes: 0, savedAt: 0 }
+        : { key: String(entry?.key || ''), bytes: Math.max(0, Number(entry?.bytes) || 0), savedAt: Number(entry?.savedAt) || 0 }
+    )).filter((entry) => entry.key);
+    const unknown = normalized.filter((entry) => entry.bytes <= 0);
+    if (!unknown.length) return normalized;
+
+    // One-time upgrade from the old string-only index. Read existing records in
+    // one batch so future writes can enforce a byte budget without rescanning.
+    const stored = await chrome.storage.local.get(unknown.map((entry) => entry.key));
+    unknown.forEach((entry) => {
+      entry.bytes = estimateUnifiedCacheBytes(stored[entry.key]);
+      entry.savedAt = Number(stored[entry.key]?.savedAt) || 0;
+    });
+    return normalized;
+  }
+
+  async function writeUnifiedSubtitleRecords(entries) {
+    if (!Array.isArray(entries) || !entries.length || typeof chrome === 'undefined' || !chrome.storage?.local) return;
+    const records = {};
+    const freshEntries = [];
+    for (const entry of entries) {
+      const fitted = fitUnifiedCacheRecord(buildUnifiedSubtitleRecord(entry?.mediaKey, entry?.payload));
+      if (!fitted) continue;
+      const key = UNIFIED_CACHE_KEY_PREFIX + fitted.record.mediaKey;
+      records[key] = fitted.record;
+      freshEntries.push({ key, bytes: fitted.bytes, savedAt: fitted.record.savedAt });
+    }
+    if (!freshEntries.length) return;
+
+    const idxRes = await chrome.storage.local.get(UNIFIED_CACHE_INDEX_KEY);
+    const previousIndex = await normalizeUnifiedCacheIndex(idxRes[UNIFIED_CACHE_INDEX_KEY]);
+    const freshSet = new Set(freshEntries.map((entry) => entry.key));
+    const candidates = [...freshEntries, ...previousIndex.filter((entry) => !freshSet.has(entry.key))];
+    const index = [];
+    const evicted = [];
+    let totalBytes = 0;
+    for (const entry of candidates) {
+      const bytes = Math.max(0, Number(entry.bytes) || 0);
+      if (index.length >= MAX_UNIFIED_CACHE_ITEMS || totalBytes + bytes > MAX_UNIFIED_CACHE_BYTES) {
+        evicted.push(entry.key);
+        continue;
+      }
+      index.push(entry);
+      totalBytes += bytes;
+    }
+
+    records[UNIFIED_CACHE_INDEX_KEY] = index;
+    await chrome.storage.local.set(records);
+    if (evicted.length) chrome.storage.local.remove([...new Set(evicted)]).catch(() => {});
+  }
 
   const UnifiedSubtitleCache = {
     async get(mediaKey) {
-      if (!mediaKey || typeof chrome === 'undefined' || !chrome.storage?.local) return null;
+      const cleanKey = String(mediaKey || '').trim();
+      if (!cleanKey || typeof chrome === 'undefined' || !chrome.storage?.local) return null;
       try {
-        const cleanKey = String(mediaKey).trim();
-        const key = UNIFIED_CACHE_KEY_PREFIX + cleanKey;
-        const res = await chrome.storage.local.get(key);
-        const data = res[key];
-        if (!data || !Array.isArray(data.cues) || !data.cues.length) return null;
-        if (data.savedAt && Date.now() - data.savedAt > MAX_UNIFIED_CACHE_AGE_MS) {
-          chrome.storage.local.remove(key).catch(() => {});
-          return null;
-        }
-        return data;
+        const result = await this.getMany([cleanKey]);
+        return result[cleanKey] || null;
       } catch {
         return null;
       }
     },
-    async set(mediaKey, payload) {
-      if (!mediaKey || !payload || !Array.isArray(payload.cues) || !payload.cues.length || typeof chrome === 'undefined' || !chrome.storage?.local) return;
-      try {
-        const cleanKey = String(mediaKey).trim();
-        const key = UNIFIED_CACHE_KEY_PREFIX + cleanKey;
-        const record = {
-          mediaKey: cleanKey,
-          title: payload.title || '',
-          author: payload.author || '',
-          language: payload.language || payload.lang || 'zh',
-          langDoc: payload.langDoc || '中文',
-          cues: payload.cues,
-          cueCount: payload.cues.length,
-          plainText: payload.plainText || payload.cues.map((c) => c.content).join(' '),
-          markdown: payload.markdown || '',
-          savedAt: Date.now()
-        };
-        await chrome.storage.local.set({ [key]: record });
-
-        const idxRes = await chrome.storage.local.get(UNIFIED_CACHE_INDEX_KEY);
-        let index = Array.isArray(idxRes[UNIFIED_CACHE_INDEX_KEY]) ? idxRes[UNIFIED_CACHE_INDEX_KEY] : [];
-        index = index.filter((k) => k !== key);
-        index.unshift(key);
-        if (index.length > MAX_UNIFIED_CACHE_ITEMS) {
-          const evicted = index.slice(MAX_UNIFIED_CACHE_ITEMS);
-          index = index.slice(0, MAX_UNIFIED_CACHE_ITEMS);
-          chrome.storage.local.remove(evicted).catch(() => {});
+    async getMany(mediaKeys) {
+      if (!Array.isArray(mediaKeys) || !mediaKeys.length || typeof chrome === 'undefined' || !chrome.storage?.local) return {};
+      const cleanKeys = [...new Set(mediaKeys.map((key) => String(key || '').trim()).filter(Boolean))];
+      if (!cleanKeys.length) return {};
+      const storageKeys = cleanKeys.map((key) => UNIFIED_CACHE_KEY_PREFIX + key);
+      const stored = await chrome.storage.local.get(storageKeys);
+      const result = {};
+      const expired = [];
+      for (let index = 0; index < cleanKeys.length; index++) {
+        const mediaKey = cleanKeys[index];
+        const storageKey = storageKeys[index];
+        const data = stored[storageKey];
+        if (!data) continue;
+        if (data.savedAt && Date.now() - data.savedAt > MAX_UNIFIED_CACHE_AGE_MS) {
+          expired.push(storageKey);
+          continue;
         }
-        await chrome.storage.local.set({ [UNIFIED_CACHE_INDEX_KEY]: index });
+        const hasCues = Array.isArray(data.cues) && data.cues.length > 0;
+        if (!hasCues && !data.markdown && !data.plainText) continue;
+        result[mediaKey] = hasCues && !data.plainText
+          ? { ...data, plainText: data.cues.map((cue) => cue.content).join(' ') }
+          : data;
+      }
+      if (expired.length) chrome.storage.local.remove(expired).catch(() => {});
+      return result;
+    },
+    async set(mediaKey, payload) {
+      try {
+        await writeUnifiedSubtitleRecords([{ mediaKey, payload }]);
       } catch (err) {
         console.warn('[UnifiedSubtitleCache] Failed to cache subtitle:', err);
+      }
+    },
+    async setMany(entries) {
+      try {
+        await writeUnifiedSubtitleRecords(entries);
+      } catch (err) {
+        console.warn('[UnifiedSubtitleCache] Failed to cache subtitle batch:', err);
       }
     }
   };
@@ -446,6 +599,7 @@
     getBilibiliPage,
     getActiveCidFromDom,
     getMediaKey,
+    mediaStateMatchesUrl,
     delay,
     fetchWithTimeout,
     formatClock,

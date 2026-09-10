@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const BSE = globalThis.BSE = globalThis.BSE || {};
+  const BSE = globalThis.BSE;
   const formatClock = (seconds) => (BSE.Utils?.formatClock ? BSE.Utils.formatClock(seconds) : `${seconds}`);
 
   /**
@@ -11,21 +11,51 @@
    */
   function mergeParagraphs(cues) {
     const paragraphs = [];
-    let current = [];
-    let length = 0;
+    let current = '';
+    let previousTo = null;
+
+    const flush = () => {
+      const paragraph = current.trim();
+      if (paragraph) paragraphs.push(paragraph);
+      current = '';
+    };
+    const separatorFor = (left, right) => {
+      if (!left || !right) return '';
+      if (/\s$/.test(left) || /^\s/.test(right)) return '';
+      if (/[（(【\[《「『“‘]$/.test(left)) return '';
+      if (/^[，。！？；：、,.!?;:)）\]】》」』”’]/.test(right)) return '';
+      const leftChar = left.slice(-1);
+      const rightChar = right.charAt(0);
+      const cjk = /[\u3400-\u9fff\uf900-\ufaff]/;
+      if (cjk.test(leftChar) && cjk.test(rightChar)) return '\n';
+      if (/[，。！？；：、]$/.test(left)) return '';
+      return ' ';
+    };
+
     for (const cue of cues || []) {
       const text = String(cue.content || '').trim();
       if (!text) continue;
-      current.push(text);
-      length += text.length;
-      if ((/[。！？!?；;]$/.test(text) && length >= 80) || length >= 200) {
-        paragraphs.push(current.join(' '));
-        current = [];
-        length = 0;
-      }
+
+      const from = Number(cue.from);
+      const to = Number(cue.to);
+      const gap = previousTo != null && Number.isFinite(from) ? Math.max(0, from - previousTo) : 0;
+      if (current && gap >= 1.5 && current.length >= 40) flush();
+
+      current += `${separatorFor(current, text)}${text}`;
+
+      const strongSentenceEnd = /[。！？!?；;]$/.test(text);
+      if ((strongSentenceEnd && current.length >= 80) || current.length >= 240) flush();
+      if (Number.isFinite(to)) previousTo = to;
     }
-    if (current.length) paragraphs.push(current.join(' '));
+    flush();
     return paragraphs.join('\n\n');
+  }
+
+  function mergeCueTextForModel(cues) {
+    return (cues || [])
+      .map((cue) => String(cue.content || '').trim())
+      .filter(Boolean)
+      .join(' ');
   }
 
   function srtTime(seconds) {
@@ -62,137 +92,64 @@
   const AI_PROMPTS = [
     {
       id: 'polish',
-      icon: '✨',
+      icon: '',
       text: 'ASR 吞音与术语纠错',
       desc: '原声保真 > ASR 纠错 > 语法规范。保留自然口吻与交谈感，精准修正同音、吞音与专有名词',
-      prompt: (meta = {}) => `你是一个专业的视频字幕校对与 ASR 纠错专家。当前视频标题为：《${meta?.title || '视频原片'}》。
+      prompt: (meta = {}) => `请保守校对下面的视频字幕。视频标题是《${meta?.title || '视频原片'}》。
 
-【核心标准与优先级】：
-原声保真 > ASR 纠错 > 可读性 > 语法规范。
+重点修正明显的 ASR 同音/近音错误、吞音断词、专有名词、大小写和基础标点。只有上下文足够明确时才补回漏词；保留说话人的自然口吻、措辞习惯和句子顺序，不把口语改写成书面文章。
 
-字幕应当让观众产生：
-“屏幕上的文字就是我刚刚听到的话”，而不是“有人把这段话重新写了一遍”。
+直接返回校对后的字幕文本即可。
 
-【校对与纠错五大原则】：
-1. 【同音/近音/吞音纠错】：精准修正明确的同音、近音、连读、弱读导致的识别错误（如 "starp" ➔ "startup"、"tra ined" ➔ "trained"、"to of results" ➔ "turn to the results" 等）；
-2. 【专有名词与技术术语】：结合视频标题与上下文，准确识别并规范专有名词、人名、产品名与技术术语（如 Qwen, PyTorch, Codex, LoRA, Claude, GPT-5, BERT, Jacob Devlin 等）；
-3. 【大小写与文本规范】：修正明显错误的英文大小写、术语拼写、不合理的词中空格与基础标点规范化；
-4. 【仅在证据确凿时补词】：只有在现有上下文和发音证据足以表明 ASR 确实漏识别/吞掉词时（如失落的代词、介词或时态词尾 -ed/-s），才适度恢复漏掉的词，坚决不做主观扩写或脑补；
-5. 【严格保留口语原声风味】：保留说话人的自然语气、措辞习惯、交谈感和实际语法，绝不将其粗暴重写或书面化阉割，确保字幕与原声视听高度吻合；
-6. 【输出要求】：直接输出校对后的清晰自然字幕文本。
-
----
-以下为原始字幕文本：`
+原始字幕：`
     },
     {
       id: 'notes',
-      icon: '🎯',
+      icon: '',
       text: '生成结构化深度讲义',
       desc: '去噪纠错、定理脉络、推导动机与避坑边界',
-      prompt: `你的任务是将提供的视频转录稿，整理成一份结构严谨、逻辑清晰、适合中高阶学习、复盘或应试备考的高质量专业讲义。
+      prompt: `请把下面的视频转录稿整理成一份适合深入学习和复盘的 Markdown 讲义。
 
-【核心处理原则】：
-1. 输出规范：直接输出高质量可排版 Markdown 文本，严禁输出 PPT 大纲、Word/Doc 模板等办公文档占位符；
-2. 去噪与清洗：过滤讲者口误自纠、口头禅、闲聊冗余与机械性代数运算口述；保留关键变形、换元、构造动机与分类依据；
-3. ASR 纠错与 LaTeX 严格排版规范：
-   - 绝对值与模使用 \\lvert ... \\rvert (伸缩 \\left\\lvert ... \\right\\rvert)，禁止手打键盘竖线；
-   - 范数使用 \\lVert ... \\rVert (伸缩 \\left\\lVert ... \\right\\rVert)，禁止手打 ||x||；
-   - 条件符使用 \\mid (如 $P(A \\mid B)$、$\\{x \\in \\mathbb{R} \\mid x > 0\\}$)；
-   - 正体微分算子使用 \\mathrm{d}x、偏导 \\partial；向量/矩阵使用粗斜体 \\boldsymbol{x}、\\boldsymbol{A} (严禁 \\pmb)；
-   - 自然底数使用正体 \\mathrm{e}^x，函数名使用内置算子 \\lim、\\sin、\\cos、\\ln；不等号使用 \\le、\\ge；
-4. 防幻觉与可信度分级：严禁编造原视频未给出的关键条件与数据；无法确认的信息标注 [原视频未明示/待补充]；
-5. 注重方法动机：遇到关键推导、设参、定理应用或分类讨论时，必须说明“为什么这样做”；
-6. 语言风格：专业、克制、自然，杜绝“秒杀/大招/闭眼套”等营销化夸张表达。
+先还原视频自己的逻辑，再根据内容类型选择结构，不要机械套统一模板：理工内容重点保留定义、推导、条件和关键变形；软件教程重点保留目标、步骤、代码/参数和失败场景；人文社科重点区分事实、观点、论据、背景与因果关系；访谈和演讲重点梳理观点、例子、转折和分歧。
 
-【讲义输出结构】：
-# [视频主题 / 核心知识板块]
+过滤明显口头禅与重复，但保留真正承载思路的过程。视频没有给出的关键事实不要补成确定结论；必要的背景解释可以补充，但要和视频原意区分开。数学公式出现时用常规 LaTeX 排版，非数学内容不要强行公式化。
 
-## 一、核心知识与定理/工具索引
-- 提取并规范书写本讲涉及的核心概念、公式、定理或工具，注明适用条件与符号含义。
+直接输出自然、连续、可阅读的 Markdown。
 
-## 二、核心脉络与分步深度精讲
-- 按知识板块或例题逻辑重构，分步拆解；
-- 包含：明确目标 -> 关键设法/转化路径 -> 核心推导与关键变形（压缩常规计算，保留关键式） -> 结论总结。
-
-## 三、避坑指南与边界说明
-- 提取易错点、参数范围/定义域、判别式、临界条件、漏解风险、等号成立条件或特殊边界。
-
-## 四、方法迁移与实战启发
-- 本讲核心思想可迁移的类似场景或题型；
-- 提炼 2~3 条具体、可转化为做题动作的实战启发。
-
----
-以下为视频字幕内容：`
+视频字幕：`
     },
     {
       id: 'summary',
-      icon: '📝',
+      icon: '',
       text: '总结核心主旨与脉络',
       desc: '精准概括主线脉络、核心结论与关键注意点',
-      prompt: `请将以下视频转录稿整理为一份高信息密度、逻辑严谨的核心内容摘要。
+      prompt: `请把下面的视频转录稿整理成一份简洁但信息密度高的摘要。
 
-【处理原则】：
-1. 过滤口语化冗余、口头禅与重复表达，纠正 ASR 同音识别错误；
-2. 保持内容客观真实，严格基于视频内容，不臆造未经证实的事实；
-3. 语言规范、简练、专业。
+先用一两句话说明视频真正讨论的主题与主要结论，再按讲解顺序梳理关键阶段、观点或因果链。保留重要前提、限制、争议点和作者特别强调的注意事项，去掉口头禅与重复表达。不要加入视频没有提供的事实。
 
-【输出结构】：
-1. 💡 核心主旨：用 1~2 句话精准概括视频讨论的核心议题与核心结论；
-2. 🧭 核心逻辑脉络：按论证/讲解主线，提炼 3~5 个关键阶段或论点；
-3. 🔑 关键结论与价值：提炼视频输出的最重要成果、实用方法或核心洞见；
-4. ⚠️ 核心注意点：视频中强调的关键前提、适用边界或易忽略事项。
-
----
-以下为视频字幕内容：`
+视频字幕：`
     },
     {
       id: 'keypoints',
-      icon: '📋',
+      icon: '',
       text: '提炼关键要点与清单',
       desc: '提炼高密度要点、适用边界与实战动作清单',
-      prompt: `请从以下视频转录稿中提炼出 5~10 条高信息密度的核心关键要点与实战操作清单。
+      prompt: `请从下面的视频转录稿中提炼最值得保留的关键要点。数量随内容决定，不必为了凑数硬拆成固定条数。
 
-【处理原则】：
-1. 过滤口语噪点，纠正专业术语与符号表达（公式使用 LaTeX，代码使用代码块）；
-2. 提取高信息密度的实质性内容，避免空泛套话；
-3. 严格基于视频内容，不凭空捏造事实。
+每条要点先给出清晰的核心判断，再补充真正必要的依据、条件、例子或行动建议。理工内容可以强调适用条件和操作步骤；人文、评论或访谈内容则更适合强调论据、背景、视角和结论。公式使用 LaTeX，代码使用代码块。不要写空泛套话，也不要补造视频没有提供的事实。
 
-【输出结构】：
-对于每一条关键要点，请按如下格式呈现：
-- 📌 [要点名称 / 核心判断]：核心内容精炼阐述。
-  - 核心依据 / 逻辑：背后的原理、推导或关键论据。
-  - 适用条件 / 边界：在何种场景或前提下生效。
-  - 实战落地动作：具体可执行的做题技巧或操作步骤。
-
----
-以下为视频字幕内容：`
+视频字幕：`
     },
     {
       id: 'questions',
-      icon: '❓',
+      icon: '',
       text: '生成深度复盘与辨析题',
       desc: '生成概念辨析、推导动机与易错边界思考题',
-      prompt: `请根据以下视频转录稿，设计 5 个具有深度、启发性与考查价值的复盘思考题。
+      prompt: `请根据下面的视频转录稿设计一组真正适合复盘的思考题，并给出简洁的思考方向或参考答案。
 
-【处理原则】：
-1. 紧扣视频中的核心难点、易混淆概念、关键推导转折与边界条件；
-2. 问题应促使学习者深度思考底层逻辑、方法迁移与易错陷阱，而非简单死记硬背；
-3. 每个问题后附带简洁的【思考方向与复盘要点】。
+问题应围绕视频最重要的理解难点，而不是简单回忆原句。理工内容可以追问概念差异、推导动机、条件变化和失败边界；人文社科可以追问论据是否支持结论、不同视角和因果解释；软件或操作教程可以追问为什么选择某一步、替代方案以及什么情况下会失败。题目数量随内容复杂度决定。
 
-【输出结构】：
-- Q1 [概念辨析 / 原理溯源]：针对核心概念或定理的前提条件提出问题。
-  - 💡 复盘要点：...
-- Q2 [推导关键与动机探究]：针对关键步骤“为什么这么做 / 能否换一种做法”提问。
-  - 💡 复盘要点：...
-- Q3 [边界与易错陷阱]：针对极端情况、定义域、退化情形或常见错误提问。
-  - 💡 复盘要点：...
-- Q4 [变式与条件迁移]：若题设/场景发生某种变式，该方法如何调整。
-  - 💡 复盘要点：...
-- Q5 [实战综合应用]：结合真实做题或实践场景的综合运用提问。
-  - 💡 复盘要点：...
-
----
-以下为视频字幕内容：`
+视频字幕：`
     }
   ];
 
@@ -204,8 +161,64 @@
     } else {
       promptHeader = promptIdOrText || (typeof AI_PROMPTS[0].prompt === 'function' ? AI_PROMPTS[0].prompt(metadata) : AI_PROMPTS[0].prompt);
     }
-    const text = withTimestamp ? toTxt(cues, true) : mergeParagraphs(cues);
-    return `${promptHeader}\n\n${text}`.trim();
+    const text = withTimestamp
+      ? (cues || []).map((cue) => `${formatClock(cue.from)}  ${cue.content}`).join('\n')
+      : mergeCueTextForModel(cues);
+    const contextBlock = BSE.MediaContext?.formatMetadataBlock?.(metadata?.mediaContext || null) || '';
+    return `${promptHeader}${contextBlock ? `\n\n${contextBlock}` : ''}\n\n${text}`.trim();
+  }
+
+  function frameTimeToSeconds(value) {
+    const parts = String(value ?? '').trim().split(':').map(Number);
+    if (!parts.length || parts.some((part) => !Number.isFinite(part))) return 0;
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return Number(parts[0]) || 0;
+  }
+
+  function buildFrameReference(timeStr, label = '相关画面') {
+    const safeTime = String(timeStr || '00:00').trim().replace(/[^0-9:]/g, '') || '00:00';
+    const safeLabel = String(label || '相关画面').replace(/[\r\n]+/g, ' ').replace(/\]/g, '）').trim() || '相关画面';
+    return `![${safeLabel}](frame://${safeTime})`;
+  }
+
+  function resolveFrameEntry(imagesMap = {}, reference = {}) {
+    const seconds = Number(reference.seconds);
+    const timeStr = String(reference.timeStr || '');
+    const maxDistance = Math.max(0, Number(reference.maxDistance ?? 5) || 0);
+    const direct = imagesMap[timeStr]
+      || (Number.isFinite(seconds) ? imagesMap[seconds] || imagesMap[String(seconds)] : null);
+    if (direct) return { frame: direct, distance: 0 };
+    if (!Number.isFinite(seconds)) return null;
+
+    let nearestFrame = null;
+    let nearestDistance = Infinity;
+    for (const value of Object.values(imagesMap || {})) {
+      const timestamp = Number(value?.timestamp);
+      if (!Number.isFinite(timestamp)) continue;
+      const distance = Math.abs(timestamp - seconds);
+      if (distance <= maxDistance && distance < nearestDistance) {
+        nearestFrame = value;
+        nearestDistance = distance;
+      }
+    }
+    return nearestFrame ? { frame: nearestFrame, distance: nearestDistance } : null;
+  }
+
+  function transformFrameReferences(markdown, transform) {
+    const apply = (raw, timeStr, label) => {
+      const result = transform({
+        raw,
+        timeStr: String(timeStr || ''),
+        seconds: frameTimeToSeconds(timeStr),
+        label: String(label || '').trim()
+      });
+      return typeof result === 'string' ? result : raw;
+    };
+    let output = String(markdown || '');
+    output = output.replace(/!\[([^\]]*)\]\(frame:\/\/([0-9:]+)\)/gi, (raw, label, timeStr) => apply(raw, timeStr, label));
+    output = output.replace(/\[SCREENSHOT:\s*([0-9:]+)(?:\s*["“]([^"”]+)["”])?\]/gi, (raw, timeStr, label) => apply(raw, timeStr, label));
+    return output;
   }
 
   /**
@@ -247,11 +260,16 @@
     const resultsList = Array.isArray(results)
       ? results
       : (results && typeof results.values === 'function' ? Array.from(results.values()) : []);
-    const validResults = resultsList.filter(Boolean);
+    const validResults = resultsList
+      .filter(Boolean)
+      .sort((a, b) => Number(a?.item?.globalIndex || 0) - Number(b?.item?.globalIndex || 0));
+    const isYouTube = tree?.kind === 'youtube_playlist';
+    const sourceLabel = isYouTube ? 'YouTube' : '哔哩哔哩';
+    const sourceLinkLabel = isYouTube ? 'YouTube 链接' : 'B站链接';
     const lines = [
       `# ${tree.title || '字幕合集'}`,
       '',
-      `> 来源：哔哩哔哩`,
+      `> 来源：${sourceLabel}`,
       `> 导出时间：${new Date().toLocaleString()}`,
       `> 结果统计：共 ${stats.total || validResults.length} 集（成功 ${stats.success || 0}，无字幕 ${stats.noSub || 0}，失败 ${stats.failed || 0}）`,
       '',
@@ -265,13 +283,15 @@
         lastSection = r.item?.sectionKey;
         lines.push(`## ${r.item?.sectionTitle || '全集'}`, '');
       }
-      const epNum = String(r.item?.globalIndex || 1).padStart(3, '0');
-      const cleanTitle = (r.item?.title || '').replace(/^\s*\d+\s*[.、:_-]\s*/, '').trim() || '未命名';
+      const itemIndex = Number(r.item?.globalIndex || 1);
+      const epNum = String(itemIndex).padStart(3, '0');
+      const numberedPrefix = new RegExp(`^\\s*0*${itemIndex}\\s*(?:[.、:_-]\\s*|\\s+)`);
+      const cleanTitle = String(r.item?.title || '').replace(numberedPrefix, '').trim() || '未命名';
       lines.push(`### ${epNum}. ${cleanTitle}`);
-      if (r.item?.sourceUrl) lines.push(`- 来源：[B站链接](${r.item.sourceUrl})`);
+      if (r.item?.sourceUrl) lines.push(`- 来源：[${sourceLinkLabel}](${r.item.sourceUrl})`);
 
       if (r.status === 'success') {
-        lines.push(`- 字幕类型：${r.track?.lan_doc || r.track?.lan || '中文'}`, '');
+        lines.push(`- 字幕类型：${r.track?.lan_doc || r.track?.lanDoc || r.track?.label || r.track?.language || r.track?.lan || '未知'}`, '');
         if (withTimestamp) {
           for (const cue of (r.body || [])) {
             lines.push(`- \`[${formatClock(cue.from)}]\` ${cue.content}`);
@@ -280,14 +300,61 @@
           lines.push(mergeParagraphs(r.body));
         }
       } else if (r.status === 'no_subtitle') {
-        lines.push('- 状态：`⚪ 本集未提供字幕（UP主未上传且未生成AI字幕）`', '');
+        lines.push('- 状态：`本集未提供字幕（UP主未上传且未生成AI字幕）`', '');
       } else {
-        lines.push(`- 状态：\`❌ 本集字幕抓取失败（${r.reason || '网络或接口异常'}）\``, '');
+        lines.push(`- 状态：\`本集字幕抓取失败（${r.reason || '网络或接口异常'}）\``, '');
       }
       lines.push('', '---', '');
     }
 
     return lines.join('\n');
+  }
+
+  /**
+   * 导出为适合复制、纯文本归档的合并长文稿。
+   * 不使用 Markdown 标题语法，避免用户粘贴到文档、AI 或聊天框后携带额外格式噪声。
+   * @param {import('../types/bse').BilibiliTree} tree
+   * @param {any} results
+   * @param {any} [stats]
+   * @param {import('../types/bse').FormatOptions} [options]
+   * @returns {string}
+   */
+  function toMergedText(tree, results, stats = {}, { withTimestamp = false } = {}) {
+    const resultsList = Array.isArray(results)
+      ? results
+      : (results && typeof results.values === 'function' ? Array.from(results.values()) : []);
+    const validResults = resultsList
+      .filter(Boolean)
+      .sort((a, b) => Number(a?.item?.globalIndex || 0) - Number(b?.item?.globalIndex || 0));
+    const lines = [
+      tree.title || '字幕合集',
+      `共 ${stats.total || validResults.length} 项 · 成功 ${stats.success || 0} · 无字幕 ${stats.noSub || 0} · 失败 ${stats.failed || 0}`,
+      ''
+    ];
+
+    for (const result of validResults) {
+      const itemIndex = Number(result.item?.globalIndex || 1);
+      const index = String(itemIndex).padStart(3, '0');
+      const numberedPrefix = new RegExp(`^\\s*0*${itemIndex}\\s*(?:[.、:_-]\\s*|\\s+)`);
+      const title = String(result.item?.title || '未命名').replace(numberedPrefix, '').trim() || '未命名';
+      lines.push(`${index}. ${title}`);
+      if (result.status === 'success') {
+        if (withTimestamp) {
+          for (const cue of (result.body || [])) {
+            lines.push(`[${formatClock(cue.from)}] ${cue.content}`);
+          }
+        } else {
+          lines.push(mergeParagraphs(result.body || []));
+        }
+      } else if (result.status === 'no_subtitle') {
+        lines.push(`（无可用字幕：${result.reason || '未检测到字幕轨道'}）`);
+      } else {
+        lines.push(`（字幕提取失败：${result.reason || '网络或接口异常'}）`);
+      }
+      lines.push('');
+    }
+
+    return `${lines.join('\n').trimEnd()}\n`;
   }
 
   /**
@@ -333,7 +400,11 @@
           cid: item.cid,
           url: item.sourceUrl,
           status: r?.status || 'unknown',
-          subtitle: r?.track ? { lan: r.track.lan, lan_doc: r.track.lan_doc, isAI: r.track.isAI } : null,
+          subtitle: r?.track ? {
+            lan: r.track.lan || r.track.language || r.track.languageCode || null,
+            lan_doc: r.track.lan_doc || r.track.lanDoc || r.track.label || null,
+            isAI: Boolean(r.track.isAI || r.track.captionKind === 'auto')
+          } : null,
           reason: r?.reason || null
         };
       })
@@ -365,6 +436,63 @@
     if (!markdown || typeof markdown !== 'string') return '';
     const imagesMap = options.imagesMap || {};
 
+    const escapeHtmlText = (value) => String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    const escapeHtmlAttribute = (value) => String(value ?? '')
+      .replace(/&(?!(?:amp|lt|gt|quot|#39);)/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    const safeImageUrl = (value) => {
+      const url = String(value || '').trim();
+      if (!/^(?:https?:|blob:|data:image\/(?:png|jpe?g|webp|gif);base64,)/i.test(url)) return '';
+      return escapeHtmlAttribute(url);
+    };
+    const renderSafeTableCell = (value) => escapeHtmlText(value)
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.*?)\*/g, '<em>$1</em>')
+      .replace(/~~(.*?)~~/g, '<del>$1</del>')
+      .replace(/`([^`]+)`/g, '<code class="note-inline-code">$1</code>');
+    const renderFrameHtml = ({ timeStr, seconds, label }) => {
+      const displayLabel = label || `时间点 ${timeStr}`;
+      const resolved = resolveFrameEntry(imagesMap, { timeStr, seconds, maxDistance: 5 });
+      const imgEntry = resolved?.frame || null;
+      const actualTimestamp = Number(imgEntry?.timestamp);
+      const actualSeconds = Number.isFinite(actualTimestamp) ? actualTimestamp : seconds;
+      const actualTimeStr = imgEntry?.timeStr
+        || (BSE.Utils?.formatClock ? BSE.Utils.formatClock(actualSeconds) : timeStr);
+
+      const dataUrl = safeImageUrl(imgEntry?.dataUrl || imgEntry?.url || (typeof imgEntry === 'string' ? imgEntry : ''));
+      const safeLabel = escapeHtmlText(displayLabel);
+      const safeLabelAttr = escapeHtmlAttribute(displayLabel);
+      const safeTimeStr = escapeHtmlAttribute(timeStr);
+      const safeActualTimeStr = escapeHtmlAttribute(actualTimeStr);
+      if (dataUrl) {
+        return `
+<div class="note-image-card" data-timestamp="${actualSeconds}">
+  <div class="note-image-wrap">
+    <img src="${dataUrl}" alt="${safeLabelAttr}" class="note-img-thumbnail" loading="lazy" />
+    <button class="note-card-delete-btn" data-seek="${actualSeconds}" data-timestr="${safeActualTimeStr}" data-ref-seek="${seconds}" data-ref-timestr="${safeTimeStr}" title="删除此截图">×</button>
+    <button class="note-jump-btn" data-seek="${actualSeconds}" title="跳转到 ${safeActualTimeStr} 播放">
+      <span class="note-jump-time">${escapeHtmlText(actualTimeStr)}</span>
+    </button>
+  </div>
+  <div class="note-image-caption">${safeLabel}</div>
+</div>`;
+      }
+
+      return `
+<div class="note-image-placeholder" data-timestamp="${seconds}" data-time-str="${safeTimeStr}" data-label="${safeLabelAttr}">
+  <div class="note-placeholder-inner">
+    <span class="placeholder-text">${safeLabel} (${escapeHtmlText(timeStr)})</span>
+    <button class="btn-capture-slot" data-seek="${seconds}" data-timestr="${safeTimeStr}">立即截取</button>
+  </div>
+</div>`;
+    };
+
     // 0. 清理大模型可能输出的转义 \$ 为标准 LaTeX 符号 $
     let rawText = markdown.replace(/\\\$/g, '$');
 
@@ -372,10 +500,7 @@
     const codeBlocks = [];
     rawText = rawText.replace(/```([a-zA-Z0-9_-]*)\r?\n([\s\S]*?)```/g, (_match, lang, code) => {
       const id = `___CODE_BLOCK_${codeBlocks.length}___`;
-      const escapedCode = code
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+      const escapedCode = escapeHtmlText(code);
       const html = `<div class="note-code-wrap"><pre class="note-code-block"><code class="${lang ? `language-${lang}` : ''}">${escapedCode}</code></pre></div>`;
       codeBlocks.push(html);
       return `\n\n${id}\n\n`;
@@ -421,7 +546,9 @@
       return id;
     });
 
-    // 5. GFM Markdown 表格解析器
+    // 5. GFM Markdown 表格解析器。表格 HTML 先进入占位符，单元格逐个转义，
+    // 避免后续为了恢复表格结构而把模型输出中的原始 HTML 一并反转义。
+    const tableBlocks = [];
     const tableRegex = /((?:^|\n)\|[^\n]+\|\r?\n\|[ \t]*:?[-]+:?[ \t]*(?:\|[ \t]*:?[-]+:?[ \t]*)+\|\r?\n(?:\|[^\n]+\|\r?\n?)+)/g;
     rawText = rawText.replace(tableRegex, (match) => {
       const lines = match.trim().split('\n').map(l => l.trim()).filter(Boolean);
@@ -444,77 +571,43 @@
         return 'left';
       });
 
-      const thead = '<thead><tr>' + headers.map((h, i) => `<th style="text-align:${aligns[i] || 'left'}">${h}</th>`).join('') + '</tr></thead>';
+      const thead = '<thead><tr>' + headers.map((h, i) => `<th style="text-align:${aligns[i] || 'left'}">${renderSafeTableCell(h)}</th>`).join('') + '</tr></thead>';
       const tbody = '<tbody>' + bodyLines.map(rowLine => {
         const cells = parseCells(rowLine);
-        return '<tr>' + cells.map((c, i) => `<td style="text-align:${aligns[i] || 'left'}">${c}</td>`).join('') + '</tr>';
+        return '<tr>' + cells.map((c, i) => `<td style="text-align:${aligns[i] || 'left'}">${renderSafeTableCell(c)}</td>`).join('') + '</tr>';
       }).join('') + '</tbody>';
 
-      return `\n\n<div class="note-table-wrap"><table class="note-table">${thead}${tbody}</table></div>\n\n`;
+      const id = `___TABLE_BLOCK_${tableBlocks.length}___`;
+      tableBlocks.push(`<div class="note-table-wrap"><table class="note-table">${thead}${tbody}</table></div>`);
+      return `\n\n${id}\n\n`;
     });
 
-    // 6. 转义基础 HTML 字符
+    // 6. 新的 frame:// Markdown 引用与旧 SCREENSHOT 语法统一进入受控图片块。
+    const frameBlocks = [];
+    rawText = transformFrameReferences(rawText, (frameRef) => {
+      const id = `___FRAME_BLOCK_${frameBlocks.length}___`;
+      frameBlocks.push(renderFrameHtml(frameRef));
+      return `\n\n${id}\n\n`;
+    });
+
+    // 7. 转义基础 HTML 字符
     let html = rawText
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
 
-    // 7. 截图占位标签 [SCREENSHOT: MM:SS "说明"] 或 [SCREENSHOT: SS "说明"]
-    html = html.replace(/\[SCREENSHOT:\s*([0-9:]+)(?:\s*["“]([^"”]+)["”])?\]/gi, (match, timeStr, desc) => {
-      const parts = String(timeStr).split(':').map(Number);
-      let seconds = 0;
-      if (parts.length === 3) seconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
-      else if (parts.length === 2) seconds = parts[0] * 60 + parts[1];
-      else seconds = Number(parts[0]) || 0;
-
-      const label = desc || `时间点 ${timeStr}`;
-      
-      // 精确或就近模糊匹配（20秒内）已捕获图片
-      let imgEntry = imagesMap[timeStr] || imagesMap[seconds] || imagesMap[String(seconds)];
-      if (!imgEntry) {
-        for (const [key, val] of Object.entries(imagesMap)) {
-          if (val?.timestamp && Math.abs(val.timestamp - seconds) <= 20) {
-            imgEntry = val;
-            break;
-          }
-        }
-      }
-
-      const dataUrl = imgEntry?.dataUrl || imgEntry?.url || (typeof imgEntry === 'string' ? imgEntry : '');
-
-      if (dataUrl) {
-        return `
-<div class="note-image-card" data-timestamp="${seconds}">
-  <div class="note-image-wrap">
-    <img src="${dataUrl}" alt="${label}" class="note-img-thumbnail" loading="lazy" />
-    <button class="note-card-delete-btn" data-seek="${seconds}" data-timestr="${timeStr}" title="删除此截图">✕</button>
-    <button class="note-jump-btn" data-seek="${seconds}" title="跳转到 ${timeStr} 播放">
-      <span class="note-jump-icon">▶</span>
-      <span class="note-jump-time">${timeStr}</span>
-    </button>
-  </div>
-  <div class="note-image-caption">📸 ${label}</div>
-</div>`;
-      }
-
-      return `
-<div class="note-image-placeholder" data-timestamp="${seconds}" data-time-str="${timeStr}" data-label="${label}">
-  <div class="note-placeholder-inner">
-    <span class="placeholder-icon">📸</span>
-    <span class="placeholder-text">${label} (${timeStr})</span>
-    <button class="btn-capture-slot" data-seek="${seconds}" data-timestr="${timeStr}">立即截取</button>
-  </div>
-</div>`;
-    });
-
     // 8. 传统 Markdown 图片 ![alt](url)
     html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_match, alt, url) => {
+      const safeUrl = safeImageUrl(url);
+      const safeAlt = escapeHtmlText(alt);
+      const safeAltAttr = escapeHtmlAttribute(alt);
+      if (!safeUrl) return safeAlt ? `<span class="note-image-caption">${safeAlt}</span>` : '';
       return `
 <div class="note-image-card">
   <div class="note-image-wrap">
-    <img src="${url}" alt="${alt}" class="note-img-thumbnail" loading="lazy" />
+    <img src="${safeUrl}" alt="${safeAltAttr}" class="note-img-thumbnail" loading="lazy" />
   </div>
-  ${alt ? `<div class="note-image-caption">${alt}</div>` : ''}
+  ${safeAlt ? `<div class="note-image-caption">${safeAlt}</div>` : ''}
 </div>`;
     });
 
@@ -553,12 +646,13 @@
       .replace(/(<\/(?:h[1-6]|div|blockquote|hr|table|ul|ol)>)\s*<\/p>/gi, '$1')
       .replace(/<p class="note-p">\s*<\/p>/gi, '');
 
-    // 15. 还原表格占位符中的 HTML 实体反转义
-    html = html.replace(/&lt;div class="note-table-wrap"&gt;[\s\S]*?&lt;\/div&gt;/g, (escaped) => {
-      return escaped
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&amp;/g, '&');
+    // 15. 还原已经逐单元格转义过的表格块。
+    tableBlocks.forEach((tableHtml, i) => {
+      html = html.replace(`___TABLE_BLOCK_${i}___`, tableHtml);
+    });
+
+    frameBlocks.forEach((frameHtml, i) => {
+      html = html.replace(`___FRAME_BLOCK_${i}___`, frameHtml);
     });
 
     // 16. 还原公式与代码块占位符
@@ -595,9 +689,13 @@
     toSrt,
     toMarkdown,
     toMergedMarkdown,
+    toMergedText,
     buildBatchManifest,
     AI_PROMPTS,
     generateAiPrompt,
+    buildFrameReference,
+    resolveFrameEntry,
+    transformFrameReferences,
     renderNoteToHtml,
     format
   });

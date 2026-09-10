@@ -1,18 +1,25 @@
 (() => {
   'use strict';
 
-  const BSE = globalThis.BSE = globalThis.BSE || /** @type {any} */ ({});
+  const BSE = globalThis.BSE;
 
   const HOST_NAME = 'com.sparksub.transcriber';
-  const PROTOCOL_VERSION = 1;
+  const PROTOCOL_VERSION = 2;
+  const LEGACY_PROTOCOL_VERSION = 1;
+  const CONTRACT_ID = 'sparkscribe.browser-native/2';
   const MAX_MESSAGE_BYTES = 900 * 1024;
   const SHORT_REQUEST_TIMEOUT_MS = 30 * 1000;
   const TRANSCRIPTION_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
   const IDLE_DISCONNECT_TIMEOUT_MS = 250;
   const MAX_RESULT_CHUNKS = 10000;
+  const MAX_ASR_TOPIC_CHARS = 80;
+  const MAX_ASR_TERMS = 6;
+  const MAX_ASR_TERM_CHARS = 24;
+  const MAX_MEDIA_KEY_CHARS = 160;
 
   let port = null;
   let capabilities = null;
+  let negotiatedProtocolVersion = null;
   let idleDisconnectTimer = null;
   const pendingRequests = new Map();
 
@@ -31,6 +38,11 @@
       message: 'The SparkSub native host did not respond in time.',
       hint: 'Check the native host and retry the job.',
       retriable: true
+    },
+    PROTOCOL_MISMATCH: {
+      message: 'The browser integration protocol is incompatible.',
+      hint: 'Update SparkSub and SparkScribe, then retry.',
+      retriable: false
     },
     PROTOCOL_MESSAGE_TOO_LARGE: {
       message: 'The native host sent a message that exceeds the protocol limit.',
@@ -102,6 +114,111 @@
     return typeof value === 'string' && value.trim().length > 0;
   }
 
+  const LEGACY_EUROPEAN_LANGUAGES = Object.freeze([
+    'en', 'es', 'fr', 'de', 'it', 'pt', 'ro', 'nl', 'da', 'sv', 'fi', 'hu',
+    'et', 'lv', 'lt', 'mt', 'pl', 'cs', 'sk', 'sl', 'hr', 'bs', 'ru', 'uk',
+    'be', 'bg', 'sr', 'el'
+  ]);
+
+  function normalizeCapabilities(result, protocolVersion) {
+    if (!isObject(result)) throw makeError(null, 'RESULT_INCOMPLETE');
+
+    if (protocolVersion === PROTOCOL_VERSION) {
+      if (result.protocolVersion !== PROTOCOL_VERSION
+        || result.contract !== CONTRACT_ID
+        || !isObject(result.features)
+        || !isObject(result.features.localASR)
+        || !isObject(result.features.youtubeCaptions)
+        || !isObject(result.features.remoteMedia)) {
+        throw makeError(null, 'RESULT_INCOMPLETE');
+      }
+      const rawLanguages = result.features.localASR.languages;
+      if (!Array.isArray(rawLanguages) || !rawLanguages.every(isNonEmptyString)) {
+        throw makeError(null, 'RESULT_INCOMPLETE');
+      }
+      return {
+        protocolVersion: PROTOCOL_VERSION,
+        contract: CONTRACT_ID,
+        features: {
+          localASR: {
+            available: result.features.localASR.available === true,
+            supportsAutoLanguage: result.features.localASR.supportsAutoLanguage === true,
+            languages: [...new Set(rawLanguages.map((value) => value.trim().toLowerCase()))]
+          },
+          youtubeCaptions: {
+            available: result.features.youtubeCaptions.available === true,
+            preferences: Array.isArray(result.features.youtubeCaptions.preferences)
+              ? result.features.youtubeCaptions.preferences.filter(isNonEmptyString)
+              : []
+          },
+          remoteMedia: {
+            youtube: result.features.remoteMedia.youtube === true,
+            bilibili: result.features.remoteMedia.bilibili === true
+          },
+          cancellation: { available: result.features.cancellation?.available === true },
+          chunkedResults: {
+            available: result.features.chunkedResults?.available === true,
+            maxMessageBytes: Number.isInteger(result.features.chunkedResults?.maxMessageBytes)
+              ? result.features.chunkedResults.maxMessageBytes
+              : null
+          }
+        }
+      };
+    }
+
+    const parakeetAvailable = result.models?.parakeet?.available === true;
+    const cohereAvailable = result.models?.cohere?.available === true;
+    const ytDLPAvailable = result.ytDLP?.available === true;
+    const languages = [];
+    if (parakeetAvailable) languages.push(...LEGACY_EUROPEAN_LANGUAGES);
+    if (cohereAvailable) languages.push('zh');
+    return {
+      protocolVersion: LEGACY_PROTOCOL_VERSION,
+      contract: null,
+      features: {
+        localASR: {
+          available: parakeetAvailable || cohereAvailable,
+          supportsAutoLanguage: parakeetAvailable || cohereAvailable,
+          languages: [...new Set(languages)]
+        },
+        youtubeCaptions: {
+          available: ytDLPAvailable,
+          preferences: ['manual-first', 'manual-only', 'ai-first']
+        },
+        remoteMedia: {
+          youtube: ytDLPAvailable,
+          bilibili: true
+        },
+        cancellation: { available: true },
+        chunkedResults: { available: true, maxMessageBytes: (900 * 1024) - 1 }
+      }
+    };
+  }
+
+  function normalizeASRContext(value) {
+    if (value === undefined) return undefined;
+    if (!hasOnlyKeys(value, ['topic', 'terms'])) return null;
+    if (value.topic !== undefined && typeof value.topic !== 'string') return null;
+    if (value.terms !== undefined && (!Array.isArray(value.terms) || !value.terms.every((item) => typeof item === 'string'))) return null;
+
+    const clean = (raw, maxChars) => String(raw || '').replace(/\s+/g, ' ').trim().slice(0, maxChars);
+    const topic = clean(value.topic, MAX_ASR_TOPIC_CHARS);
+    const seen = new Set();
+    const terms = [];
+    for (const raw of value.terms || []) {
+      const term = clean(raw, MAX_ASR_TERM_CHARS);
+      const key = term.toLowerCase();
+      if (!term || seen.has(key)) continue;
+      seen.add(key);
+      terms.push(term);
+      if (terms.length >= MAX_ASR_TERMS) break;
+    }
+    return {
+      ...(topic ? { topic } : {}),
+      ...(terms.length ? { terms } : {})
+    };
+  }
+
   function isStringMap(value) {
     return hasOnlyKeys(value, Object.keys(value || {}))
       && Object.entries(value).every(([key, item]) => (
@@ -110,7 +227,7 @@
   }
 
   function normalizeTranscriptionPayload(payload) {
-    const allowedTopLevelKeys = ['jobId', 'sourceLanguage', 'title', 'duration', 'platformLanguage', 'source'];
+    const allowedTopLevelKeys = ['jobId', 'sourceLanguage', 'title', 'duration', 'platformLanguage', 'mediaKey', 'asrContext', 'source'];
     if (!hasOnlyKeys(payload, allowedTopLevelKeys)
       || !isNonEmptyString(payload.jobId)
       || !isNonEmptyString(payload.sourceLanguage)
@@ -120,6 +237,10 @@
     if (payload.title !== undefined && typeof payload.title !== 'string') return null;
     if (payload.platformLanguage !== undefined && typeof payload.platformLanguage !== 'string') return null;
     if (payload.duration !== undefined && !Number.isFinite(payload.duration)) return null;
+    const mediaKey = payload.mediaKey === undefined ? undefined : String(payload.mediaKey || '').trim();
+    if (payload.mediaKey !== undefined && (!mediaKey || mediaKey.length > MAX_MEDIA_KEY_CHARS)) return null;
+    const asrContext = normalizeASRContext(payload.asrContext);
+    if (asrContext === null) return null;
 
     const source = payload.source;
     if (source.kind === 'youtube') {
@@ -130,6 +251,8 @@
         ...(payload.title === undefined ? {} : { title: payload.title }),
         ...(payload.duration === undefined ? {} : { duration: payload.duration }),
         ...(payload.platformLanguage === undefined ? {} : { platformLanguage: payload.platformLanguage }),
+        ...(mediaKey === undefined ? {} : { mediaKey }),
+        ...(asrContext === undefined || (!asrContext.topic && !asrContext.terms?.length) ? {} : { asrContext }),
         source: { kind: 'youtube', url: source.url }
       };
     }
@@ -145,6 +268,8 @@
       ...(payload.title === undefined ? {} : { title: payload.title }),
       ...(payload.duration === undefined ? {} : { duration: payload.duration }),
       ...(payload.platformLanguage === undefined ? {} : { platformLanguage: payload.platformLanguage }),
+      ...(mediaKey === undefined ? {} : { mediaKey }),
+      ...(asrContext === undefined || (!asrContext.topic && !asrContext.terms?.length) ? {} : { asrContext }),
       source: {
         kind: 'remote',
         url: source.url,
@@ -155,9 +280,11 @@
   }
 
   function normalizeYouTubeCaptionPayload(payload) {
-    if (!hasOnlyKeys(payload, ['jobId', 'sourceLanguage', 'source'])
+    const preference = payload?.subtitlePreference;
+    if (!hasOnlyKeys(payload, ['jobId', 'sourceLanguage', 'subtitlePreference', 'source'])
       || !isNonEmptyString(payload.jobId)
       || !isNonEmptyString(payload.sourceLanguage)
+      || (preference !== undefined && !['manual-first', 'manual-only', 'ai-first'].includes(preference))
       || !hasOnlyKeys(payload.source, ['kind', 'url'])
       || payload.source.kind !== 'youtube'
       || !isNonEmptyString(payload.source.url)) {
@@ -166,6 +293,7 @@
     return {
       jobId: payload.jobId,
       sourceLanguage: payload.sourceLanguage,
+      ...(preference === undefined ? {} : { subtitlePreference: preference }),
       source: { kind: 'youtube', url: payload.source.url }
     };
   }
@@ -209,13 +337,13 @@
     }, IDLE_DISCONNECT_TIMEOUT_MS);
   }
 
-  function postBestEffortCancel(jobId) {
+  function postBestEffortCancel(jobId, protocolVersion = negotiatedProtocolVersion || PROTOCOL_VERSION) {
     if (!port || !isNonEmptyString(jobId)) return;
     try {
       port.postMessage({
         type: 'cancel',
         requestId: createRequestId(),
-        protocolVersion: PROTOCOL_VERSION,
+        protocolVersion,
         jobId
       });
     } catch {
@@ -228,7 +356,7 @@
     const generation = ++pending.timeoutGeneration;
     pending.timeoutId = setTimeout(() => {
       if (pendingRequests.get(requestId) !== pending || pending.timeoutGeneration !== generation) return;
-      if (pending.expectResult) postBestEffortCancel(pending.jobId);
+      if (pending.expectResult) postBestEffortCancel(pending.jobId, pending.protocolVersion);
       settleRequest(requestId, 'reject', makeError(null, 'NATIVE_HOST_TIMEOUT'));
     }, pending.timeoutMs);
   }
@@ -245,6 +373,7 @@
     const lastErrorMessage = chrome.runtime.lastError?.message;
     port = null;
     capabilities = null;
+    negotiatedProtocolVersion = null;
     const code = /(?:host|native messaging).*(?:not found|not installed|not registered)|(?:not found|not installed|not registered).*?(?:host|native messaging)/i.test(lastErrorMessage || '')
       ? 'NATIVE_HOST_NOT_INSTALLED'
       : 'NATIVE_HOST_DISCONNECTED';
@@ -316,7 +445,13 @@
           kind: message.captionKind
         };
       }
-      pending.result = { totalChunks, chunks: new Map(), metadata, engine: message.engine };
+      pending.result = {
+        totalChunks,
+        chunks: new Map(),
+        metadata,
+        engine: isNonEmptyString(message.engine) ? message.engine.slice(0, 120) : null,
+        engineLabel: isNonEmptyString(message.engineLabel) ? message.engineLabel.slice(0, 120) : null
+      };
       armRequestTimeout(message.requestId, pending);
       return;
     }
@@ -359,12 +494,13 @@
         settleRequest(message.requestId, 'reject', makeError(null, 'RESULT_INCOMPLETE'));
         return;
       }
-      if (result.engine && pending.resultMode !== 'youtubeCaptions') {
-        cues.engine = result.engine;
-      }
       settleRequest(message.requestId, 'resolve', pending.resultMode === 'youtubeCaptions'
         ? { cues, ...result.metadata }
-        : cues);
+        : {
+            cues,
+            ...(result.engine ? { engine: result.engine } : {}),
+            ...(result.engineLabel ? { engineLabel: result.engineLabel } : {})
+          });
     }
   }
 
@@ -384,7 +520,7 @@
     }
   }
 
-  function sendRequest(type, payload = {}, options = {}) {
+  function sendRequestWithVersion(type, payload = {}, options = {}, protocolVersion = PROTOCOL_VERSION) {
     let activePort;
     try {
       activePort = getPort();
@@ -392,7 +528,10 @@
       return Promise.reject(error);
     }
     const requestId = createRequestId();
-    const message = { ...payload, type, requestId, protocolVersion: PROTOCOL_VERSION };
+    const protocolPayload = protocolVersion === LEGACY_PROTOCOL_VERSION && type === 'transcribe'
+      ? Object.fromEntries(Object.entries(payload).filter(([key]) => !['asrContext', 'mediaKey'].includes(key)))
+      : payload;
+    const message = { ...protocolPayload, type, requestId, protocolVersion };
     return new Promise((resolve, reject) => {
       const pending = {
         resolve,
@@ -400,6 +539,7 @@
         expectResult: Boolean(options.expectResult),
         resultMode: options.resultMode || 'cues',
         jobId: options.jobId,
+        protocolVersion,
         onProgress: options.onProgress,
         signal: options.signal,
         abortHandler: null,
@@ -419,9 +559,28 @@
     });
   }
 
+  async function sendNegotiatedRequest(type, payload = {}, options = {}) {
+    if (negotiatedProtocolVersion !== null) {
+      return sendRequestWithVersion(type, payload, options, negotiatedProtocolVersion);
+    }
+    try {
+      const result = await sendRequestWithVersion(type, payload, options, PROTOCOL_VERSION);
+      negotiatedProtocolVersion = PROTOCOL_VERSION;
+      return result;
+    } catch (error) {
+      if (error?.code !== 'PROTOCOL_MISMATCH') throw error;
+      negotiatedProtocolVersion = LEGACY_PROTOCOL_VERSION;
+      return sendRequestWithVersion(type, payload, options, LEGACY_PROTOCOL_VERSION);
+    }
+  }
+
+  function ping() {
+    return sendNegotiatedRequest('ping');
+  }
+
   function cancel(jobId) {
     if (!isNonEmptyString(jobId)) return Promise.reject(makeError(null, 'INVALID_REQUEST'));
-    return sendRequest('cancel', { jobId });
+    return sendNegotiatedRequest('cancel', { jobId });
   }
 
   /**
@@ -434,7 +593,7 @@
     const { jobId } = normalizedPayload;
     if (signal?.aborted) return Promise.reject(makeError(null, 'CANCELLED'));
 
-    return sendRequest('transcribe', normalizedPayload, {
+    return sendNegotiatedRequest('transcribe', normalizedPayload, {
       expectResult: true,
       jobId,
       onProgress,
@@ -443,7 +602,7 @@
       onPending: (requestId, pending) => {
         if (!signal) return;
         pending.abortHandler = () => {
-          cancel(jobId).catch(() => {});
+          postBestEffortCancel(jobId, pending.protocolVersion);
           settleRequest(requestId, 'reject', makeError(null, 'CANCELLED'));
         };
         signal.addEventListener('abort', pending.abortHandler, { once: true });
@@ -461,7 +620,7 @@
     const { jobId } = normalizedPayload;
     if (signal?.aborted) return Promise.reject(makeError(null, 'CANCELLED'));
 
-    return sendRequest('youtubeCaptions', normalizedPayload, {
+    return sendNegotiatedRequest('youtubeCaptions', normalizedPayload, {
       expectResult: true,
       resultMode: 'youtubeCaptions',
       jobId,
@@ -471,7 +630,7 @@
       onPending: (requestId, pending) => {
         if (!signal) return;
         pending.abortHandler = () => {
-          cancel(jobId).catch(() => {});
+          postBestEffortCancel(jobId, pending.protocolVersion);
           settleRequest(requestId, 'reject', makeError(null, 'CANCELLED'));
         };
         signal.addEventListener('abort', pending.abortHandler, { once: true });
@@ -481,15 +640,17 @@
 
   function getCapabilities({ force = false } = {}) {
     if (!force && capabilities) return Promise.resolve(capabilities);
-    return sendRequest('capabilities').then((result) => {
-      capabilities = result;
-      return result;
+    if (force) negotiatedProtocolVersion = null;
+    return sendNegotiatedRequest('capabilities').then((result) => {
+      capabilities = normalizeCapabilities(result, negotiatedProtocolVersion);
+      return capabilities;
     });
   }
 
   function disconnect() {
     clearIdleDisconnectTimer();
     capabilities = null;
+    negotiatedProtocolVersion = null;
     if (!port) {
       rejectAll(makeError(null, 'NATIVE_HOST_DISCONNECTED'));
       return;
@@ -503,7 +664,10 @@
   BSE.NativeHost = Object.freeze({
     HOST_NAME,
     PROTOCOL_VERSION,
+    LEGACY_PROTOCOL_VERSION,
+    CONTRACT_ID,
     getCapabilities,
+    ping,
     fetchYouTubeCaptions,
     transcribe,
     cancel,

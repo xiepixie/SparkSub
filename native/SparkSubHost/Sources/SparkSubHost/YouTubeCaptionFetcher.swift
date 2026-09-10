@@ -54,10 +54,16 @@ struct YouTubeCaptionCatalog: Sendable {
         return YouTubeCaptionCatalog(candidates: candidates)
     }
 
-    func rankedCandidates(sourceLanguage: String) -> [YouTubeCaptionCandidate] {
-        candidates.sorted { left, right in
-            let leftKind = Self.kindRank(left.kind)
-            let rightKind = Self.kindRank(right.kind)
+    func rankedCandidates(
+        sourceLanguage: String,
+        preference: YouTubeCaptionPreference = .manualFirst
+    ) -> [YouTubeCaptionCandidate] {
+        let pool = preference == .manualOnly
+            ? candidates.filter { $0.kind == .manual }
+            : candidates
+        return pool.sorted { left, right in
+            let leftKind = Self.kindRank(left.kind, preference: preference)
+            let rightKind = Self.kindRank(right.kind, preference: preference)
             if leftKind != rightKind { return leftKind < rightKind }
             let leftLanguage = Self.languageRank(left.language, requested: sourceLanguage)
             let rightLanguage = Self.languageRank(right.language, requested: sourceLanguage)
@@ -115,11 +121,20 @@ struct YouTubeCaptionCatalog: Sendable {
         return ext == "json3" || ext == "vtt"
     }
 
-    private static func kindRank(_ kind: YouTubeCaptionKind) -> Int {
-        switch kind {
-        case .manual: return 0
-        case .automatic: return 1
-        case .translated: return 2
+    private static func kindRank(_ kind: YouTubeCaptionKind, preference: YouTubeCaptionPreference) -> Int {
+        switch preference {
+        case .manualFirst, .manualOnly:
+            switch kind {
+            case .manual: return 0
+            case .automatic: return 1
+            case .translated: return 2
+            }
+        case .aiFirst:
+            switch kind {
+            case .automatic: return 0
+            case .manual: return 1
+            case .translated: return 2
+            }
         }
     }
 
@@ -170,6 +185,7 @@ protocol YouTubeCaptionFetching: Sendable {
     func fetch(
         source: SourceDescriptor,
         sourceLanguage: String,
+        subtitlePreference: YouTubeCaptionPreference,
         workspace: URL,
         cancellation: CancellationToken,
         onProgress: @escaping @Sendable (Double) -> Void
@@ -180,6 +196,7 @@ struct UnavailableYouTubeCaptionFetcher: YouTubeCaptionFetching {
     func fetch(
         source: SourceDescriptor,
         sourceLanguage: String,
+        subtitlePreference: YouTubeCaptionPreference,
         workspace: URL,
         cancellation: CancellationToken,
         onProgress: @escaping @Sendable (Double) -> Void
@@ -250,6 +267,7 @@ struct YouTubeCaptionFetcher: YouTubeCaptionFetching, Sendable {
     func fetch(
         source: SourceDescriptor,
         sourceLanguage: String,
+        subtitlePreference: YouTubeCaptionPreference,
         workspace: URL,
         cancellation: CancellationToken,
         onProgress: @escaping @Sendable (Double) -> Void
@@ -270,7 +288,7 @@ struct YouTubeCaptionFetcher: YouTubeCaptionFetching, Sendable {
         )
         try cancellation.checkCancellation()
         let candidates = try YouTubeCaptionCatalog.decode(metadataOutput.stdout)
-            .rankedCandidates(sourceLanguage: sourceLanguage)
+            .rankedCandidates(sourceLanguage: sourceLanguage, preference: subtitlePreference)
         guard !candidates.isEmpty else { throw AppError.captionsNotFound }
 
         var successfulDownloadCount = 0

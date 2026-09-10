@@ -185,6 +185,29 @@ final class MediaDownloaderTests: XCTestCase {
         XCTAssertTrue(requestedHeaders.allSatisfy { $0 == source.headers })
     }
 
+    func testWorkspaceSweepRemovesOnlyStaleUUIDDirectories() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let now = Date()
+        let stale = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let fresh = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let named = root.appendingPathComponent("keep-me", isDirectory: true)
+        for directory in [stale, fresh, named] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-7200)], ofItemAtPath: stale.path)
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-7200)], ofItemAtPath: named.path)
+
+        let manager = JobWorkspaceManager(rootURL: root)
+        try manager.sweepStaleWorkspaces(olderThan: 3600, now: now)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fresh.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: named.path))
+    }
+
     func testCancellationTerminatesActiveProcessAndCleansOnlyTaskDirectory() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

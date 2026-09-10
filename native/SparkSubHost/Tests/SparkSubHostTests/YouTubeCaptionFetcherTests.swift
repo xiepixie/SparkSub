@@ -21,6 +21,30 @@ final class YouTubeCaptionFetcherTests: XCTestCase {
         XCTAssertEqual(ranked.map(\.kind), [.manual, .automatic, .translated])
     }
 
+    func testCatalogHonorsManualOnlyAndAiFirstPreferences() throws {
+        let data = Data(#"""
+        {
+          "subtitles": {
+            "en": [{"ext":"json3","name":"English","url":"https://www.youtube.com/api/timedtext?lang=en"}]
+          },
+          "automatic_captions": {
+            "yue": [{"ext":"json3","name":"粵語（自動產生）","url":"https://www.youtube.com/api/timedtext?kind=asr&lang=yue"}],
+            "zh-HK": [{"ext":"json3","name":"中文（香港）","url":"https://www.youtube.com/api/timedtext?kind=asr&lang=en&tlang=zh-HK"}]
+          }
+        }
+        """#.utf8)
+
+        let catalog = try YouTubeCaptionCatalog.decode(data)
+        XCTAssertEqual(
+            catalog.rankedCandidates(sourceLanguage: "yue", preference: .manualOnly).map(\.kind),
+            [.manual]
+        )
+        XCTAssertEqual(
+            catalog.rankedCandidates(sourceLanguage: "yue", preference: .aiFirst).map(\.kind),
+            [.automatic, .manual, .translated]
+        )
+    }
+
     func testCatalogUsesCantoneseAliasesWithinTheSameCaptionClass() throws {
         let data = Data(#"""
         {
@@ -134,6 +158,7 @@ final class YouTubeCaptionFetcherTests: XCTestCase {
                 headers: nil
             ),
             sourceLanguage: "yue",
+            subtitlePreference: .manualFirst,
             workspace: workspace,
             cancellation: CancellationToken(),
             onProgress: { progress.append($0) }
@@ -171,6 +196,7 @@ final class YouTubeCaptionFetcherTests: XCTestCase {
                 headers: nil
             ),
             sourceLanguage: "yue",
+            subtitlePreference: .manualFirst,
             workspace: workspace,
             cancellation: CancellationToken(),
             onProgress: { _ in }
