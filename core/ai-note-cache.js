@@ -13,10 +13,16 @@
   const MAX_CACHED_NOTES = 30;
   const MAX_FRAME_BYTES = 80 * 1024 * 1024;
   const MAX_CACHE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+  const LRU_TOUCH_INTERVAL_MS = 60 * 1000;
+  const RECORD_MEMORY_TTL_MS = 30 * 1000;
+  const RECORD_MEMORY_LIMIT = 2;
 
   let dbPromise = null;
   let sweepPromise = null;
+  let sweepTimer = null;
   const saveLocks = new Map();
+  const recordMemoryCache = new Map();
+  const lruTouchMemory = new Map();
 
   function storageArea() {
     return typeof chrome !== 'undefined' && chrome.storage?.local ? chrome.storage.local : null;
@@ -31,7 +37,7 @@
   }
 
   function normalizeMode(mode) {
-    return ['course_notes', 'summary', 'deep_qa'].includes(String(mode || ''))
+    return ['course_notes', 'keypoints', 'concept_deep', 'summary', 'deep_qa', 'error_check'].includes(String(mode || ''))
       ? String(mode)
       : 'course_notes';
   }
@@ -78,6 +84,45 @@
     ), 0);
   }
 
+  function artifactModeSummaries(record) {
+    const normalized = normalizeStoredRecord(record);
+    return Object.values(normalized.artifacts)
+      .filter((artifact) => artifact?.markdown)
+      .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+      .map((artifact) => ({
+        mode: normalizeMode(artifact.mode),
+        updatedAt: Number(artifact.updatedAt) || 0,
+        title: String(artifact.title || '')
+      }));
+  }
+
+  function rememberRecord(mediaKey, record) {
+    const key = String(mediaKey || '').trim();
+    if (!key || !record) return;
+    recordMemoryCache.delete(key);
+    recordMemoryCache.set(key, { record: normalizeStoredRecord(record), cachedAt: Date.now() });
+    while (recordMemoryCache.size > RECORD_MEMORY_LIMIT) {
+      recordMemoryCache.delete(recordMemoryCache.keys().next().value);
+    }
+  }
+
+  function readRememberedRecord(mediaKey) {
+    const key = String(mediaKey || '').trim();
+    const cached = recordMemoryCache.get(key);
+    if (!cached) return null;
+    if (Date.now() - cached.cachedAt > RECORD_MEMORY_TTL_MS) {
+      recordMemoryCache.delete(key);
+      return null;
+    }
+    recordMemoryCache.delete(key);
+    recordMemoryCache.set(key, cached);
+    return cached.record;
+  }
+
+  function forgetRecord(mediaKey) {
+    recordMemoryCache.delete(String(mediaKey || '').trim());
+  }
+
   function normalizeIndex(value) {
     if (!Array.isArray(value)) return [];
     return value
@@ -85,7 +130,16 @@
       .map((entry) => ({
         mediaKey: entry.mediaKey,
         updatedAt: Number(entry.updatedAt) || 0,
-        frameBytes: Math.max(0, Number(entry.frameBytes) || 0)
+        frameBytes: Math.max(0, Number(entry.frameBytes) || 0),
+        modes: Array.isArray(entry.modes)
+          ? entry.modes
+              .filter((mode) => mode && typeof mode.mode === 'string')
+              .map((mode) => ({
+                mode: normalizeMode(mode.mode),
+                updatedAt: Number(mode.updatedAt) || 0,
+                title: String(mode.title || '')
+              }))
+          : null
       }));
   }
 
@@ -102,6 +156,8 @@
         timeStr: frame.timeStr || '',
         label: frame.label || '',
         reason: frame.reason || '',
+        chapterId: frame.chapterId || '',
+        expectedSurface: frame.expectedSurface || '',
         evidenceGoal: frame.evidenceGoal || '',
         importance: frame.importance || '',
         source: frame.source || ''
@@ -201,62 +257,94 @@
   async function writeFrames(mediaKey, frames) {
     // 新图片先写入独立版本，不碰上一版。只有 chrome.storage 中的 note 指针提交成功后，
     // 才清理旧版本，从而避免“图片已替换、Markdown 元数据写失败”造成旧报告指向新图。
+    // Base64 -> Blob conversion can briefly double image memory, so persist in
+    // tiny batches instead of materializing every screenshot Blob at once.
     const frameSetId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-    const records = frames.map((frame, index) => {
-      const blob = dataUrlToBlob(frame.dataUrl);
-      return {
-        id: `${mediaKey}:${frameSetId}:${index + 1}`,
-        mediaKey,
-        frameSetId,
-        timestamp: frame.timestamp,
-        timeStr: frame.timeStr,
-        label: frame.label,
-        reason: frame.reason,
-        evidenceGoal: frame.evidenceGoal,
-        importance: frame.importance,
-        source: frame.source,
-        blob,
-        bytes: blob.size,
-        updatedAt: Date.now()
-      };
-    });
+    const updatedAt = Date.now();
+    const refs = [];
+    let frameBytes = 0;
+    const batchSize = 2;
+    try {
+      for (let start = 0; start < frames.length; start += batchSize) {
+        const batch = frames.slice(start, start + batchSize).map((frame, offset) => {
+          const index = start + offset;
+          const blob = dataUrlToBlob(frame.dataUrl);
+          return {
+            id: `${mediaKey}:${frameSetId}:${index + 1}`,
+            mediaKey,
+            frameSetId,
+            timestamp: frame.timestamp,
+            timeStr: frame.timeStr,
+            label: frame.label,
+            reason: frame.reason,
+            chapterId: frame.chapterId,
+            expectedSurface: frame.expectedSurface,
+            evidenceGoal: frame.evidenceGoal,
+            importance: frame.importance,
+            source: frame.source,
+            blob,
+            bytes: blob.size,
+            updatedAt
+          };
+        });
+        await withStore('readwrite', (store) => {
+          batch.forEach((record) => store.put(record));
+        });
+        for (const { id, timestamp, timeStr, label, reason, chapterId, expectedSurface, evidenceGoal, importance, source, bytes } of batch) {
+          refs.push({ id, timestamp, timeStr, label, reason, chapterId, expectedSurface, evidenceGoal, importance, source, bytes });
+          frameBytes += bytes;
+        }
+      }
+    } catch (error) {
+      await deleteFrameRefs(refs).catch(() => {});
+      throw error;
+    }
 
-    await withStore('readwrite', (store) => {
-      records.forEach((record) => store.put(record));
-    });
-
-    return {
-      refs: records.map(({ id, timestamp, timeStr, label, reason, evidenceGoal, importance, source, bytes }) => ({ id, timestamp, timeStr, label, reason, evidenceGoal, importance, source, bytes })),
-      frameBytes: records.reduce((sum, record) => sum + record.bytes, 0)
-    };
+    return { refs, frameBytes };
   }
 
-  async function readFrames(refs = []) {
-    if (!Array.isArray(refs) || !refs.length) return [];
-    const records = await withStore('readonly', (store) => Promise.all(refs.map((ref) => new Promise((resolve) => {
-      const request = store.get(ref.id);
+  async function readFrameRecord(id) {
+    if (!id) return null;
+    return await withStore('readonly', (store) => new Promise((resolve) => {
+      const request = store.get(id);
       request.onsuccess = () => resolve(request.result || null);
       request.onerror = () => resolve(null);
-    }))));
-    if (!records) return [];
+    }));
+  }
 
-    const frames = [];
-    for (const record of records) {
-      if (!record?.blob) continue;
-      try {
-        frames.push({
-          dataUrl: await blobToDataUrl(record.blob),
-          timestamp: Number(record.timestamp) || 0,
-          timeStr: record.timeStr || '',
-          label: record.label || '',
-          reason: record.reason || '',
-          evidenceGoal: record.evidenceGoal || '',
-          importance: record.importance || '',
-          source: record.source || ''
-        });
-      } catch {}
-    }
-    return frames;
+  async function readFrames(refs = [], { signal = null } = {}) {
+    if (!Array.isArray(refs) || !refs.length) return [];
+    const frames = new Array(refs.length);
+    let nextRecordIndex = 0;
+    const worker = async () => {
+      while (nextRecordIndex < refs.length) {
+        if (signal?.aborted) return;
+        const index = nextRecordIndex++;
+        const record = await readFrameRecord(refs[index]?.id);
+        if (signal?.aborted) return;
+        if (!record?.blob) continue;
+        try {
+          const dataUrl = await blobToDataUrl(record.blob);
+          if (signal?.aborted) return;
+          frames[index] = {
+            dataUrl,
+            timestamp: Number(record.timestamp) || 0,
+            timeStr: record.timeStr || '',
+            label: record.label || '',
+            reason: record.reason || '',
+            chapterId: record.chapterId || '',
+            expectedSurface: record.expectedSurface || '',
+            evidenceGoal: record.evidenceGoal || '',
+            importance: record.importance || '',
+            source: record.source || ''
+          };
+        } catch {}
+      }
+    };
+    const concurrency = Math.min(2, refs.length);
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    if (signal?.aborted) return [];
+    return frames.filter(Boolean);
   }
 
   function buildRuntimeImagesMap(frames = []) {
@@ -298,16 +386,21 @@
           const nextEntry = {
             mediaKey,
             updatedAt: current.updatedAt,
-            frameBytes: recordFrameBytes(current)
+            frameBytes: recordFrameBytes(current),
+            modes: artifactModeSummaries(current)
           };
           await storage.set({
             [NOTE_INDEX_KEY]: [nextEntry, ...index.filter((entry) => entry !== existing && entry.mediaKey !== mediaKey)]
           }).catch(() => {});
         }
+        rememberRecord(mediaKey, current);
+        lruTouchMemory.set(mediaKey, current.updatedAt);
         return;
       }
     }
 
+    forgetRecord(mediaKey);
+    lruTouchMemory.delete(mediaKey);
     await deleteFramesForMedia(mediaKey).catch(() => {});
     await storage.remove([noteKey(mediaKey), legacyNoteKey(mediaKey)]).catch(() => {});
     if (updateIndex) {
@@ -318,6 +411,10 @@
   }
 
   async function sweep() {
+    if (sweepTimer) {
+      clearTimeout(sweepTimer);
+      sweepTimer = null;
+    }
     if (sweepPromise) return sweepPromise;
     sweepPromise = (async () => {
       const storage = storageArea();
@@ -352,6 +449,14 @@
     return sweepPromise;
   }
 
+  function scheduleSweep(delayMs = 250) {
+    if (sweepTimer) return;
+    sweepTimer = setTimeout(() => {
+      sweepTimer = null;
+      void sweep().catch(() => {});
+    }, Math.max(0, Number(delayMs) || 0));
+  }
+
   async function saveCommitted(note, mediaKey) {
     const storage = storageArea();
     if (!storage) return false;
@@ -375,6 +480,8 @@
           markdown: note.markdown,
           mode,
           title: note.title || '课程笔记',
+          sourceUrl: String(note.sourceUrl || '').slice(0, 2048),
+          sourceCueFingerprint: String(note.sourceCueFingerprint || '').slice(0, 96),
           frameRefs: refs,
           updatedAt
         }
@@ -382,7 +489,12 @@
       updatedAt,
       cacheVersion: 3
     };
-    const nextIndex = [{ mediaKey, updatedAt, frameBytes: recordFrameBytes(nextRecord) }, ...previousIndex];
+    const nextIndex = [{
+      mediaKey,
+      updatedAt,
+      frameBytes: recordFrameBytes(nextRecord),
+      modes: artifactModeSummaries(nextRecord)
+    }, ...previousIndex];
 
     try {
       // One media record owns multiple independent learning artifacts. Replacing
@@ -401,6 +513,8 @@
     if (previousArtifact?.frameRefs?.length) {
       await deleteFrameRefs(previousArtifact.frameRefs).catch(() => {});
     }
+    rememberRecord(mediaKey, nextRecord);
+    lruTouchMemory.set(mediaKey, updatedAt);
     return true;
   }
 
@@ -415,7 +529,7 @@
     try {
       const saved = await run;
       if (saveLocks.get(mediaKey) === run) saveLocks.delete(mediaKey);
-      await sweep();
+      if (saved) scheduleSweep();
       return saved;
     } catch (error) {
       if (saveLocks.get(mediaKey) === run) saveLocks.delete(mediaKey);
@@ -423,62 +537,143 @@
     }
   }
 
-  async function load(mediaKey, mode = '') {
+  async function load(mediaKey, mode = '', { signal = null } = {}) {
     mediaKey = String(mediaKey || '').trim();
     if (!mediaKey) return null;
     const storage = storageArea();
     if (!storage) return null;
 
-    let result = await storage.get([noteKey(mediaKey), legacyNoteKey(mediaKey)]).catch(() => ({}));
-    let rawRecord = result?.[noteKey(mediaKey)] || null;
-    const legacy = result?.[legacyNoteKey(mediaKey)] || null;
+    let record = readRememberedRecord(mediaKey);
+    if (!record) {
+      let result = await storage.get([noteKey(mediaKey), legacyNoteKey(mediaKey)]).catch(() => ({}));
+      let rawRecord = result?.[noteKey(mediaKey)] || null;
+      const legacy = result?.[legacyNoteKey(mediaKey)] || null;
 
-    if (!rawRecord && legacy?.markdown) {
-      await save({ ...legacy, mediaKey });
-      result = await storage.get(noteKey(mediaKey)).catch(() => ({}));
-      rawRecord = result?.[noteKey(mediaKey)] || null;
+      if (!rawRecord && legacy?.markdown) {
+        await save({ ...legacy, mediaKey });
+        result = await storage.get(noteKey(mediaKey)).catch(() => ({}));
+        rawRecord = result?.[noteKey(mediaKey)] || null;
+      }
+      record = normalizeStoredRecord(rawRecord);
+      if (Object.keys(record.artifacts).length) rememberRecord(mediaKey, record);
     }
-    const record = normalizeStoredRecord(rawRecord);
     const requestedMode = mode ? normalizeMode(mode) : '';
     const artifact = requestedMode
       ? record.artifacts[requestedMode]
       : Object.values(record.artifacts).sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0];
     if (!artifact?.markdown) return null;
 
-    const frames = await readFrames(artifact.frameRefs || []);
-    const imagesMap = buildRuntimeImagesMap(frames);
-
-    const indexResult = await storage.get(NOTE_INDEX_KEY).catch(() => ({}));
-    const index = normalizeIndex(indexResult?.[NOTE_INDEX_KEY]);
-    const current = index.find((entry) => entry.mediaKey === mediaKey);
-    if (current) {
-      current.updatedAt = Date.now();
-      const reordered = [current, ...index.filter((entry) => entry.mediaKey !== mediaKey)];
-      await storage.set({ [NOTE_INDEX_KEY]: reordered }).catch(() => {});
+    const now = Date.now();
+    const artifactUpdatedAt = Number(artifact.updatedAt) || 0;
+    if (artifactUpdatedAt > 0 && now - artifactUpdatedAt > MAX_CACHE_AGE_MS) {
+      await remove(mediaKey, { mode: artifact.mode || requestedMode || 'course_notes' }).catch(() => {});
+      return null;
     }
 
-    sweep().catch(() => {});
+    const frames = await readFrames(artifact.frameRefs || [], { signal });
+    if (signal?.aborted) return null;
+    const imagesMap = buildRuntimeImagesMap(frames);
+
+    const lastTouch = Number(lruTouchMemory.get(mediaKey)) || 0;
+    if (now - lastTouch >= LRU_TOUCH_INTERVAL_MS) {
+      const indexResult = await storage.get(NOTE_INDEX_KEY).catch(() => ({}));
+      const index = normalizeIndex(indexResult?.[NOTE_INDEX_KEY]);
+      const current = index.find((entry) => entry.mediaKey === mediaKey);
+      if (current && (index[0]?.mediaKey !== mediaKey || now - current.updatedAt >= LRU_TOUCH_INTERVAL_MS)) {
+        current.updatedAt = now;
+        const reordered = [current, ...index.filter((entry) => entry.mediaKey !== mediaKey)];
+        await storage.set({ [NOTE_INDEX_KEY]: reordered }).catch(() => {});
+      }
+      lruTouchMemory.set(mediaKey, now);
+    }
     return {
       markdown: artifact.markdown,
       mode: artifact.mode || requestedMode || 'course_notes',
       title: artifact.title || '课程笔记',
       mediaKey,
+      sourceUrl: String(artifact.sourceUrl || ''),
+      sourceCueFingerprint: String(artifact.sourceCueFingerprint || ''),
       imagesMap,
       updatedAt: Number(artifact.updatedAt) || 0
     };
   }
 
+  async function listModesMany(mediaKeys = []) {
+    const keys = [...new Set((Array.isArray(mediaKeys) ? mediaKeys : [])
+      .map((key) => String(key || '').trim())
+      .filter(Boolean))];
+    if (!keys.length) return {};
+    const storage = storageArea();
+    if (!storage) return {};
+
+    // All aliases share the same tiny index. Read it once, then only fetch
+    // records for keys whose legacy entries are missing mode metadata.
+    const indexResult = await storage.get(NOTE_INDEX_KEY).catch(() => ({}));
+    const index = normalizeIndex(indexResult?.[NOTE_INDEX_KEY]);
+    const entryByKey = new Map(index.map((entry) => [entry.mediaKey, entry]));
+    const output = {};
+    const unresolved = [];
+
+    for (const key of keys) {
+      const entry = entryByKey.get(key);
+      if (entry && Array.isArray(entry.modes)) {
+        output[key] = entry.modes;
+      } else {
+        unresolved.push(key);
+      }
+    }
+
+    if (!unresolved.length) return output;
+    const missingRecordKeys = [];
+    const recordsByMediaKey = new Map();
+    for (const key of unresolved) {
+      const remembered = readRememberedRecord(key);
+      if (remembered) recordsByMediaKey.set(key, remembered);
+      else missingRecordKeys.push(noteKey(key));
+    }
+    if (missingRecordKeys.length) {
+      const result = await storage.get(missingRecordKeys).catch(() => ({}));
+      for (const key of unresolved) {
+        if (recordsByMediaKey.has(key)) continue;
+        const record = normalizeStoredRecord(result?.[noteKey(key)] || null);
+        recordsByMediaKey.set(key, record);
+        if (Object.keys(record.artifacts).length) rememberRecord(key, record);
+      }
+    }
+
+    let indexChanged = false;
+    for (const key of unresolved) {
+      const record = recordsByMediaKey.get(key) || normalizeStoredRecord(null);
+      const modes = artifactModeSummaries(record);
+      output[key] = modes;
+      let entry = entryByKey.get(key);
+      if (entry) {
+        entry.modes = modes;
+        indexChanged = true;
+      } else if (modes.length) {
+        entry = {
+          mediaKey: key,
+          updatedAt: Number(record.updatedAt) || 0,
+          frameBytes: recordFrameBytes(record),
+          modes
+        };
+        index.push(entry);
+        entryByKey.set(key, entry);
+        indexChanged = true;
+      }
+    }
+    if (indexChanged) {
+      index.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+      await storage.set({ [NOTE_INDEX_KEY]: index }).catch(() => {});
+    }
+    return output;
+  }
+
   async function listModes(mediaKey) {
     mediaKey = String(mediaKey || '').trim();
     if (!mediaKey) return [];
-    const storage = storageArea();
-    if (!storage) return [];
-    const result = await storage.get(noteKey(mediaKey)).catch(() => ({}));
-    const record = normalizeStoredRecord(result?.[noteKey(mediaKey)] || null);
-    return Object.values(record.artifacts)
-      .filter((artifact) => artifact?.markdown)
-      .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
-      .map((artifact) => ({ mode: artifact.mode, updatedAt: Number(artifact.updatedAt) || 0, title: artifact.title || '' }));
+    const result = await listModesMany([mediaKey]);
+    return result[mediaKey] || [];
   }
 
   async function getStats() {
@@ -498,6 +693,7 @@
     save,
     load,
     listModes,
+    listModesMany,
     remove,
     sweep,
     getStats,

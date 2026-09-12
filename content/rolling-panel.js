@@ -28,18 +28,6 @@
     return event.target instanceof Element ? event.target : null;
   }
 
-  /** @returns {HTMLElement | null} */
-  function closestHtml(event, selector) {
-    const node = eventTargetElement(event)?.closest(selector) || null;
-    return node instanceof HTMLElement ? node : null;
-  }
-
-  /** @returns {HTMLButtonElement | null} */
-  function closestButton(event, selector) {
-    const node = closestHtml(event, selector);
-    return node instanceof HTMLButtonElement ? node : null;
-  }
-
   /**
    * @param {ParentNode} root
    * @param {string} selector
@@ -369,31 +357,6 @@
             background-repeat:no-repeat; background-position:right center;
           }
 
-          /* AI Drawer (Bottom Slide-Up) */
-          .ai-drawer {
-            flex-shrink:0; padding:9px 12px;
-            border-top:1px solid var(--border);
-            background:var(--surface-2);
-            display:flex; flex-direction:column; gap:7px;
-            animation:slideUp .18s cubic-bezier(0.16, 1, 0.3, 1);
-          }
-          .ai-drawer-header {
-            display:flex; align-items:center; justify-content:space-between;
-          }
-          .ai-drawer-title {
-            font-size:10px; font-weight:600; color:var(--dim); text-transform:uppercase; letter-spacing:0.04em;
-          }
-          .ai-prompts-grid {
-            display:grid; grid-template-columns:repeat(2, 1fr); gap:5px;
-          }
-          .ai-btn {
-            height:26px; padding:0 6px; border:1px solid var(--border); border-radius:6px;
-            background:var(--card); color:var(--text); font-size:10.5px; font-weight:500;
-            display:inline-flex; align-items:center; justify-content:center; gap:4px;
-            cursor:pointer; transition:all .16s ease; white-space:nowrap; text-overflow:ellipsis; overflow:hidden;
-          }
-          .ai-btn:hover { border-color:var(--primary); background:var(--active-bg); color:var(--text); }
-
           /* Bottom Footer Toolbar */
           .footer-bar {
             flex-shrink:0; height:36px; padding:0 8px;
@@ -454,15 +417,15 @@
           }
 
           .empty {
-            flex:1; min-height:160px; padding:24px 16px;
+            flex:1; min-height:168px; padding:28px 18px;
             display:flex; flex-direction:column; align-items:center; justify-content:center;
             text-align:center; color:var(--dim);
           }
           .empty-icon-wrap {
-            width:38px !important; height:38px !important; min-width:38px !important; min-height:38px !important;
-            max-width:38px !important; max-height:38px !important; flex:0 0 38px !important;
-            margin:0 0 10px 0 !important; border-radius:50% !important;
-            background:var(--card); display:flex; align-items:center; justify-content:center;
+            width:40px !important; height:40px !important; min-width:40px !important; min-height:40px !important;
+            max-width:40px !important; max-height:40px !important; flex:0 0 40px !important;
+            margin:0 0 11px 0 !important; border-radius:11px !important;
+            background:var(--surface-2); display:flex; align-items:center; justify-content:center;
             color:var(--dim); border:1px solid var(--border); box-sizing:border-box !important;
           }
           .empty-icon-wrap.error {
@@ -476,14 +439,14 @@
           }
           .empty-icon-wrap svg { width:18px; height:18px; flex-shrink:0; }
           .empty-title {
-            font-size:12.5px; font-weight:600; color:var(--text);
-            margin-bottom:4px; line-height:1.4;
+            font-size:13px; font-weight:650; color:var(--text);
+            margin-bottom:5px; line-height:1.4;
           }
           .empty-desc {
-            font-size:11px; color:var(--dim); line-height:1.5; max-width:240px; margin-bottom:12px;
+            font-size:11px; color:var(--dim); line-height:1.55; max-width:260px; margin-bottom:10px;
           }
           .empty-actions {
-            display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; margin-top:10px; width:100%;
+            display:flex; flex-direction:column; align-items:center; justify-content:center; gap:7px; margin-top:8px; width:100%;
           }
           .empty-sub-actions {
             display:inline-flex; align-items:center; justify-content:center; gap:6px;
@@ -501,13 +464,14 @@
           }
           .empty-btn:active { transform:translateY(0); }
           .empty-btn.btn-transcribe-asr {
-            height:32px; padding:0 18px; font-size:12.5px; font-weight:600;
-            background:linear-gradient(135deg,var(--primary),#ff6b64); color:#ffffff;
-            border:none; border-radius:8px; box-shadow:0 3px 12px rgba(255,85,77,0.35);
+            width:min(228px,100%); height:34px; padding:0 16px; font-size:12px; font-weight:650;
+            background:var(--primary); color:#ffffff;
+            border:1px solid color-mix(in srgb,var(--primary) 82%,#ffffff 18%); border-radius:8px;
+            box-shadow:0 2px 7px color-mix(in srgb,var(--primary) 24%,transparent);
           }
           .empty-btn.btn-transcribe-asr svg { width:14px; height:14px; }
           .empty-btn.btn-transcribe-asr:hover {
-            filter:brightness(1.08); transform:translateY(-1px); box-shadow:0 5px 16px rgba(255,85,77,0.45);
+            filter:brightness(1.04); transform:translateY(-1px); box-shadow:0 3px 9px color-mix(in srgb,var(--primary) 30%,transparent);
           }
           .empty-btn.btn-retry {
             background:var(--active-bg); color:var(--primary); border-color:var(--active-border);
@@ -728,14 +692,12 @@
           .panel.collapsed .empty,
           .panel.collapsed .search-drawer,
           .panel.collapsed .settings-drawer,
-          .panel.collapsed .ai-drawer,
           .panel.collapsed .footer-bar,
           .panel.collapsed .batch-overlay { display:none; }
           .panel.collapsed { height:44px !important; max-height:44px !important; min-height:44px !important; }
           @keyframes pulse { 50% { opacity:.35; } }
           @keyframes spin { to { transform:rotate(360deg); } }
           @keyframes slideDown { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:translateY(0); } }
-          @keyframes slideUp { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
           @media (max-width:700px) { .panel { min-width:240px; } .paragraph-body { font-size:13px; line-height:1.85; } }
         </style>
         <section class="panel">
@@ -808,25 +770,11 @@
           <div class="empty">正在等待字幕…</div>
           <div class="toast"></div>
 
-          <!-- AI Prompts Drawer (Slide Up) -->
-          <div class="ai-drawer" hidden>
-            <div class="ai-drawer-header">
-              <span class="ai-drawer-title">AI 总结与学习提示词</span>
-              <button class="icon-btn-sm ai-close" title="收起 AI 工具">×</button>
-            </div>
-            <div class="ai-prompts-grid">
-              <button class="ai-btn" data-prompt="notes">深度讲义</button>
-              <button class="ai-btn" data-prompt="summary">核心总结</button>
-              <button class="ai-btn" data-prompt="keypoints">关键要点</button>
-              <button class="ai-btn" data-prompt="questions">思考复盘</button>
-            </div>
-          </div>
-
           <!-- Bottom Footer Toolbar -->
           <footer class="footer-bar">
             <div class="footer-left">
-              <button class="footer-btn btn-ai-toggle" title="AI 总结与学习助手">
-                <span>AI 总结</span>
+              <button class="footer-btn btn-learn-workspace" title="打开学习工作台">
+                <span>学习</span>
               </button>
               <div class="footer-export-group">
                 <select id="rp-format-select" name="rp-format-select" class="footer-select format-select" aria-label="导出格式">
@@ -981,9 +929,7 @@
       this.menuLang = requireElement(this.shadow, '.menu-lang', HTMLSelectElement);
       this.menuPref = requireElement(this.shadow, '.menu-pref', HTMLSelectElement);
       this.menuSize = requireElement(this.shadow, '.menu-size', HTMLSelectElement);
-      this.aiDrawer = requireElement(this.shadow, '.ai-drawer', HTMLElement);
-      this.aiBtnToggle = requireElement(this.shadow, '.btn-ai-toggle', HTMLButtonElement);
-      this.aiClose = requireElement(this.shadow, '.ai-close', HTMLButtonElement);
+      this.btnLearnWorkspace = requireElement(this.shadow, '.btn-learn-workspace', HTMLButtonElement);
       this.formatSelect = requireElement(this.shadow, '.format-select', HTMLSelectElement);
       this.btnDownloadSingle = requireElement(this.shadow, '.btn-download-single', HTMLButtonElement);
       this.btnBatchExport = requireElement(this.shadow, '.btn-batch-export', HTMLButtonElement);
@@ -1035,32 +981,10 @@
         this.showToast(BSE.I18n?.t('copied_full_text') || '已复制字幕全文');
       });
 
-      // AI Summary Drawer Toggle
-      this.aiBtnToggle.addEventListener('click', () => {
-        const isHidden = !this.aiDrawer.hidden;
-        this.aiDrawer.hidden = isHidden;
-        this.aiBtnToggle.classList.toggle('active', !isHidden);
-      });
-      this.aiClose.addEventListener('click', () => {
-        this.aiDrawer.hidden = true;
-        this.aiBtnToggle.classList.remove('active');
-      });
-
-      // AI Prompt Buttons
-      /** @type {NodeListOf<HTMLElement>} */ (this.shadow.querySelectorAll('.ai-btn')).forEach((btn) => {
-        btn.addEventListener('click', async () => {
-          if (!this.state?.cues?.length) {
-            this.showToast('暂无字幕内容可供总结');
-            return;
-          }
-          const promptId = btn.dataset.prompt;
-          const text = BSE.Formatters.generateAiPrompt(promptId, this.state.cues, false, {
-            title: this.state.title,
-            mediaContext: this.state.mediaContext || null
-          });
-          await navigator.clipboard.writeText(text);
-          this.showToast(BSE.I18n?.t('ai_copied_toast') || '已复制 AI 提示词与文稿');
-        });
+      // Learning is a Side Panel workspace. Keep the in-player panel focused on
+      // watching and navigation instead of maintaining a second prompt system.
+      this.btnLearnWorkspace.addEventListener('click', () => {
+        this.actions.openSidePanel?.('learn');
       });
 
       // Single Video Download & DASH Audio Extraction
@@ -1408,7 +1332,6 @@
           }
           if (!this.searchDrawer.hidden) this.toggleSearch(false);
           if (!this.settingsDrawer.hidden) this.settingsDrawer.hidden = true;
-          if (!this.aiDrawer.hidden) this.aiDrawer.hidden = true;
         } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
           e.preventDefault();
           this.toggleSearch(true);
@@ -1874,6 +1797,11 @@
         this.settingsToggle.title = t('settings_title');
         this.settingsToggle.setAttribute('aria-label', t('settings_title'));
       }
+      if (this.btnLearnWorkspace) {
+        const label = this.btnLearnWorkspace.querySelector('span');
+        if (label) label.textContent = t('workspace_learn');
+        this.btnLearnWorkspace.title = t('open_learn_workspace');
+      }
       if (this.btnBatchExport) {
         this.btnBatchExport.hidden = this.platform !== BSE.PLATFORM.BILIBILI;
       }
@@ -2328,7 +2256,7 @@
             <div class="empty-actions">
               <button class="empty-btn btn-transcribe-asr" type="button" title="直接使用 SparkScribe 对当前视频进行本地离线转录，不复用其他页面或平台字幕缓存">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-                <span>获取字幕 / 转文字</span>
+                <span>离线转录当前视频</span>
               </button>
               <div class="empty-sub-actions">
                 <button class="empty-btn btn-retry" type="button">
@@ -2378,7 +2306,7 @@
               if (res?.ok) {
                 chrome.runtime.sendMessage({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
                 chrome.runtime.sendMessage({ type: 'BSE_OPEN_SIDE_PANEL', tab: 'queue' }).catch(() => {});
-                this.showToast('未检测到平台网络字幕，已在侧边栏开启离线转录！');
+                this.showToast('已为当前视频启动 SparkScribe 本机转录');
               } else {
                 this.showToast('加入转录队列失败：' + (res?.error || '未知错误'));
               }

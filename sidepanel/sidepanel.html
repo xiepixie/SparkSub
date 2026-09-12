@@ -12,6 +12,11 @@
     <!-- Top Header -->
     <header class="header">
       <div class="brand-row">
+        <span class="brand-lockup" aria-label="SparkSub">
+          <img class="brand-mark" src="../icons/icon-32.png" alt="" aria-hidden="true" decoding="async">
+          <span class="brand-name">SparkSub</span>
+        </span>
+        <span class="header-context-divider" aria-hidden="true"></span>
         <span class="status-dot" id="status-dot" title="连接状态"></span>
         <h1 id="video-title">等待视频…</h1>
       </div>
@@ -105,119 +110,164 @@
       </div>
     </section>
 
-    <!-- Tabs: View Mode Selection (Pinned right below header) -->
-    <nav class="tabs-bar">
-      <button class="tab-btn active" data-tab="timestamp" id="tab-timestamp">时间戳</button>
-      <button class="tab-btn" data-tab="plain" id="tab-plain">纯文本</button>
-      <button class="tab-btn" data-tab="ai" id="tab-ai">AI 总结</button>
-      <button class="tab-btn tab-tracker" data-tab="tracker" id="tab-tracker">
-        <span id="tab-tracker-text">追踪更新</span>
-        <span class="tracker-badge" id="tracker-unread-badge" hidden>0</span>
+    <!-- One-level workspace navigation. -->
+    <nav class="primary-tabs" aria-label="SparkSub 工作区">
+      <button class="primary-tab active" data-workspace="subtitle" id="tab-subtitle" type="button" aria-current="page">
+        <span id="workspace-subtitle-label">字幕</span>
       </button>
-      <button class="tab-btn tab-queue" data-tab="queue" id="tab-queue">
-        <span id="tab-queue-text">离线转录</span>
-        <span class="tracker-badge" id="queue-running-badge" hidden>0</span>
+      <button class="primary-tab" data-workspace="learn" id="tab-learn" type="button" aria-current="false">
+        <span id="workspace-learn-label">学习</span>
+      </button>
+      <button class="primary-tab" data-workspace="review" id="tab-review" type="button" aria-current="false">
+        <span id="workspace-review-label">复习</span>
+      </button>
+      <button class="primary-tab" data-workspace="tracker" id="tab-tracker" type="button" aria-current="false">
+        <span id="workspace-tracker-label">追踪</span>
+        <span class="workspace-nav-badge" id="tracker-unread-badge" hidden>0</span>
+      </button>
+      <button class="primary-tab" data-workspace="queue" id="tab-queue" type="button" aria-current="false">
+        <span id="workspace-queue-label">转录</span>
+        <span class="workspace-nav-badge" id="queue-running-badge" hidden>0</span>
       </button>
     </nav>
 
-    <!-- Video Subtitle Toolbar (Track & Export Controls) -->
-    <section class="video-bar">
-      <div class="video-track-group">
-        <select id="track-select" name="track-select" class="track-select" aria-label="字幕轨道" disabled></select>
-        <span class="meta-pill" id="meta-stats"><span id="cue-count">0</span>条 · <span id="duration">00:00</span></span>
-      </div>
-      <div class="export-group">
-        <button id="batch-button" class="btn-action btn-batch" title="批量导出合集/多P字幕" hidden>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h6v6H4V4zm10 0h6v6h-6V4zM4 14h6v6H4v-6zm10 0h6v6h-6v-6z"/></svg>
-          <span id="batch-btn-text">批量</span>
-        </button>
-        <div class="footer-export-group">
+    <!-- Subtitle workspace controls: reading → source → output. -->
+    <section class="subtitle-toolbar" id="subtitle-toolbar">
+      <div class="subtitle-toolbar-row subtitle-reading-row">
+        <div class="subtitle-mode-toggle" role="tablist" aria-label="字幕阅读方式">
+          <button class="subtitle-mode-btn active" data-tab="timestamp" id="tab-timestamp" type="button" role="tab" aria-selected="true">时间轴</button>
+          <button class="subtitle-mode-btn" data-tab="plain" id="tab-plain" type="button" role="tab" aria-selected="false">连续阅读</button>
+        </div>
+        <div class="search-box subtitle-search-box">
+          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input id="search-input" name="search-input" type="search" placeholder="搜索字幕..." autocomplete="off">
+          <span class="search-count" id="search-count"></span>
+          <button id="search-prev" class="search-nav-btn" type="button" title="上一个 (Shift+Enter)" aria-label="上一个搜索结果" disabled>▲</button>
+          <button id="search-next" class="search-nav-btn" type="button" title="下一个 (Enter)" aria-label="下一个搜索结果" disabled>▼</button>
+        </div>
+        <div class="subtitle-export-group">
+          <button id="batch-button" class="btn-action btn-batch" title="批量导出合集/多P字幕" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h6v6H4V4zm10 0h6v6h-6V4zM4 14h6v6H4v-6zm10 0h6v6h-6v-6z"/></svg>
+          </button>
           <select id="format-select" name="format-select" class="format-select" aria-label="导出格式">
             <option value="txt">TXT</option>
             <option value="srt">SRT</option>
             <option value="md">MD</option>
-            <option value="audio">音频直链</option>
+            <option value="audio">音频</option>
           </select>
-          <button id="download-button" class="btn-action btn-download" title="下载字幕文件" disabled>
+          <button id="download-button" class="btn-action btn-download" title="导出字幕" disabled>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            <span id="export-text">下载</span>
+            <span id="export-text">导出</span>
+          </button>
+        </div>
+      </div>
+      <div class="subtitle-toolbar-row subtitle-source-row">
+        <div class="video-track-group">
+          <select id="track-select" name="track-select" class="track-select" aria-label="字幕来源" disabled></select>
+          <span class="meta-pill"><span id="cue-count">0</span> 条 · <span id="duration">00:00</span></span>
+        </div>
+        <div class="subtitle-actions">
+          <button id="follow-button" class="btn-action active compact-action" type="button" title="跟随播放进度" aria-pressed="true">
+            <span class="dot-indicator"></span><span id="follow-text">跟随</span>
+          </button>
+          <button id="subtitle-local-asr" class="btn-action subtitle-local-asr" type="button" title="只对当前视频权威音轨进行 SparkScribe 本机转录">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
+            <span>本机转录</span>
+          </button>
+          <button id="subtitle-polish" class="btn-action compact-action" type="button" title="校对当前字幕">
+            <span id="subtitle-polish-label">校对</span>
+          </button>
+          <button id="copy-button" class="btn-action compact-action" title="复制全部字幕纯文本" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <span id="copy-text">复制</span>
           </button>
         </div>
       </div>
     </section>
 
-    <!-- Toolbar: Search & Action Bar -->
-    <section class="toolbar" id="toolbar-search">
-      <div class="search-box">
-        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input id="search-input" name="search-input" type="search" placeholder="搜索字幕关键词..." autocomplete="off">
-        <span class="search-count" id="search-count"></span>
-        <button id="search-prev" class="search-nav-btn" title="上一个 (Shift+Enter)">▲</button>
-        <button id="search-next" class="search-nav-btn" title="下一个 (Enter)">▼</button>
-      </div>
-      <div class="actions-row">
-        <button id="follow-button" class="btn-action active" title="跟随播放进度">
-          <span class="dot-indicator"></span><span id="follow-text">跟随</span>
-        </button>
-        <button id="copy-button" class="btn-action" title="复制全部字幕纯文本" disabled>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          <span id="copy-text">复制全文</span>
-        </button>
-      </div>
-    </section>
-
-    <!-- AI Prompts & Visual Course Breakdown View -->
+    <!-- Shared Learn / Review workbench. Workspace owns the task; mode stays subordinate. -->
     <section class="ai-section" id="ai-section" hidden>
       <div class="ai-header">
         <div class="ai-header-left">
-          <span class="ai-title" id="ai-title">AI 学习产物</span>
-          <div class="ai-model-badge" id="ai-model-badge" title="当前生成模型与连接状态，点击打开配置">
+          <span class="ai-title" id="ai-title">学习工作台</span>
+          <span class="ai-workspace-desc" id="ai-workspace-desc">从当前字幕生成可长期留存的讲义，或做一次快速回顾。</span>
+          <button class="ai-model-badge" id="ai-model-badge" type="button" aria-expanded="false" aria-controls="ai-settings-drawer" title="当前工作区模型与共享连接状态，点击打开配置">
             <span class="badge-dot" id="ai-status-dot"></span>
             <span class="ai-model-name" id="ai-model-name">正在读取 AI 配置…</span>
-          </div>
+          </button>
         </div>
-        <button class="ai-btn-icon" id="ai-settings-toggle" title="配置 AI 端点与 API Key" aria-label="配置 AI 端点与 API Key"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+        <button class="ai-btn-icon" id="ai-settings-toggle" type="button" aria-expanded="false" aria-controls="ai-settings-drawer" title="配置共享 AI 连接与学习/复习模型" aria-label="配置共享 AI 连接与学习/复习模型"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
       </div>
 
-      <!-- AI Settings Panel Drawer -->
+      <!-- AI Settings Panel Drawer: one shared connection, workspace-specific models. -->
       <div class="ai-settings-drawer" id="ai-settings-drawer" hidden>
-        <div class="ai-settings-title">大模型端点与凭证配置</div>
+        <div class="ai-settings-heading">
+          <div class="ai-settings-title" id="ai-settings-title">AI 生成配置</div>
+          <div class="ai-settings-scope" id="ai-settings-scope">接口与凭证由学习、复习共享；两个工作区可以选择不同模型。</div>
+        </div>
+        <div class="ai-settings-section-label" id="ai-shared-connection-label">共享连接</div>
         <div class="ai-field-group">
-          <label class="ai-field-label" for="ai-input-endpoint">本地 AI 网关 (Base URL)</label>
+          <label class="ai-field-label" id="ai-endpoint-label" for="ai-input-endpoint">本地 AI 网关 (Base URL)</label>
           <input type="url" id="ai-input-endpoint" class="ai-text-input" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://localhost:8083/v1" />
-          <div class="ai-field-hint">当前扩展网络权限只直连 <code>http://localhost</code> / <code>http://127.0.0.1</code>。云端模型请由本地 OpenAI-compatible 网关转发，避免扩展申请全网访问权限。</div>
+          <div class="ai-field-hint" id="ai-endpoint-hint">当前扩展网络权限只直连 <code>http://localhost</code> / <code>http://127.0.0.1</code>。云端模型请由本地 OpenAI-compatible 网关转发。</div>
         </div>
         <div class="ai-field-group">
-          <label class="ai-field-label" for="ai-input-apikey">API Key (令牌)</label>
+          <label class="ai-field-label" id="ai-apikey-label" for="ai-input-apikey">API Key (令牌)</label>
           <input type="password" id="ai-input-apikey" class="ai-text-input" placeholder="sk-..." />
         </div>
-        <div class="ai-field-group">
-          <label class="ai-field-label" for="ai-input-model">生成模型 (Model)</label>
-          <input type="text" id="ai-input-model" class="ai-text-input" list="ai-model-options" autocomplete="off" spellcheck="false" placeholder="gemini-3.7-flash-thinking" />
-          <datalist id="ai-model-options"></datalist>
-          <div class="ai-field-hint">服务探测后会补全可见模型；生成时始终使用这里填写的模型，不会自动切换。测试会真实发送一条极小文本请求；图文讲义还要求该模型支持图片输入。</div>
+        <div class="ai-settings-section-label" id="ai-workspace-model-label">工作区模型</div>
+        <div class="ai-workspace-model-grid">
+          <div class="ai-field-group ai-workspace-model-field" id="ai-learn-model-field" data-workspace-model="learn">
+            <label class="ai-field-label ai-workspace-model-title" for="ai-input-learn-model"><span id="ai-learn-model-label">学习模型</span><span class="ai-current-workspace-mark" id="ai-learn-current-mark">当前页</span></label>
+            <input type="text" id="ai-input-learn-model" class="ai-text-input" list="ai-model-options" autocomplete="off" spellcheck="false" placeholder="gemini-3.7-flash-thinking" />
+            <div class="ai-field-hint" id="ai-learn-model-hint">用于图文讲义、关键要点与概念深解；图文讲义需要模型支持图片输入。</div>
+          </div>
+          <div class="ai-field-group ai-workspace-model-field" id="ai-review-model-field" data-workspace-model="review">
+            <label class="ai-field-label ai-workspace-model-title" for="ai-input-review-model"><span id="ai-review-model-label">复习模型</span><span class="ai-current-workspace-mark" id="ai-review-current-mark">当前页</span></label>
+            <input type="text" id="ai-input-review-model" class="ai-text-input" list="ai-model-options" autocomplete="off" spellcheck="false" placeholder="gemini-3.7-flash-thinking" />
+            <div class="ai-field-hint" id="ai-review-model-hint">用于核心速览、自测翻卡与易错排查，可单独选择更快或成本更低的文本模型。</div>
+          </div>
         </div>
+        <datalist id="ai-model-options"></datalist>
         <div class="ai-settings-actions">
-          <button class="btn-ai-action-secondary" id="ai-btn-test-conn">测试当前模型</button>
+          <button class="btn-ai-action-secondary" id="ai-btn-test-conn">测试当前页模型</button>
           <button class="btn-ai-action-primary" id="ai-btn-save-settings">保存配置</button>
         </div>
         <div class="ai-test-status" id="ai-test-status" role="status" aria-live="polite"></div>
       </div>
 
-      <!-- Mode Selector Tabs -->
-      <div class="ai-modes-shell">
-        <div class="ai-modes-bar" role="tablist" aria-label="AI 学习产物">
-          <button class="ai-mode-pill active" data-mode="course_notes" role="tab" aria-selected="true" tabindex="0" title="适合系统学习与长期留存；会规划并筛选真正有信息增量的画面">学习讲义 <span class="ai-mode-kind">图文 · 深度</span></button>
-          <button class="ai-mode-pill" data-mode="summary" role="tab" aria-selected="false" tabindex="-1" title="适合看完后快速回忆；只处理字幕文本，不截图">快速回顾 <span class="ai-mode-kind">文本 · 快速</span></button>
-          <button class="ai-mode-pill" data-mode="deep_qa" role="tab" aria-selected="false" tabindex="-1" title="适合复习、自测与查漏补缺；题目和参考答案分开组织">复盘自测 <span class="ai-mode-kind">文本 · 练习</span></button>
+      <!-- Task-first selectors: users choose the learning outcome, not an AI technique. -->
+      <div class="ai-modes-shell" id="ai-learn-mode-shell">
+        <div class="ai-modes-bar" role="tablist" aria-label="学习任务">
+          <button class="ai-mode-pill active" data-mode="course_notes" role="tab" aria-selected="true" tabindex="0" title="生成包含关键板书、公式、代码或画面证据的完整讲义"><span class="ai-mode-label">图文讲义</span><span class="ai-mode-kind">完整沉淀</span></button>
+          <button class="ai-mode-pill" data-mode="keypoints" role="tab" aria-selected="false" tabindex="-1" title="只保留最值得记住的结论、边界和行动清单"><span class="ai-mode-label">关键要点</span><span class="ai-mode-kind">高密度</span></button>
+          <button class="ai-mode-pill" data-mode="concept_deep" role="tab" aria-selected="false" tabindex="-1" title="围绕视频最核心或最难的概念单独解释原理、推导与边界"><span class="ai-mode-label">概念深解</span><span class="ai-mode-kind">理解难点</span></button>
         </div>
-        <button class="ai-prompts-toggle" id="ai-prompts-toggle" type="button" aria-expanded="false" title="展开可复制到 ChatGPT、Claude 等外部 AI 的提示词模板">外部 AI 模板</button>
+      </div>
+
+      <div class="ai-modes-shell" id="ai-review-mode-shell" hidden>
+        <div class="ai-modes-bar" role="tablist" aria-label="复习任务">
+          <button class="ai-mode-pill" data-mode="summary" role="tab" aria-selected="false" tabindex="-1" title="用几十秒重新进入视频的核心脉络"><span class="ai-mode-label">核心速览</span><span class="ai-mode-kind">快速唤醒</span></button>
+          <button class="ai-mode-pill" data-mode="deep_qa" role="tab" aria-selected="false" tabindex="-1" title="先独立作答，再主动翻开参考答案"><span class="ai-mode-label">自测翻卡</span><span class="ai-mode-kind">主动回忆</span></button>
+          <button class="ai-mode-pill" data-mode="error_check" role="tab" aria-selected="false" tabindex="-1" title="集中检查最容易混淆、误用或遗漏的边界"><span class="ai-mode-label">易错排查</span><span class="ai-mode-kind">边界检查</span></button>
+        </div>
+      </div>
+
+      <div class="review-protocol" id="ai-review-protocol" aria-label="自测流程" hidden>
+        <span id="ai-review-step-answer"><strong>1</strong> 独立作答</span>
+        <span class="review-protocol-arrow" aria-hidden="true">→</span>
+        <span id="ai-review-step-reveal"><strong>2</strong> 主动展开答案</span>
+        <span class="review-protocol-arrow" aria-hidden="true">→</span>
+        <span id="ai-review-step-revisit"><strong>3</strong> 回看关键点</span>
       </div>
 
       <!-- Action Toolbar -->
       <div class="ai-action-toolbar" id="ai-action-toolbar">
         <button class="btn-ai-run" id="ai-btn-generate">
           <span id="ai-btn-generate-text">生成学习讲义</span>
+        </button>
+        <button class="btn-ai-tool ai-external-entry" id="ai-btn-external-toggle" type="button" aria-expanded="false" aria-controls="ai-external-toolbar" title="打开 ChatGPT、Claude 等外部 AI 协作流程">
+          <span id="ai-btn-external-toggle-text">外部 AI</span>
         </button>
         <button class="btn-ai-tool" id="ai-btn-snip-frame" title="截取当前播放位置的高清原画并加入笔记">
           <span>截当前帧</span>
@@ -231,27 +281,40 @@
       </div>
 
       <!-- External Web AI Copilot Toolbar -->
-      <div class="ai-external-toolbar" id="ai-external-toolbar">
+      <div class="ai-external-toolbar" id="ai-external-toolbar" hidden>
         <div class="ai-external-flow-head">
           <div>
-            <strong class="ai-external-flow-title">外部 AI 协作</strong>
-            <span class="ai-external-flow-desc">规划 → 导入取帧 → 投递画面 → 合成 → 再导入</span>
+            <strong class="ai-external-flow-title" id="ai-external-flow-title">用外部 AI 完成图文讲义</strong>
+            <span class="ai-external-flow-desc" id="ai-external-flow-desc">阶段一先规划章节与取样窗口，SparkSub 按规划取帧；阶段二再沿用同一章节骨架组织图文笔记。</span>
           </div>
-          <span class="ai-external-flow-badge">可选</span>
+          <span class="ai-external-flow-badge" id="ai-external-flow-badge">无需本地配置</span>
         </div>
         <div class="ai-external-steps">
-          <button class="btn-ai-subtool" id="ai-btn-copy-plan-prompt" title="复制带时间戳字幕与规划提示词，发给网页版 AI 获取播放器取样窗口 JSON">
-            <span class="subtool-step">规划</span>
-            <span>复制规划词</span>
-          </button>
-          <button class="btn-ai-subtool" id="ai-btn-open-import-modal" title="导入外部 AI 返回的规划 JSON 以自动取帧；完成合成后也从这里导入最终 Markdown 报告">
-            <span class="subtool-step">回流</span>
-            <span>导入 AI 返回</span>
-          </button>
-          <button class="btn-ai-subtool" id="ai-btn-copy-synth-prompt" title="图片投递后复制报告合成提示词；提示词与最近一次“复制精选拼图”或“原图打包”的图片集合保持一致">
-            <span class="subtool-step">合成</span>
-            <span>复制报告词</span>
-          </button>
+          <div class="ai-external-stage" id="ai-external-plan-stage">
+            <div class="ai-external-stage-head">
+              <div class="ai-external-stage-label" id="ai-external-plan-stage-label">1 · 规划章节与取帧</div>
+              <button class="ai-external-reset-stage" id="ai-external-reset-plan" type="button" hidden>重新规划</button>
+            </div>
+            <div class="ai-external-stage-actions">
+              <button class="btn-ai-subtool" id="ai-btn-copy-plan-prompt" title="复制带时间戳字幕的章节与取帧规划任务">
+                <span id="ai-external-plan-label">复制阶段一任务</span>
+              </button>
+              <button class="btn-ai-subtool" id="ai-btn-import-plan" title="导入外部 AI 返回的章节与取帧规划 JSON">
+                <span id="ai-external-import-plan-label">导入规划</span>
+              </button>
+            </div>
+          </div>
+          <div class="ai-external-stage" id="ai-external-result-stage">
+            <div class="ai-external-stage-label" id="ai-external-result-stage-label">2 · 组织笔记</div>
+            <div class="ai-external-stage-actions">
+              <button class="btn-ai-subtool" id="ai-btn-copy-synth-prompt" title="复制最终任务">
+                <span id="ai-external-synth-label">复制最终任务</span>
+              </button>
+              <button class="btn-ai-subtool" id="ai-btn-open-import-modal" title="导入外部 AI 返回的最终 Markdown">
+                <span id="ai-external-import-label">导入结果</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -278,55 +341,30 @@
         <span class="ai-progress-text" id="ai-progress-text">正在分析视频时间轴与关键画面…</span>
       </div>
 
-      <!-- Rendered Note Container -->
-      <div class="ai-note-result-container" id="ai-note-result-container">
-        <div class="ai-note-placeholder" id="ai-note-placeholder">
-          <div class="placeholder-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M8.5 14.5A6 6 0 1 1 15.5 14.5C14.5 15.2 14 16 14 17h-4c0-1-.5-1.8-1.5-2.5z"/></svg></div>
-          <div class="placeholder-body">
-            <div class="placeholder-title" id="ai-note-placeholder-title">生成一份可长期留存的学习讲义</div>
-            <p class="placeholder-desc" id="ai-note-placeholder-desc">先梳理字幕主线，再按需要规划和筛选关键画面，适合系统学习、课程复习和归档。</p>
-          </div>
+      <!-- Rendered note flows directly in the workspace; no extra card/container layer. -->
+      <div class="ai-note-placeholder" id="ai-note-placeholder">
+        <div class="placeholder-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M8.5 14.5A6 6 0 1 1 15.5 14.5C14.5 15.2 14 16 14 17h-4c0-1-.5-1.8-1.5-2.5z"/></svg></div>
+        <div class="placeholder-body">
+          <div class="placeholder-title" id="ai-note-placeholder-title">生成一份可长期留存的学习讲义</div>
+          <p class="placeholder-desc" id="ai-note-placeholder-desc">先梳理字幕主线，再按需要规划和筛选关键画面，适合系统学习、课程复习和归档。</p>
         </div>
-        <div class="ai-note-content" id="ai-note-content" hidden></div>
       </div>
+      <div class="ai-note-inline-actions" id="ai-note-inline-actions" hidden>
+        <span class="ai-note-stale" id="ai-note-stale" hidden>源字幕已更新，这份材料基于旧字幕生成</span>
+        <button class="ai-clear-artifact-btn" id="ai-btn-clear-artifact" type="button" title="只清空当前视频当前任务的已保存产物">清空当前产物</button>
+      </div>
+      <article class="ai-note-content" id="ai-note-content" aria-live="polite" hidden></article>
 
-      <!-- Legacy Prompts View (Shown when 'prompts' mode is selected) -->
-      <div class="ai-prompts-grid" id="ai-prompts-grid" hidden>
-        <button class="ai-prompt-card" data-prompt="polish">
-          <div class="ai-card-top">
-            <strong class="ai-card-title" id="ai-card-polish">吞音纠错与口语润色</strong>
-          </div>
-          <p class="ai-card-desc">结合视频标题修正缩读吞音与专有名词（如 PyTorch、Qwen 等）</p>
-        </button>
-        <button class="ai-prompt-card" data-prompt="notes">
-          <div class="ai-card-top">
-            <strong class="ai-card-title" id="ai-card-notes">结构化深度讲义</strong>
-          </div>
-          <p class="ai-card-desc">去噪纠错、定理脉络、推导动机与避坑边界</p>
-        </button>
-        <button class="ai-prompt-card" data-prompt="summary">
-          <div class="ai-card-top">
-            <strong class="ai-card-title" id="ai-card-summary">核心主旨与脉络</strong>
-          </div>
-          <p class="ai-card-desc">精准概括主线脉络、核心结论与关键注意点</p>
-        </button>
-        <button class="ai-prompt-card" data-prompt="keypoints">
-          <div class="ai-card-top">
-            <strong class="ai-card-title" id="ai-card-keypoints">关键要点与清单</strong>
-          </div>
-          <p class="ai-card-desc">提炼高密度要点、适用边界与实战动作清单</p>
-        </button>
-        <button class="ai-prompt-card" data-prompt="questions">
-          <div class="ai-card-top">
-            <strong class="ai-card-title" id="ai-card-questions">深度复盘与辨析题</strong>
-          </div>
-          <p class="ai-card-desc">生成概念辨析、推导动机与易错边界思考题</p>
-        </button>
-      </div>
     </section>
 
-    <!-- Subscriptions & Tracker View -->
-    <section class="tracker-section" id="tracker-section" hidden>
+    <!-- First-level workspace: subscriptions and updates. -->
+    <section class="tracker-section workspace-page" id="tracker-section" aria-label="追踪更新" hidden>
+      <div class="workspace-page-header">
+        <div>
+          <strong>追踪更新</strong>
+          <span>查看课程与创作者更新，不遮挡当前工作区</span>
+        </div>
+      </div>
       <div class="tracker-quick-bar" id="tracker-quick-bar">
         <div class="tracker-quick-media">
           <div class="tracker-quick-avatar" id="tracker-quick-avatar" aria-hidden="true">B</div>
@@ -391,8 +429,14 @@
       </div>
     </section>
 
-    <!-- Queue View: Background Transcription Manager -->
-    <section class="queue-view" id="queue-view" hidden>
+    <!-- First-level workspace: background transcription queue. -->
+    <section class="queue-view workspace-page" id="queue-view" aria-label="转录队列" hidden>
+      <div class="workspace-page-header">
+        <div>
+          <strong>转录队列</strong>
+          <span>当前视频与批量任务统一在这里管理</span>
+        </div>
+      </div>
       <div class="queue-toolbar">
         <button class="queue-tool-btn primary" id="queue-btn-show-add" title="批量添加视频链接或BV号">
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
@@ -456,9 +500,9 @@
         </div>
         <p id="empty-message">打开 YouTube 或哔哩哔哩视频后，字幕将自动同步出现在这里。</p>
         <div class="empty-actions" id="empty-actions" hidden>
-          <button class="empty-btn empty-btn-transcribe" id="empty-transcribe-btn" type="button" title="直接使用 SparkScribe 对当前视频进行本地离线转录，不复用平台字幕缓存">
+          <button class="empty-btn empty-btn-transcribe" id="empty-transcribe-btn" type="button" title="使用 SparkScribe 对当前视频进行本地离线转录">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-            <span>获取字幕 / 转文字</span>
+            <span>离线转录当前视频</span>
           </button>
         </div>
       </div>
@@ -509,7 +553,7 @@
       </div>
       <div class="batch-body">
         <!-- Card 1: Main Hierarchy Tree Card with Granular Selection -->
-        <div class="batch-card" id="batch-tree-card">
+        <div class="batch-card">
           <div class="batch-card-header">
             <div class="batch-tree-header-top">
               <div class="batch-tree-title-group">
@@ -553,7 +597,7 @@
         </div>
 
         <!-- Card 2: Output & Format Settings (Focused and Streamlined) -->
-        <div class="batch-card" id="batch-settings-card">
+        <div class="batch-card">
           <div class="batch-card-header">
             <span class="batch-card-title">输出与格式设置</span>
           </div>
@@ -622,21 +666,46 @@
   </div>
 
   <!-- External AI Import Modal Overlay -->
-  <div class="ai-import-modal-overlay" id="ai-import-modal" hidden>
-    <div class="ai-import-modal-card">
-      <div class="ai-import-modal-header">
-        <div class="ai-import-modal-title">
-          <strong>导入外部 AI 结果</strong>
+  <div class="workflow-modal-overlay" id="ai-import-modal" hidden>
+    <div class="workflow-modal-card">
+      <div class="workflow-modal-header">
+        <div class="workflow-modal-title">
+          <strong id="ai-import-modal-title">导入外部 AI 结果</strong>
         </div>
         <button class="btn-modal-close" id="ai-btn-close-import-modal" title="关闭">×</button>
       </div>
-      <p class="ai-import-modal-desc">
-        在此粘贴外部大模型（ChatGPT / DeepSeek / Claude / Kimi 等）返回的 <b>规划 JSON</b>（扩展将自动在视频中为您精准定向截取原画），或直接粘贴已写好的 <b>Markdown 讲义</b>。
+      <p class="workflow-modal-desc" id="ai-import-modal-desc">
+        粘贴当前步骤对应的外部 AI 返回内容。
       </p>
       <textarea class="ai-import-textarea" id="ai-import-textarea" placeholder="在此粘贴外部大模型返回的内容 (支持带代码块、思考过程或纯文本)..."></textarea>
-      <div class="ai-import-modal-footer">
+      <div class="workflow-modal-footer">
         <button class="btn-secondary" id="ai-btn-cancel-import">取消</button>
         <button class="btn-primary" id="ai-btn-confirm-import">确认并开始处理</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Subtitle proofreading workflow: reuse existing cue timing and only import text patches. -->
+  <div class="workflow-modal-overlay" id="subtitle-polish-modal" hidden>
+    <div class="workflow-modal-card subtitle-polish-modal-card" role="dialog" aria-modal="true" aria-labelledby="subtitle-polish-modal-title" aria-describedby="subtitle-polish-modal-desc">
+      <div class="workflow-modal-header">
+        <div class="workflow-modal-title">
+          <strong id="subtitle-polish-modal-title">字幕校对</strong>
+        </div>
+        <button class="btn-modal-close" id="subtitle-polish-close" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <p class="workflow-modal-desc" id="subtitle-polish-modal-desc">
+        保留当前字幕时间轴，只把需要修改的文本行交给外部 AI 回填。
+      </p>
+      <div class="subtitle-polish-task-row">
+        <button class="btn-secondary subtitle-polish-copy-task" id="subtitle-polish-copy-task" type="button">复制校对任务</button>
+        <span class="subtitle-polish-anchor-hint" id="subtitle-polish-anchor-hint">Lxxxx = 现有时间轴锚点</span>
+      </div>
+      <textarea class="ai-import-textarea subtitle-polish-textarea" id="subtitle-polish-textarea" placeholder="粘贴外部 AI 返回的 Lxxxx | 校对文本…"></textarea>
+      <div class="subtitle-polish-status" id="subtitle-polish-status" aria-live="polite"></div>
+      <div class="workflow-modal-footer">
+        <button class="btn-secondary" id="subtitle-polish-cancel" type="button">取消</button>
+        <button class="btn-primary" id="subtitle-polish-apply" type="button">应用校对结果</button>
       </div>
     </div>
   </div>
@@ -649,7 +718,6 @@
   <script src="../core/jszip.js"></script>
   <script src="../core/i18n.js"></script>
   <script src="../core/language-routing.js"></script>
-  <script src="../core/native-host.js"></script>
   <script src="../core/queue-ui.js"></script>
   <script src="../core/parsers.js"></script>
   <script src="../core/media.js"></script>
@@ -663,7 +731,6 @@
   <script src="../platform/bilibili.js"></script>
   <script src="../platform/youtube.js"></script>
   <script src="../core/tracker.js"></script>
-  <script src="../core/queue.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

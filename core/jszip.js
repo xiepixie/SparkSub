@@ -28,11 +28,24 @@
     return { dosTime, dosDate };
   }
 
+  function decodeBase64(content) {
+    const normalized = String(content || '').replace(/\s+/g, '');
+    if (!normalized) return new Uint8Array(0);
+    const binary = atob(normalized);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+
   class ZipEntry {
-    constructor(path, content) {
+    constructor(path, content, options = {}) {
       this.path = path.replace(/\\/g, '/').replace(/^\/+/, '');
       this.isDir = this.path.endsWith('/');
-      if (typeof content === 'string') {
+      if (typeof content === 'string' && options.base64 === true) {
+        this.data = decodeBase64(content);
+      } else if (typeof content === 'string') {
         this.data = textEncoder.encode(content);
       } else if (content instanceof Uint8Array) {
         this.data = content;
@@ -53,12 +66,12 @@
       this._files = new Map();
     }
 
-    file(name, content) {
+    file(name, content, options = {}) {
       if (arguments.length === 1) {
         return this._files.get(this._prefix + name) || null;
       }
       const fullPath = this._prefix + name;
-      const entry = new ZipEntry(fullPath, content);
+      const entry = new ZipEntry(fullPath, content, options);
       this._files.set(fullPath, entry);
       return this;
     }

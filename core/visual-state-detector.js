@@ -218,7 +218,11 @@
           ? Math.min(...selected.map((frame) => Math.abs(frame.timestamp - candidate.timestamp)))
           : Number(options.videoDuration) || 120;
         const coverageBonus = Math.min(0.18, nearestGap / 180 * 0.18);
-        const score = frameQualityScore(candidate) + coverageBonus;
+        const chapterId = String(candidate.chapterId || '').trim();
+        const chapterCoverageBonus = chapterId && !selected.some((frame) => String(frame.chapterId || '').trim() === chapterId)
+          ? 0.12
+          : 0;
+        const score = frameQualityScore(candidate) + coverageBonus + chapterCoverageBonus;
         if (score > bestScore) {
           bestIndex = i;
           bestScore = score;

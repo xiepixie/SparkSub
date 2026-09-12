@@ -5,7 +5,6 @@ try {
     '../core/namespace.js',
     '../core/diagnostics.js',
     '../core/utils.js',
-    '../core/jszip.js',
     '../core/i18n.js',
     '../core/parsers.js',
     '../core/media.js',
@@ -28,6 +27,8 @@ try {
 const tabStates = new Map();
 /** @type {Map<number, Array<import('../types/bse').CapturedCaptionRequest>>} */
 const captionRequests = new Map();
+const localLlmControllers = new Map();
+const videoRuntimeLoads = new Map();
 const MAX_REQUESTS_PER_TAB = 24;
 const MAX_PROXY_BODY_BYTES = 5 * 1024 * 1024;
 const BILIBILI_REQUEST_TIMEOUT_MS = 15000;
@@ -92,8 +93,8 @@ if (chrome.contextMenus?.onClicked) {
 
 async function updateBadgeFromUnread() {
   try {
-    const subs = await BSE.Tracker?.getSubscriptions?.() || [];
-    const totalUnread = subs.reduce((sum, s) => sum + (BSE.Tracker?.getUnreadItems?.(s)?.length ?? (Number(s.unreadCount) || 0)), 0);
+    const summary = await BSE.Tracker?.getTrackerSummary?.() || { unread: 0 };
+    const totalUnread = Math.max(0, Number(summary.unread) || 0);
     const settings = await BSE.Tracker?.getSettings?.() || { enableBadge: true };
 
     if (chrome.action) {
@@ -183,9 +184,13 @@ setupBilibiliNetRules().catch(() => {});
 if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName === 'local') {
-      const hasQueueChange = Object.keys(changes || {}).some((key) => key === 'bse_transcription_queue_v1' || key.startsWith('bse_transcription_queue_v1:item:'));
-      if (hasQueueChange) startQueueExecutor().catch((err) => console.warn('[SparkSub ServiceWorker] 队列执行异常:', err));
-      if (changes?.bse_subscriptions) updateBadgeFromUnread().catch(() => {});
+      // New queue mutations wake the orchestrator explicitly. Only the legacy
+      // whole-array key keeps a storage-triggered wake for migration compatibility;
+      // per-item progress writes must not make a running executor wake itself.
+      if (changes?.bse_transcription_queue_v1) {
+        startQueueExecutor().catch((err) => console.warn('[SparkSub ServiceWorker] 队列执行异常:', err));
+      }
+      if (changes?.bse_tracker_summary_v1 || changes?.bse_subscriptions) updateBadgeFromUnread().catch(() => {});
       return;
     }
     if (areaName === 'sync' && changes?.bse_tracker_settings) {
@@ -502,13 +507,39 @@ function isMatchingVideoUrl(url = '') {
 
 function isMatchingSiteUrl(url = '') {
   if (!url) return false;
-  return /(^https?:\/\/)(www\.|m\.)?(youtube\.com|bilibili\.com|youtu\.be)/i.test(url);
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+    const host = parsed.hostname.toLowerCase();
+    return host === 'youtube.com'
+      || host.endsWith('.youtube.com')
+      || host === 'bilibili.com'
+      || host.endsWith('.bilibili.com')
+      || host === 'youtu.be';
+  } catch {
+    return false;
+  }
+}
+
+async function injectFeedContentScript(tabId) {
+  if (!tabId || !chrome.scripting) return false;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      files: ['content/feed-injector.js']
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function injectContentScripts(tabId, url = '') {
   if (!tabId || !chrome.scripting) return false;
   try {
     const isYouTube = /(^https?:\/\/)(www\.|m\.)?youtube\.com/i.test(url);
+    const platformAdapter = isYouTube ? 'platform/youtube.js' : 'platform/bilibili.js';
     if (isYouTube) {
       await chrome.scripting.executeScript({
         target: { tabId },
@@ -527,20 +558,34 @@ async function injectContentScripts(tabId, url = '') {
         'core/i18n.js',
         'core/parsers.js',
         'core/media.js',
+        'core/media-context.js',
         'core/formatters.js',
-        'core/asr-polisher.js',
-        'core/tracker.js',
-        'core/queue.js',
-        'platform/youtube.js',
-        'platform/bilibili.js',
+        'core/batch-export.js',
+        platformAdapter,
         'content/rolling-panel.js',
-        'content/feed-injector.js',
         'content/app.js'
       ]
     });
     return true;
   } catch {
     return false;
+  }
+}
+
+async function ensureVideoRuntime(tabId, url = '') {
+  if (!tabId || !isMatchingVideoUrl(url)) return false;
+  const existingLoad = videoRuntimeLoads.get(tabId);
+  if (existingLoad) return existingLoad;
+  const load = (async () => {
+    const existing = await chrome.tabs.sendMessage(tabId, { type: 'BSE_VIDEO_RUNTIME_PING' }).catch(() => null);
+    if (existing?.ok) return true;
+    return injectContentScripts(tabId, url);
+  })();
+  videoRuntimeLoads.set(tabId, load);
+  try {
+    return await load;
+  } finally {
+    if (videoRuntimeLoads.get(tabId) === load) videoRuntimeLoads.delete(tabId);
   }
 }
 
@@ -553,8 +598,10 @@ chrome.runtime.onInstalled.addListener(() => {
   BSE.Queue?.recoverStaleJobs?.().catch(() => {});
   chrome.tabs.query({}).then((tabs) => {
     for (const tab of tabs) {
-      if (tab.id && isMatchingSiteUrl(tab.url)) {
-        injectContentScripts(tab.id, tab.url).catch(() => {});
+      if (!tab.id || !isMatchingSiteUrl(tab.url)) continue;
+      injectFeedContentScript(tab.id).catch(() => {});
+      if (isMatchingVideoUrl(tab.url)) {
+        ensureVideoRuntime(tab.id, tab.url).catch(() => {});
       }
     }
   }).catch(() => {});
@@ -626,6 +673,7 @@ chrome.webRequest.onBeforeRequest.addListener(
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabStates.delete(tabId);
   captionRequests.delete(tabId);
+  videoRuntimeLoads.delete(tabId);
 });
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
@@ -765,6 +813,53 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.type === 'BSE_MEDIA_CONTEXT_UPDATE' && sender.tab?.id != null) {
+    const previous = tabStates.get(sender.tab.id);
+    const mediaKey = String(message.mediaKey || '').trim();
+    const ownerMatches = Boolean(previous && mediaKey && String(previous.mediaKey || '').trim() === mediaKey && message.mediaContext);
+    if (ownerMatches) {
+      tabStates.set(sender.tab.id, { ...previous, mediaContext: message.mediaContext });
+      chrome.runtime.sendMessage({
+        type: 'BSE_MEDIA_CONTEXT_BROADCAST',
+        tabId: sender.tab.id,
+        mediaKey,
+        mediaContext: message.mediaContext
+      }).catch(() => {});
+    }
+    return false;
+  }
+
+  if (message.type === 'BSE_DIAGNOSTIC_APPEND' && sender.tab?.id != null) {
+    const previous = tabStates.get(sender.tab.id);
+    const eventMediaKey = String(message.context?.mediaKey || '').trim();
+    if (previous && (!eventMediaKey || String(previous.mediaKey || '').trim() === eventMediaKey)) {
+      const sessionId = String(message.sessionId || '');
+      const sameSession = sessionId && sessionId === String(previous.diagnosticSessionId || '');
+      const existing = sameSession && Array.isArray(previous.diagnostics) ? previous.diagnostics : [];
+      const eventId = String(message.id || '');
+      const diagnosticEvent = {
+        id: message.id,
+        timestamp: message.timestamp,
+        level: message.level,
+        scope: message.scope,
+        code: message.code,
+        stage: message.stage,
+        message: message.message,
+        sessionId: message.sessionId,
+        context: message.context
+      };
+      const diagnostics = eventId && existing.some((event) => String(event?.id || '') === eventId)
+        ? existing
+        : [...existing, diagnosticEvent].slice(-100);
+      tabStates.set(sender.tab.id, {
+        ...previous,
+        diagnosticSessionId: sessionId || previous.diagnosticSessionId || '',
+        diagnostics
+      });
+    }
+    return false;
+  }
+
   if (message.type === 'BSE_PLAYBACK_UPDATE' && sender.tab?.id != null) {
     const previous = tabStates.get(sender.tab.id);
     if (previous) {
@@ -811,6 +906,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'BSE_FETCH_NATIVE_YOUTUBE_CAPTIONS') {
+    if (!isTrustedExtensionPageSender(sender)) {
+      sendResponse({ success: false, error: 'Native caption requests are only available to extension pages.' });
+      return false;
+    }
     (async () => {
       try {
         if (!BSE.NativeHost?.fetchYouTubeCaptions) {
@@ -825,12 +924,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'BSE_CANCEL_LOCAL_LLM') {
+    const requestId = String(message.requestId || '').trim();
+    const controller = requestId ? localLlmControllers.get(requestId) : null;
+    if (controller) controller.abort(new DOMException('请求已取消', 'AbortError'));
+    sendResponse({ success: true, cancelled: Boolean(controller) });
+    return false;
+  }
+
   if (message.type === 'BSE_FETCH_LOCAL_LLM') {
     const url = message.url;
     const body = message.body;
+    const requestId = String(message.requestId || '').trim();
     const requestedTimeoutMs = Number(message.timeoutMs) || 120000;
     const timeoutMs = Math.min(300000, Math.max(1000, requestedTimeoutMs));
     const controller = new AbortController();
+    if (requestId) {
+      localLlmControllers.get(requestId)?.abort(new DOMException('请求已替换', 'AbortError'));
+      localLlmControllers.set(requestId, controller);
+    }
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const headers = {
       'Content-Type': 'application/json',
@@ -851,6 +963,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch((err) => {
         clearTimeout(timer);
         sendResponse({ success: false, error: err.message });
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        if (requestId && localLlmControllers.get(requestId) === controller) localLlmControllers.delete(requestId);
       });
     return true;
   }
@@ -944,6 +1060,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'BSE_ENSURE_VIDEO_RUNTIME') {
+    const tabId = sender.tab?.id;
+    const tabUrl = sender.tab?.url || message.url || '';
+    if (!tabId || !isMatchingVideoUrl(tabUrl)) {
+      sendResponse({ ok: false, error: '当前页面不是受支持的视频播放页' });
+      return false;
+    }
+    ensureVideoRuntime(tabId, tabUrl)
+      .then((ok) => sendResponse({ ok }))
+      .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+    return true;
+  }
+
   if (message.type === 'BSE_COMMAND_ACTIVE_TAB') {
     (async () => {
       const tab = await getActiveTab();
@@ -956,7 +1085,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       } catch (error) {
         if (/connection|receiving end/i.test(error?.message || '') && isMatchingVideoUrl(tab.url)) {
-          const injected = await injectContentScripts(tab.id, tab.url);
+          const injected = await ensureVideoRuntime(tab.id, tab.url);
           if (injected) {
             await new Promise((r) => setTimeout(r, 250));
             return await chrome.tabs.sendMessage(tab.id, {
@@ -1018,15 +1147,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       const items = await BSE.Queue?.addToQueue(message.urls, message.options) || [];
       startQueueExecutor().catch(() => {});
-      return { ok: true, items };
+      return {
+        ok: true,
+        items: items.map((item) => BSE.Queue?.toListProjection?.(item)).filter(Boolean)
+      };
     })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
 
   if (message.type === 'BSE_QUEUE_GET') {
     (async () => {
-      const queue = await BSE.Queue?.getQueue() || [];
+      const queue = message.hydrateText === false && BSE.Queue?.getQueueProjection
+        ? await BSE.Queue.getQueueProjection()
+        : await BSE.Queue?.getQueue({ hydrateText: message.hydrateText !== false }) || [];
       return { ok: true, queue };
+    })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_QUEUE_GET_SUMMARY') {
+    (async () => ({ ok: true, summary: await BSE.Queue?.getQueueSummary?.() || { total: 0, pending: 0, updatedAt: 0 } }))()
+      .then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_QUEUE_GET_SETTINGS') {
+    (async () => ({ ok: true, settings: await BSE.Queue?.getSettings?.() || {} }))()
+      .then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_QUEUE_SAVE_SETTINGS') {
+    (async () => ({ ok: true, settings: await BSE.Queue?.saveSettings?.(message.settings || {}) || {} }))()
+      .then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'BSE_QUEUE_GET_ITEM') {
+    (async () => {
+      const item = await BSE.Queue?.getItem(message.id);
+      return { ok: Boolean(item), item };
     })().then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }

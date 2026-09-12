@@ -38,13 +38,15 @@
   let trackGeneration = 0;
   let isLoadingTrack = false;
   let controller = null;
-  let scheduleTicket = 0;
   let retryMediaKey = null;
   let retryCount = 0;
   let lastPlaybackIndex = -2;
   let initialized = false;
   let pendingLoad = null;
-  let diagnosticPublishTimer = null;
+  let pendingSessionSnapshot = null;
+  let sessionSnapshotIdleHandle = null;
+  let mediaContextResolvedKey = '';
+  let mediaContextLoad = null;
   const mediaDiagnostics = BSE.Diagnostics.createMediaSession({ platform, limit: 100 });
 
   function syncDiagnostics() {
@@ -54,13 +56,21 @@
 
   function diagnostic(stage, message) {
     if (!mediaDiagnostics.sessionId) mediaDiagnostics.begin(state.mediaKey || BSE.Utils.getMediaKey(platform) || 'unknown');
-    mediaDiagnostics.report(stage, message);
-    syncDiagnostics();
-    if (initialized && !diagnosticPublishTimer) {
-      diagnosticPublishTimer = setTimeout(() => {
-        diagnosticPublishTimer = null;
-        publish(true);
-      }, 80);
+    const event = mediaDiagnostics.report(stage, message);
+    const sessionId = mediaDiagnostics.sessionId;
+    if (state.diagnosticSessionId !== sessionId) {
+      state.diagnosticSessionId = sessionId;
+      state.diagnostics = [];
+    }
+    if (event) {
+      state.diagnostics.push(event);
+      if (state.diagnostics.length > 100) state.diagnostics.splice(0, state.diagnostics.length - 100);
+    }
+    // Diagnostics are an incremental side channel. Once the content script is
+    // initialized, a log line must never force the full cue array across the
+    // extension boundary just to update the Side Panel timeline.
+    if (initialized && event && isContextValid()) {
+      safeSendMessage({ type: 'BSE_DIAGNOSTIC_APPEND', ...event });
     }
   }
 
@@ -104,6 +114,28 @@
     return document.title.replace(/\s*[-_|]\s*(YouTube|哔哩哔|bilibili).*$/i, '').trim() || '字幕';
   }
 
+  function getImageSource(img) {
+    if (!img) return '';
+    const candidates = [
+      img.currentSrc,
+      img.getAttribute?.('src'),
+      img.getAttribute?.('data-src'),
+      img.getAttribute?.('data-lazy-src'),
+      img.getAttribute?.('data-original')
+    ];
+    const srcset = img.getAttribute?.('srcset') || img.getAttribute?.('data-srcset') || '';
+    if (srcset) {
+      const first = srcset.split(',')[0]?.trim().split(/\s+/)[0];
+      if (first) candidates.push(first);
+    }
+    for (const candidate of candidates) {
+      const raw = String(candidate || '').trim();
+      if (!raw || raw === location.href || raw.startsWith('data:image/gif;base64,R0lGOD')) continue;
+      return BSE.Utils?.normalizeImageUrl?.(raw) || raw;
+    }
+    return '';
+  }
+
   function getAuthorInfo() {
     try {
       if (platform === BSE.PLATFORM.BILIBILI) {
@@ -130,7 +162,7 @@
 
         const upLink = /** @type {HTMLAnchorElement | null} */ (document.querySelector('.up-detail-top a.up-name, a.up-name, .up-info--right .name, .user-name a, .up-card .name, .up-info_right .name'));
         const upNameElem = document.querySelector('.up-name, .up-detail-top .up-name, .username, .up-info--right .name, .up-info_right .name');
-        const avatarImg = /** @type {HTMLImageElement | null} */ (document.querySelector('.up-avatar img, .up-face img, .bili-avatar img, .header-avatar img'));
+        const avatarImg = /** @type {HTMLImageElement | null} */ (document.querySelector('.up-avatar img, .up-face img, .bili-avatar img, .bili-avatar__img, .bili-avatar-img, .up-avatar-wrap img, .header-avatar img'));
         
         let upName = domData?.owner?.name || upNameElem?.textContent?.trim() || upLink?.textContent?.trim() || '';
         let mid = domData?.owner?.mid ? String(domData.owner.mid) : '';
@@ -138,7 +170,10 @@
           const match = upLink.href.match(/space\.bilibili\.com\/(\d+)/);
           if (match) mid = match[1];
         }
-        let avatar = domData?.owner?.face || avatarImg?.src || '';
+        const avatar = BSE.Utils?.normalizeImageUrl?.(domData?.owner?.face || getImageSource(avatarImg) || '')
+          || domData?.owner?.face
+          || getImageSource(avatarImg)
+          || '';
 
         let seasonTitle = null;
         let seasonId = null;
@@ -182,7 +217,7 @@
       } else if (platform === BSE.PLATFORM.YOUTUBE) {
         const channelLink = /** @type {HTMLAnchorElement | null} */ (document.querySelector('#channel-name a, #owner #channel-name a, ytd-channel-name a'));
         const channelName = channelLink?.textContent?.trim() || document.querySelector('#channel-name, ytd-channel-name')?.textContent?.trim() || '';
-        const avatarImg = /** @type {HTMLImageElement | null} */ (document.querySelector('#owner #avatar img, yt-img-shadow#avatar img, #owner-sub-count img'));
+        const avatarImg = /** @type {HTMLImageElement | null} */ (document.querySelector('#owner #avatar img, yt-img-shadow#avatar img, ytd-video-owner-renderer #avatar img, #owner-sub-count img'));
         let channelId = '';
         if (channelLink?.href) {
           const chMatch = channelLink.href.match(/\/(channel\/|@|c\/|user\/)([^/?]+)/);
@@ -212,7 +247,7 @@
           targetId: channelId || '',
           channelId: channelId || '',
           videoId,
-          avatar: avatarImg?.src || '',
+          avatar: getImageSource(avatarImg),
           seasonId,
           seasonTitle
         };
@@ -263,6 +298,29 @@
     };
   }
 
+  function publicStateMeta(knownDiagnostics = null) {
+    const diagnostics = Array.isArray(state.diagnostics) ? state.diagnostics : [];
+    const tailId = String(diagnostics[diagnostics.length - 1]?.id || '');
+    const diagnosticsChanged = !knownDiagnostics
+      || String(knownDiagnostics.sessionId || '') !== String(state.diagnosticSessionId || '')
+      || Number(knownDiagnostics.count || 0) !== diagnostics.length
+      || String(knownDiagnostics.tailId || '') !== tailId;
+    return {
+      platform: state.platform,
+      mediaKey: state.mediaKey,
+      url: state.url,
+      status: state.status,
+      revision: state.revision,
+      cueRevision: state.cueRevision,
+      selectedTrackId: state.selectedTrackId,
+      mediaContext: state.mediaContext || null,
+      diagnosticSessionId: state.diagnosticSessionId || '',
+      diagnosticCount: diagnostics.length,
+      diagnosticTailId: tailId,
+      ...(diagnosticsChanged ? { diagnostics } : {})
+    };
+  }
+
   function publish(full = true) {
     if (full) state.revision += 1;
     panel?.renderState(state);
@@ -293,7 +351,7 @@
       if (payload.fault) state.lastError = payload.fault;
     } else if (status === 'ready') {
       state.lastError = null;
-      state.isRefreshing = false;
+      if (payload.isRefreshing === undefined) state.isRefreshing = false;
       if (payload.cues) {
         state.cues = payload.cues;
         state.cueRevision += 1;
@@ -309,10 +367,6 @@
     }
 
     publish(true);
-  }
-
-  function setStatus(status, message) {
-    transitionTo(status, { message });
   }
 
   function selectBestTrack(tracks, preferredLanguage, subtitlePreference = 'manual-first') {
@@ -372,19 +426,113 @@
     return cached.cues;
   }
 
+  function subtitleCuesFitTrack(cues, track) {
+    const list = Array.isArray(cues) ? cues : [];
+    if (!list.length) return false;
+    const duration = Math.max(0, Number(track?.duration) || 0);
+    if (duration <= 10) return true;
+    const maxCueTo = Math.max(0, Number(list[list.length - 1]?.to) || 0);
+    if (maxCueTo > duration + 8) return false;
+    if (duration >= 90 && maxCueTo < duration * 0.35 && list.length < 20) return false;
+    return true;
+  }
+
+  function canHydrateSessionSnapshot(snapshot, mediaKey) {
+    if (!snapshot?.cues?.length) return false;
+    if (platform !== BSE.PLATFORM.BILIBILI) return true;
+    const tracks = Array.isArray(snapshot.tracks) ? snapshot.tracks : [];
+    const selected = tracks.find((track) => String(track.id) === String(snapshot.selectedTrackId)) || tracks[0] || null;
+    if (!selected?.id || !selected?.bvid || !selected?.cid || !(Number(selected.duration) > 0)) return false;
+    const expectedBvid = String(mediaKey || '').match(/^bili:(BV[a-zA-Z0-9]+):/i)?.[1] || '';
+    const expectedCid = String(mediaKey || '').match(/^bili:BV[a-zA-Z0-9]+:cid([^:]+)$/i)?.[1] || '';
+    if (expectedBvid && String(selected.bvid).toLowerCase() !== expectedBvid.toLowerCase()) return false;
+    if (expectedCid && String(selected.cid) !== expectedCid) return false;
+    return subtitleCuesFitTrack(snapshot.cues, selected);
+  }
+
+  function persistentSubtitleKey(track = null) {
+    const selectedTrack = track || state.tracks.find((item) => String(item.id) === String(state.selectedTrackId)) || state.tracks[0] || null;
+    if (state.platform === BSE.PLATFORM.BILIBILI) {
+      const runtimeKey = String(state.mediaKey || '');
+      const bvid = String(selectedTrack?.bvid || '').trim()
+        || BSE.Utils?.getBvid?.(state.url || location.href)
+        || runtimeKey.match(/^bili:(BV[a-zA-Z0-9]+):/i)?.[1]
+        || '';
+      const page = Math.max(0, Number(selectedTrack?.page) || 0);
+      if (bvid && page > 0) return `bili:${bvid}:p${page}`;
+    }
+    return String(BSE.Utils?.getArtifactKey?.(state.platform, state.url || location.href, state.mediaKey || '') || state.mediaKey || '').trim();
+  }
+
+  function writePendingSessionSnapshot() {
+    sessionSnapshotIdleHandle = null;
+    const pending = pendingSessionSnapshot;
+    pendingSessionSnapshot = null;
+    if (!pending?.mediaKey || !pending.data?.cues?.length) return;
+    BSE.Utils.SessionSnapshotManager?.saveSnapshot(pending.mediaKey, pending.data);
+  }
+
+  function scheduleSessionSnapshot(mediaKey, data) {
+    pendingSessionSnapshot = { mediaKey, data };
+    if (sessionSnapshotIdleHandle != null) return;
+    if (typeof requestIdleCallback === 'function') {
+      sessionSnapshotIdleHandle = requestIdleCallback(writePendingSessionSnapshot, { timeout: 750 });
+    } else {
+      sessionSnapshotIdleHandle = setTimeout(writePendingSessionSnapshot, 120);
+    }
+  }
+
+  function persistCurrentSubtitleState({ persistUnified = true, deferSnapshot = false } = {}) {
+    if (!state.mediaKey || !Array.isArray(state.cues) || !state.cues.length) return Promise.resolve(true);
+    const selectedTrack = state.tracks.find((track) => String(track.id) === String(state.selectedTrackId)) || state.tracks[0] || null;
+    const subtitleKey = persistentSubtitleKey(selectedTrack);
+    const snapshotData = {
+      title: state.title,
+      tracks: state.tracks,
+      selectedTrackId: state.selectedTrackId,
+      cues: state.cues,
+      ...(state.mediaContext ? { mediaContext: state.mediaContext } : {})
+    };
+    if (deferSnapshot) scheduleSessionSnapshot(state.mediaKey, snapshotData);
+    else BSE.Utils.SessionSnapshotManager?.saveSnapshot(state.mediaKey, snapshotData);
+    if (!persistUnified) return Promise.resolve(true);
+    if (!subtitleKey) return Promise.resolve(false);
+    return BSE.Utils?.UnifiedSubtitleCache?.set(subtitleKey, {
+      title: state.title || getTitle(),
+      author: state.authorInfo?.name || getAuthorInfo()?.name || '',
+      trackId: String(selectedTrack?.id || state.selectedTrackId || ''),
+      trackSource: selectedTrack?.source || '',
+      language: selectedTrack?.lan || selectedTrack?.language || 'zh',
+      langDoc: selectedTrack?.lanDoc || selectedTrack?.langDoc || '中文',
+      cues: state.cues
+    }) || Promise.resolve(false);
+  }
+
   async function loadTrack(track, options = {}) {
     if (!track) return;
     const ownGeneration = ++trackGeneration;
+    const mediaGeneration = Number.isInteger(options.mediaGeneration) ? options.mediaGeneration : generation;
+    const expectedMediaKey = String(state.mediaKey || '');
+    const loadSignal = options.signal || controller?.signal || null;
+    const isCurrentLoad = () => (
+      ownGeneration === trackGeneration
+      && mediaGeneration === generation
+      && expectedMediaKey === String(state.mediaKey || '')
+      && !loadSignal?.aborted
+    );
     const previousCues = Array.isArray(state.cues) ? state.cues : [];
     const preserveExisting = Boolean(options.preserveExisting && previousCues.length);
+    isLoadingTrack = true;
     state.selectedTrackId = track.id;
     state.lastError = null;
     if (preserveExisting) {
-      transitionTo('ready', {
-        message: `${previousCues.length} 条 · 正在后台刷新…`,
-        isRefreshing: true,
-        preserveExisting: true
-      });
+      if (!state.isRefreshing) {
+        transitionTo('ready', {
+          message: `${previousCues.length} 条 · 正在后台刷新…`,
+          isRefreshing: true,
+          preserveExisting: true
+        });
+      }
     } else {
       transitionTo('loading', {
         message: `正在读取 ${track.lanDoc || track.lan} 字幕…`,
@@ -392,23 +540,51 @@
       });
     }
 
-    const cacheKey = `${state.mediaKey}:${track.id}`;
+    const cacheKey = `${expectedMediaKey}:${track.id}`;
     try {
-      let cues = readCachedBody(cacheKey);
+      // force means a real source refresh: never let the in-memory body cache
+      // accidentally turn “重新解析” into another cache hit.
+      let cues = options.force ? null : readCachedBody(cacheKey);
+      let unifiedCached = null;
+      const subtitleKey = persistentSubtitleKey(track);
       if (!cues || options.force) {
-        if (!options.force) {
-          try {
-            const unifiedCached = await BSE.Utils?.UnifiedSubtitleCache?.get(state.mediaKey);
-            if (unifiedCached?.cues?.length) {
-              cues = unifiedCached.cues;
-              diagnostic('全局缓存', `秒级复用扩展统一持久化字幕缓存（共 ${cues.length} 条）`);
-            }
-          } catch {}
+        try {
+          unifiedCached = subtitleKey ? await BSE.Utils?.UnifiedSubtitleCache?.get(subtitleKey, { includePlainText: false }) : null;
+          // One-time compatibility read for older builds that persisted the same
+          // Bilibili part under a runtime CID key. New writes always use subtitleKey.
+          if (!unifiedCached && subtitleKey && subtitleKey !== expectedMediaKey) {
+            unifiedCached = await BSE.Utils?.UnifiedSubtitleCache?.get(expectedMediaKey, { includePlainText: false });
+          }
+        } catch {}
+        if (!isCurrentLoad()) return;
+
+        if (!options.force && unifiedCached?.cues?.length) {
+          const cachedTrackId = String(unifiedCached.trackId || '').trim();
+          const requestedTrackId = String(track.id || '').trim();
+          const cachedLanguage = String(unifiedCached.language || '').toLowerCase();
+          const requestedLanguage = String(track.lan || track.language || '').toLowerCase();
+          const exactTrackMatch = Boolean(cachedTrackId && cachedTrackId === requestedTrackId);
+          const safeLegacyMatch = !cachedTrackId
+            && platform !== BSE.PLATFORM.BILIBILI
+            && state.tracks.length === 1
+            && (!cachedLanguage || !requestedLanguage || cachedLanguage === requestedLanguage);
+          const bodyFitsTrack = platform !== BSE.PLATFORM.BILIBILI || subtitleCuesFitTrack(unifiedCached.cues, track);
+          if ((exactTrackMatch || safeLegacyMatch) && bodyFitsTrack) {
+            cues = unifiedCached.cues;
+            diagnostic('全局缓存', `秒级复用当前字幕轨道的统一持久化缓存（共 ${cues.length} 条）`);
+          } else if (platform === BSE.PLATFORM.BILIBILI && !cachedTrackId) {
+            diagnostic('缓存隔离', '忽略旧版 B站无轨道身份缓存，本次重新确认官方字幕后升级缓存');
+          } else if (!bodyFitsTrack) {
+            diagnostic('缓存隔离', '忽略与当前视频时长不一致的持久化字幕缓存');
+          } else if (cachedTrackId) {
+            diagnostic('缓存隔离', `忽略另一字幕轨道的持久缓存：cache=${cachedTrackId} · current=${requestedTrackId}`);
+          }
         }
+
         if (!cues) {
           const adapter = platform === BSE.PLATFORM.YOUTUBE ? BSE.YouTube : BSE.Bilibili;
           const onIntermediateCues = (intermediateCues) => {
-            if (ownGeneration !== trackGeneration || options.mediaGeneration !== generation) return;
+            if (!isCurrentLoad()) return;
             if (intermediateCues?.length) {
               diagnostic('快速呈现', `源语言已读取 ${intermediateCues.length} 条字幕，先行动态显示并后台翻译`);
               transitionTo('ready', {
@@ -416,27 +592,32 @@
                 cues: intermediateCues,
                 selectedTrackId: track.id
               });
-              publish(true);
               panel?.syncLayout();
             }
           };
-          cues = await adapter.loadTrack(track, { signal: controller.signal, diagnostic, onIntermediateCues });
-        }
-        if (cues && cues.length) {
-          cacheBody(cacheKey, cues);
-          BSE.Utils?.UnifiedSubtitleCache?.set(state.mediaKey, {
-            title: state.title || getTitle(),
-            author: getAuthorInfo()?.name || '',
-            language: track.lan || 'zh',
-            langDoc: track.lanDoc || '中文',
-            cues
-          }).catch(() => {});
+          cues = await adapter.loadTrack(track, { signal: loadSignal || undefined, diagnostic, onIntermediateCues });
+          if (!isCurrentLoad()) return;
         }
       } else {
         diagnostic('本地缓存', `复用已读取的 ${cues.length} 条字幕`);
       }
 
-      if (ownGeneration !== trackGeneration || options.mediaGeneration !== generation) return;
+      if (!isCurrentLoad()) return;
+      if (cues?.length && subtitleKey && BSE.Utils?.UnifiedSubtitleCache?.applyCorrections) {
+        const corrected = await BSE.Utils.UnifiedSubtitleCache.applyCorrections(subtitleKey, String(track.id || ''), cues, unifiedCached);
+        if (!isCurrentLoad()) return;
+        cues = corrected.cues;
+        if (corrected.appliedCount > 0) {
+          diagnostic('字幕校对', `已在新读取字幕上恢复 ${corrected.appliedCount} 条已保存文本修正`);
+        }
+        if (corrected.conflictCount > 0) {
+          diagnostic('字幕校对', `${corrected.conflictCount} 条历史修正因原文或时间锚点已变化而未自动套用`);
+        }
+      }
+      if (!isCurrentLoad()) return;
+      if (cues?.length) cacheBody(cacheKey, cues);
+
+      if (!isCurrentLoad()) return;
       state.title = getTitle();
       if (cues && cues.length) {
         retryCount = 0;
@@ -446,30 +627,14 @@
           cues,
           selectedTrackId: track.id
         });
-        BSE.Utils.SessionSnapshotManager?.saveSnapshot(state.mediaKey, {
-          title: state.title,
-          tracks: state.tracks,
-          selectedTrackId: track.id,
-          cues: state.cues,
-          ...(state.mediaContext ? { mediaContext: state.mediaContext } : {})
-        });
-        BSE.Utils?.UnifiedSubtitleCache?.set(state.mediaKey, {
-          title: state.title,
-          author: getAuthorInfo()?.name || '',
-          language: track.lan || 'zh',
-          langDoc: track.lanDoc || '中文',
-          cues: state.cues
-        }).catch(() => {});
-        if (platform === BSE.PLATFORM.BILIBILI) {
-          scheduleNextEpisodePrefetch(ownGeneration);
-        }
+        void persistCurrentSubtitleState();
       } else {
         transitionTo('empty', { message: '该轨道未包含可用字幕文本' });
       }
       safeStorageSet({ preferredLanguage: track.lan });
     } catch (error) {
-      if (error?.name === 'AbortError' || ownGeneration !== trackGeneration) return;
-      if (preserveExisting && previousCues.length && options.mediaGeneration === generation) {
+      if (error?.name === 'AbortError' || !isCurrentLoad()) return;
+      if (preserveExisting && previousCues.length && mediaGeneration === generation) {
         diagnostic('容灾保留', `刷新未成功，已继续保留现有 ${previousCues.length} 条字幕`);
         transitionTo('ready', {
           message: `${previousCues.length} 条 · 刷新失败，已保留现有字幕`,
@@ -487,7 +652,7 @@
         retryCount += 1;
         diagnostic('自动重试', '1.5 秒后自动重试一次');
         await BSE.Utils.delay(1500);
-        if (options.mediaGeneration === generation && state.mediaKey === retryMediaKey) scheduleLoad('auto_retry', true);
+        if (mediaGeneration === generation && state.mediaKey === retryMediaKey) scheduleLoad('auto_retry', true);
       }
     } finally {
       if (ownGeneration === trackGeneration) {
@@ -496,19 +661,74 @@
     }
   }
 
-  function scheduleNextEpisodePrefetch(gen) {
-    if (document.hidden || navigator.connection?.saveData) return;
-    if (state.mediaKey?.includes(':cid') || !new URL(location.href).searchParams.has('p')) return;
-    setTimeout(async () => {
-      if (gen !== generation) return;
-      try {
-        const bvid = BSE.Utils.getBvid(location.href);
-        const page = Number(new URL(location.href).searchParams.get('p') || 1);
-        const nextPage = page + 1;
-        const nextMediaKey = `bili:${bvid}:p${nextPage}`;
-        diagnostic('后台预加载', `正在预读取下一分P字幕 (P${nextPage})`);
-      } catch {}
-    }, 1500);
+  function refineBilibiliRuntimeMediaKey(previousMediaKey) {
+    if (platform !== BSE.PLATFORM.BILIBILI) return false;
+    const before = String(previousMediaKey || '').trim();
+    const after = String(BSE.Utils.getMediaKey(platform) || '').trim();
+    if (!before || !after || before === after) return false;
+
+    const provisional = before.match(/^bili:(BV[a-zA-Z0-9]+):p(\d+)$/i);
+    const exact = after.match(/^bili:(BV[a-zA-Z0-9]+):cid(\d+)$/i);
+    if (!provisional || !exact || provisional[1].toLowerCase() !== exact[1].toLowerCase()) return false;
+
+    // getMediaKey() only reaches the exact key after platform/bilibili.js has
+    // revalidated the authoritative CID against the current route. This is an
+    // identity refinement of the same page, not a navigation to another media.
+    state.mediaKey = after;
+    if (retryMediaKey === before) retryMediaKey = after;
+    diagnostic('视频身份', `运行时身份已从 P${provisional[2]} 精炼为 CID ${exact[2]}`);
+    return true;
+  }
+
+  async function resolveCurrentMediaContext({ force = false, signal = null } = {}) {
+    const requestedMediaKey = String(state.mediaKey || BSE.Utils.getMediaKey(platform) || '').trim();
+    if (!requestedMediaKey || !BSE.MediaContext) return null;
+    const existing = state.mediaContext;
+    if (!force
+      && existing
+      && BSE.MediaContext.sameOwner(existing, { mediaKey: requestedMediaKey })
+      && (existing.tags?.length || mediaContextResolvedKey === requestedMediaKey)) {
+      return existing;
+    }
+    if (mediaContextLoad?.mediaKey === requestedMediaKey) return mediaContextLoad.promise;
+
+    const adapter = platform === BSE.PLATFORM.YOUTUBE ? BSE.YouTube : BSE.Bilibili;
+    if (typeof adapter?.fetchMediaContext !== 'function') return existing || null;
+
+    const promise = (async () => {
+      const context = await adapter.fetchMediaContext({ signal: signal || undefined, diagnostic });
+      if (!context || state.mediaKey !== requestedMediaKey) return null;
+      let ownerMatches = BSE.MediaContext.sameOwner(context, { mediaKey: requestedMediaKey });
+      if (!ownerMatches && platform === BSE.PLATFORM.BILIBILI) {
+        const provisional = requestedMediaKey.match(/^bili:(BV[a-zA-Z0-9]+):p(\d+)$/i);
+        const resolved = String(context.mediaKey || '').match(/^bili:(BV[a-zA-Z0-9]+):cid([^:]+)$/i);
+        if (provisional && resolved && provisional[1].toLowerCase() === resolved[1].toLowerCase()) {
+          const requestedPage = Number(provisional[2]);
+          ownerMatches = state.tracks.some((track) => (
+            String(track.bvid || '').toLowerCase() === provisional[1].toLowerCase()
+            && String(track.cid || '') === String(resolved[2])
+            && Number(track.page || requestedPage) === requestedPage
+          ));
+        }
+      }
+      if (!ownerMatches) return null;
+      state.mediaContext = BSE.MediaContext.create(context);
+      mediaContextResolvedKey = requestedMediaKey;
+      if (initialized && isContextValid()) {
+        safeSendMessage({
+          type: 'BSE_MEDIA_CONTEXT_UPDATE',
+          mediaKey: requestedMediaKey,
+          mediaContext: state.mediaContext
+        });
+      }
+      return state.mediaContext;
+    })();
+    mediaContextLoad = { mediaKey: requestedMediaKey, promise };
+    try {
+      return await promise;
+    } finally {
+      if (mediaContextLoad?.promise === promise) mediaContextLoad = null;
+    }
   }
 
   async function scheduleLoad(reason = 'route', force = false) {
@@ -516,7 +736,6 @@
       pendingLoad = { reason, force: Boolean(force || pendingLoad?.force) };
       return;
     }
-    const ticket = ++scheduleTicket;
     let mediaKey = BSE.Utils.getMediaKey(platform);
     if (!mediaKey) return;
 
@@ -531,11 +750,20 @@
       syncDiagnostics();
     }
 
+    // Commit the new media identity before any snapshot/status publish. A fast
+    // snapshot for video B must never be broadcast while state.mediaKey still
+    // belongs to video A, otherwise consumers can temporarily attach A's AI
+    // artifacts to B during SPA navigation.
+    state.mediaKey = mediaKey;
+    state.url = location.href;
+    state.title = getTitle();
+    state.authorInfo = getAuthorInfo();
+
     // Step 1: Instant snapshot hydration
     let hydratedFromSnapshot = false;
     if (!force) {
       const snap = BSE.Utils.SessionSnapshotManager?.findSnapshot(mediaKey);
-      if (snap && snap.cues && snap.cues.length) {
+      if (snap && canHydrateSessionSnapshot(snap, mediaKey)) {
         hydratedFromSnapshot = true;
         if (snap.mediaContext && BSE.MediaContext?.sameOwner?.(snap.mediaContext, { mediaKey })) {
           state.mediaContext = BSE.MediaContext.create(snap.mediaContext);
@@ -555,16 +783,13 @@
       retryCount = 0;
     }
     controller?.abort();
-    controller = new AbortController();
+    const loadController = new AbortController();
+    controller = loadController;
     const ownGeneration = ++generation;
     const previousSelectedTrackId = state.selectedTrackId;
     const previousTracks = state.tracks;
     const preserveExisting = Boolean(force && sameMedia && state.cues.length);
 
-    state.mediaKey = mediaKey;
-    state.url = location.href;
-    state.title = getTitle();
-    state.authorInfo = getAuthorInfo();
     diagnostic('启动加载', `${reason}${force ? ' (强制刷新)' : ''}`);
     diagnostic('环境信息', `扩展 v${state.version} · ${platform} · 网络: ${navigator.onLine ? '已连接' : '未连接'} · 视频: ${mediaKey}`);
 
@@ -583,19 +808,14 @@
 
     try {
       const adapter = platform === BSE.PLATFORM.YOUTUBE ? BSE.YouTube : BSE.Bilibili;
-      const tracks = await adapter.discoverTracks({ signal: controller.signal, diagnostic });
-      if (ownGeneration !== generation) return;
+      const tracks = await adapter.discoverTracks({ signal: loadController.signal, diagnostic });
+      if (ownGeneration !== generation || loadController.signal.aborted) return;
       state.tracks = tracks;
-      if (typeof adapter.fetchMediaContext === 'function') {
-        adapter.fetchMediaContext({ signal: controller.signal, diagnostic }).then((context) => {
-          if (ownGeneration !== generation || !context) return;
-          if (!BSE.MediaContext?.sameOwner?.(context, { mediaKey: state.mediaKey })) return;
-          state.mediaContext = BSE.MediaContext.create(context);
-          publish(true);
-        }).catch((error) => {
-          if (error?.name !== 'AbortError') diagnostic('视频语境', '扩展语境未完成，不影响字幕显示');
-        });
-      }
+      refineBilibiliRuntimeMediaKey(mediaKey);
+      resolveCurrentMediaContext({ signal: loadController.signal }).catch((error) => {
+        if (ownGeneration !== generation) return;
+        if (error?.name !== 'AbortError') diagnostic('视频语境', '扩展语境未完成，不影响字幕显示');
+      });
       if (!tracks.length) {
         if (preserveExisting) {
           diagnostic('容灾保留', `未发现新轨道，继续使用现有 ${state.cues.length} 条字幕`);
@@ -611,15 +831,16 @@
         return;
       }
       const settings = await safeStorageGet({ preferredLanguage: '', bseSubtitlePreference: 'manual-first' });
+      if (ownGeneration !== generation || loadController.signal.aborted) return;
       const selected = selectBestTrack(tracks, settings.preferredLanguage, settings.bseSubtitlePreference);
       if (!selected) {
         transitionTo('empty', { message: BSE.I18n?.t('subtitle_preference_no_match') || '当前字幕偏好下没有可用轨道' });
         return;
       }
       state.selectedTrackId = selected.id;
-      publish(true);
       await loadTrack(selected, {
         mediaGeneration: ownGeneration,
+        signal: loadController.signal,
         force,
         preserveExisting: preserveExisting && String(selected.id) === String(previousSelectedTrackId)
       });
@@ -660,8 +881,22 @@
     await loadTrack(track, { mediaGeneration: generation, force: false });
   }
 
-  function openSidePanel() {
-    safeSendMessage({ type: 'BSE_OPEN_SIDE_PANEL' });
+  function openSidePanel(tab = '') {
+    safeSendMessage({
+      type: 'BSE_OPEN_SIDE_PANEL',
+      ...(tab ? { tab } : {})
+    });
+  }
+
+  function captureMessageResponse(result) {
+    const frame = result || { success: false, error: 'CAPTURE_UNAVAILABLE', message: '截帧模块未返回结果' };
+    return {
+      ok: Boolean(frame.success),
+      frame,
+      error: frame.success ? undefined : frame.error,
+      message: frame.success ? undefined : frame.message,
+      mediaKey: state.mediaKey
+    };
   }
 
   function installRuntimeMessages() {
@@ -669,6 +904,10 @@
     try {
       chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (!isContextValid()) return false;
+        if (message?.type === 'BSE_VIDEO_RUNTIME_PING') {
+          sendResponse({ ok: true, mediaKey: state.mediaKey || null, status: state.status });
+          return false;
+        }
         if (message?.type === 'BSE_CAPTION_REQUEST_CAPTURED') {
           BSE.YouTube?.rememberRequest(message.request);
           if (state.platform === BSE.PLATFORM.YOUTUBE && (state.status === 'empty' || state.status === 'error') && !state.cues?.length && !isLoadingTrack) {
@@ -711,30 +950,130 @@
           state.status = cues.length ? 'ready' : 'empty';
           state.message = cues.length ? `已加载端侧转录字幕 · 共 ${cues.length} 条` : '端侧转录未识别到字幕';
           state.cueRevision = (state.cueRevision || 0) + 1;
-          state.revision = (state.revision || 0) + 1;
-          if (cues.length) {
-            BSE.Utils.SessionSnapshotManager?.saveSnapshot(state.mediaKey, {
-              title: state.title,
-              tracks: state.tracks,
-              selectedTrackId: state.selectedTrackId,
-              cues: state.cues,
-              ...(state.mediaContext ? { mediaContext: state.mediaContext } : {})
-            });
-          }
+          if (cues.length) void persistCurrentSubtitleState();
           diagnostic('端侧字幕加载', `成功载入端侧转录字幕 · media=${String(state.mediaKey || '').trim() || 'unknown'} · 共 ${cues.length} 条`);
           publish(true);
           panel?.syncLayout();
           sendResponse({ ok: true });
           return false;
         }
-        if (message?.type === 'BSE_DIAGNOSTIC_APPEND') {
-          diagnostic(message.stage || '端侧大模型', message.message || '');
-          sendResponse({ ok: true });
+        if (message?.type === 'BSE_APPLY_SUBTITLE_PATCHES') {
+          const expectedMediaKey = String(message.expectedMediaKey || '').trim();
+          const expectedTrackId = String(message.expectedTrackId || '').trim();
+          const expectedCueRevision = Number(message.expectedCueRevision);
+          if (!expectedMediaKey || expectedMediaKey !== String(state.mediaKey || '').trim()) {
+            sendResponse({ ok: false, error: 'MEDIA_CONTEXT_CHANGED', mediaKey: state.mediaKey, cueRevision: state.cueRevision });
+            return false;
+          }
+          if (expectedTrackId && expectedTrackId !== String(state.selectedTrackId || '').trim()) {
+            sendResponse({ ok: false, error: 'SUBTITLE_TRACK_CHANGED', mediaKey: state.mediaKey, cueRevision: state.cueRevision });
+            return false;
+          }
+          if (Number.isFinite(expectedCueRevision) && expectedCueRevision !== Number(state.cueRevision || 0)) {
+            sendResponse({ ok: false, error: 'SUBTITLE_REVISION_CHANGED', mediaKey: state.mediaKey, cueRevision: state.cueRevision });
+            return false;
+          }
+
+          const patches = Array.isArray(message.patches) ? message.patches : [];
+          const appliedPatches = [];
+          const seen = new Set();
+          for (const patch of patches) {
+            const index = Number(patch?.index);
+            const content = String(patch?.content || '').trim();
+            if (!Number.isInteger(index) || index < 0 || index >= state.cues.length || !content || seen.has(index)) continue;
+            seen.add(index);
+            if (content === String(state.cues[index]?.content || '').trim()) continue;
+            appliedPatches.push({ index, content });
+          }
+
+          const changedCount = appliedPatches.length;
+          if (changedCount > 0) {
+            const nextCues = state.cues.map((cue) => ({ ...cue }));
+            appliedPatches.forEach((patch) => {
+              nextCues[patch.index].content = patch.content;
+            });
+            const selectedTrack = state.tracks.find((track) => String(track.id) === String(state.selectedTrackId)) || state.tracks[0] || null;
+            const correctionStore = BSE.Utils?.UnifiedSubtitleCache;
+            if (!correctionStore?.recordCorrections) {
+              sendResponse({ ok: false, error: 'SUBTITLE_CORRECTION_STORE_UNAVAILABLE', changedCount: 0, mediaKey: state.mediaKey, cueRevision: state.cueRevision });
+              return false;
+            }
+            const subtitleKey = persistentSubtitleKey(selectedTrack);
+            if (!subtitleKey) {
+              sendResponse({ ok: false, error: 'SUBTITLE_CACHE_IDENTITY_UNAVAILABLE', changedCount: 0, mediaKey: state.mediaKey, cueRevision: state.cueRevision });
+              return false;
+            }
+            const correctionPromise = correctionStore.recordCorrections(
+              subtitleKey,
+              String(state.selectedTrackId || ''),
+              state.cues,
+              appliedPatches,
+              {
+                title: state.title || getTitle(),
+                author: state.authorInfo?.name || getAuthorInfo()?.name || '',
+                trackId: String(state.selectedTrackId || ''),
+                trackSource: selectedTrack?.source || '',
+                language: selectedTrack?.lan || selectedTrack?.language || 'zh',
+                langDoc: selectedTrack?.lanDoc || selectedTrack?.langDoc || '中文',
+                cues: nextCues
+              }
+            );
+            Promise.resolve(correctionPromise).then((saved) => {
+              if (!saved) {
+                diagnostic('字幕校对', '校对 patch 未能持久化，未修改当前字幕状态');
+                sendResponse({ ok: false, error: 'SUBTITLE_PERSIST_FAILED', changedCount: 0, mediaKey: state.mediaKey, cueRevision: state.cueRevision });
+                return;
+              }
+              state.cues = nextCues;
+              state.cueRevision = (state.cueRevision || 0) + 1;
+              state.status = 'ready';
+              state.message = `已应用字幕校对 · 修改 ${changedCount} 条`;
+              cacheBody(`${state.mediaKey}:${state.selectedTrackId}`, state.cues);
+              void persistCurrentSubtitleState({ persistUnified: false, deferSnapshot: true });
+              diagnostic('字幕校对', `已按现有时间轴应用并持久化 ${changedCount} 条文本修改；时间范围与轨道结构保持不变`);
+              publish(true);
+              panel?.syncLayout();
+              sendResponse({ ok: true, changedCount, mediaKey: state.mediaKey, cueRevision: state.cueRevision });
+            }).catch((error) => {
+              diagnostic('字幕校对', `校对 patch 持久化失败，未修改当前字幕：${error?.message || error}`);
+              sendResponse({ ok: false, error: 'SUBTITLE_PERSIST_FAILED', changedCount: 0, mediaKey: state.mediaKey, cueRevision: state.cueRevision });
+            });
+            return true;
+          }
+          sendResponse({ ok: true, changedCount, mediaKey: state.mediaKey, cueRevision: state.cueRevision });
           return false;
         }
         if (message?.type === 'BSE_GET_STATE') {
           sendResponse(publicState());
           return false;
+        }
+        if (message?.type === 'BSE_GET_STATE_META') {
+          sendResponse(publicStateMeta({
+            sessionId: message.diagnosticSessionId,
+            count: message.diagnosticCount,
+            tailId: message.diagnosticTailId
+          }));
+          return false;
+        }
+        if (message?.type === 'BSE_GET_MEDIA_CONTEXT') {
+          const expectedMediaKey = String(message.expectedMediaKey || '').trim();
+          if (expectedMediaKey && expectedMediaKey !== String(state.mediaKey || '').trim()) {
+            sendResponse({ ok: false, error: 'MEDIA_CONTEXT_CHANGED', mediaKey: state.mediaKey });
+            return false;
+          }
+          resolveCurrentMediaContext({ force: true })
+            .then((mediaContext) => sendResponse({
+              ok: Boolean(mediaContext),
+              mediaKey: state.mediaKey,
+              mediaContext: mediaContext || state.mediaContext || null
+            }))
+            .catch((error) => sendResponse({
+              ok: false,
+              error: error?.message || String(error),
+              mediaKey: state.mediaKey,
+              mediaContext: state.mediaContext || null
+            }));
+          return true;
         }
         if (message?.type === 'BSE_CAPTURE_BEST_FRAME') {
           if (message.expectedMediaKey && message.expectedMediaKey !== state.mediaKey) {
@@ -748,8 +1087,12 @@
             return false;
           }
           BSE.Media.captureStableVideoFrame(request, options)
-            .then((result) => sendResponse({ ok: result.success, frame: result, mediaKey: state.mediaKey }))
-            .catch((err) => sendResponse({ ok: false, error: err.message, mediaKey: state.mediaKey }));
+            .then((result) => sendResponse(captureMessageResponse(result)))
+            .catch((err) => sendResponse(captureMessageResponse({
+              success: false,
+              error: err?.code || 'CAPTURE_EXCEPTION',
+              message: err?.message || String(err)
+            })));
           return true;
         }
         if (message?.type === 'BSE_CAPTURE_FRAME') {
@@ -760,13 +1103,21 @@
           const timestamp = typeof message.timestamp === 'number' ? message.timestamp : null;
           const options = message.options || {};
           if (timestamp !== null && Number.isFinite(timestamp)) {
-            BSE.Media?.captureVideoFrameAt(timestamp, options)
-              .then((result) => sendResponse({ ok: result.success, frame: result, mediaKey: state.mediaKey }))
-              .catch((err) => sendResponse({ ok: false, error: err.message, mediaKey: state.mediaKey }));
+            if (!BSE.Media?.captureVideoFrameAt) {
+              sendResponse(captureMessageResponse({ success: false, error: 'CAPTURE_UNAVAILABLE', message: '时间点截帧模块未加载' }));
+              return false;
+            }
+            BSE.Media.captureVideoFrameAt(timestamp, options)
+              .then((result) => sendResponse(captureMessageResponse(result)))
+              .catch((err) => sendResponse(captureMessageResponse({
+                success: false,
+                error: err?.code || 'CAPTURE_EXCEPTION',
+                message: err?.message || String(err)
+              })));
             return true;
           }
-          const result = BSE.Media?.captureVideoFrame(null, options) || { success: false, error: 'CAPTURE_UNAVAILABLE' };
-          sendResponse({ ok: result.success, frame: result, mediaKey: state.mediaKey });
+          const result = BSE.Media?.captureVideoFrame(null, options) || { success: false, error: 'CAPTURE_UNAVAILABLE', message: '截帧模块未加载' };
+          sendResponse(captureMessageResponse(result));
           return false;
         }
         if (message?.type === 'BSE_RESOLVE_YOUTUBE_IN_TAB') {
@@ -866,9 +1217,11 @@
   function installRouteTracking() {
     const handleNavigation = (reason) => {
       if (BSE.Utils.isMatchingVideoUrl(location.href)) {
+        ensurePlaybackSync();
         scheduleLoad(reason);
         schedulePanelMount(reason);
       } else {
+        stopPlaybackSync();
         panel?.ensureRootMounted(platform);
       }
     };
@@ -880,9 +1233,10 @@
       }
     });
     window.addEventListener('popstate', () => handleNavigation('popstate'));
+    // The MAIN-world bridge coalesces YouTube finish/data-updated/spfdone into
+    // ROUTE_CHANGED. Keep only the early start hook here; listening to the same
+    // finish events in both worlds creates duplicate mount/load scheduling.
     document.addEventListener('yt-navigate-start', () => handleNavigation('yt_navigate_start'), { passive: true });
-    document.addEventListener('yt-navigate-finish', () => handleNavigation('yt_navigate_finish'), { passive: true });
-    document.addEventListener('yt-page-data-updated', () => handleNavigation('yt_page_data_updated'), { passive: true });
 
     let observedKey = null;
     const routeInterval = setInterval(() => {
@@ -892,12 +1246,14 @@
       }
       if (document.hidden) return;
       if (!BSE.Utils.isMatchingVideoUrl(location.href)) {
+        stopPlaybackSync();
         if (observedKey) {
           observedKey = null;
           panel?.ensureRootMounted(platform);
         }
         return;
       }
+      ensurePlaybackSync();
       const key = BSE.Utils.getMediaKey(platform);
       if (key && key !== observedKey) {
         observedKey = key;
@@ -906,11 +1262,13 @@
           schedulePanelMount('route_fallback');
         }
       }
-    }, 280);
+    }, 750);
   }
 
   let activeSyncVideo = null;
   let onTimeUpdateHandler = null;
+  let playbackSyncInterval = null;
+  let playbackUpdateRaf = null;
 
   async function applySubtitlePreferenceChange() {
     if (!initialized || !BSE.Utils.isMatchingVideoUrl(location.href)) return;
@@ -953,47 +1311,71 @@
     });
   }
 
-  function installPlaybackSync() {
-    const syncInterval = setInterval(() => {
-      if (!isContextValid()) {
-        clearInterval(syncInterval);
-        return;
-      }
-      if (document.hidden || !BSE.Utils.isMatchingVideoUrl(location.href) || !state.cues.length) return;
-      if (platform === BSE.PLATFORM.YOUTUBE && document.querySelector('.html5-video-player.ad-showing, ytd-player.ad-interrupting')) return;
-      
-      const video = document.querySelector('video');
-      if (!video) return;
+  function stopPlaybackSync() {
+    if (playbackSyncInterval) {
+      clearInterval(playbackSyncInterval);
+      playbackSyncInterval = null;
+    }
+    if (playbackUpdateRaf) {
+      cancelAnimationFrame(playbackUpdateRaf);
+      playbackUpdateRaf = null;
+    }
+    if (activeSyncVideo && onTimeUpdateHandler) {
+      activeSyncVideo.removeEventListener('timeupdate', onTimeUpdateHandler);
+    }
+    activeSyncVideo = null;
+    onTimeUpdateHandler = null;
+    lastPlaybackIndex = -2;
+  }
 
-      // Attach high-performance native timeupdate listener once per video element
-      if (video !== activeSyncVideo) {
-        if (activeSyncVideo && onTimeUpdateHandler) {
-          activeSyncVideo.removeEventListener('timeupdate', onTimeUpdateHandler);
-        }
-        activeSyncVideo = video;
-        let updateRaf = null;
-        onTimeUpdateHandler = () => {
-          if (updateRaf) return;
-          updateRaf = requestAnimationFrame(() => {
-            updateRaf = null;
-            if (document.hidden || !state.cues.length) return;
-            const index = BSE.Utils.findActiveCueIndex(state.cues, video.currentTime, state.activeIndex);
-            state.currentTime = video.currentTime;
-            state.activeIndex = index;
-            panel?.updatePlayback(index);
-            if (index !== lastPlaybackIndex) {
-              lastPlaybackIndex = index;
-              safeSendMessage({
-                type: 'BSE_PLAYBACK_UPDATE',
-                activeIndex: index,
-                currentTime: video.currentTime
-              });
-            }
+  function syncPlaybackVideoElement() {
+    if (!isContextValid()) {
+      stopPlaybackSync();
+      return;
+    }
+    if (!BSE.Utils.isMatchingVideoUrl(location.href)) {
+      stopPlaybackSync();
+      return;
+    }
+    if (document.hidden || !state.cues.length) return;
+    if (platform === BSE.PLATFORM.YOUTUBE && document.querySelector('.html5-video-player.ad-showing, ytd-player.ad-interrupting')) return;
+
+    const video = document.querySelector('video');
+    if (!video || video === activeSyncVideo) return;
+    if (activeSyncVideo && onTimeUpdateHandler) {
+      activeSyncVideo.removeEventListener('timeupdate', onTimeUpdateHandler);
+    }
+    if (playbackUpdateRaf) {
+      cancelAnimationFrame(playbackUpdateRaf);
+      playbackUpdateRaf = null;
+    }
+    activeSyncVideo = video;
+    onTimeUpdateHandler = () => {
+      if (playbackUpdateRaf) return;
+      playbackUpdateRaf = requestAnimationFrame(() => {
+        playbackUpdateRaf = null;
+        if (document.hidden || !state.cues.length || !BSE.Utils.isMatchingVideoUrl(location.href)) return;
+        const index = BSE.Utils.findActiveCueIndex(state.cues, video.currentTime, state.activeIndex);
+        state.currentTime = video.currentTime;
+        state.activeIndex = index;
+        panel?.updatePlayback(index);
+        if (index !== lastPlaybackIndex) {
+          lastPlaybackIndex = index;
+          safeSendMessage({
+            type: 'BSE_PLAYBACK_UPDATE',
+            activeIndex: index,
+            currentTime: video.currentTime
           });
-        };
-        video.addEventListener('timeupdate', onTimeUpdateHandler, { passive: true });
-      }
-    }, 500);
+        }
+      });
+    };
+    video.addEventListener('timeupdate', onTimeUpdateHandler, { passive: true });
+  }
+
+  function ensurePlaybackSync() {
+    if (!BSE.Utils.isMatchingVideoUrl(location.href) || playbackSyncInterval) return;
+    syncPlaybackVideoElement();
+    playbackSyncInterval = setInterval(syncPlaybackVideoElement, 500);
   }
 
   function init() {
@@ -1033,6 +1415,7 @@
     publish(true);
 
     if (BSE.Utils.isMatchingVideoUrl(location.href)) {
+      ensurePlaybackSync();
       const pending = pendingLoad;
       pendingLoad = null;
       scheduleLoad(pending?.reason || 'init', Boolean(pending?.force));
@@ -1060,7 +1443,6 @@
   installRuntimeMessages();
   installRouteTracking();
   installPreferenceSync();
-  installPlaybackSync();
   installBpxEpisodeListener();
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {

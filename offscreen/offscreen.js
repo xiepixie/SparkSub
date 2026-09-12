@@ -398,9 +398,6 @@
 
   async function saveItemState(updatedItem) {
     await BSE.Queue.saveItem(updatedItem);
-    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-      chrome.runtime.sendMessage({ type: 'BSE_QUEUE_UPDATED', item: updatedItem }).catch(() => {});
-    }
   }
 
   async function fetchBilibiliNavWbiKeys(signal) {

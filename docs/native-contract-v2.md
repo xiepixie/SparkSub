@@ -90,7 +90,9 @@ The request vocabulary remains:
 - `transcribe`
 - `cancel`
 
-Every request has a unique `requestId`. Long-running requests also carry `jobId`, which is the cancellation and result-correlation identity.
+Every request has a unique `requestId`. Long-running requests also carry `jobId`, which is the cancellation and result-correlation identity. A v2 `transcribe` request may additionally carry a browser-owned `mediaKey`; explicit local transcription requires this identity. YouTube uses `yt:<videoId>`, while Bilibili local ASR uses the exact `bili:<BVID>:cid<CID>` resolved for the current page.
+
+`mediaKey` is an end-to-end correctness token, not ASR prompt text. SparkScribe must echo the same value in the transcription result. SparkSub rejects a missing or different v2 echo before cues are persisted or applied. On Bilibili, the queue also re-resolves the authoritative BVID → page → CID mapping before media acquisition; cached caption artifacts and open-tab state may be reused only when their exact owner identity matches. An explicit `local-asr` intent bypasses all caption/cache reuse and goes directly to the freshly validated target media.
 
 SparkSub sends only source intent/metadata. Native Messaging must never carry downloaded media bytes, cookies, Authorization headers, arbitrary output paths or model-selection instructions.
 
@@ -108,6 +110,7 @@ Long results use `resultBegin` → numbered `resultChunk` frames → `resultEnd`
 
 A transcription may include:
 
+- `mediaKey`: required echo when a v2 request supplied one;
 - `engine`: opaque diagnostic ID;
 - `engineLabel`: optional display label.
 
@@ -132,7 +135,7 @@ Raw native diagnostics, signed media URLs, tokens, stack traces and filesystem m
 The SparkScribe-bundled helper preserves these protections:
 
 - only canonical public YouTube watch URLs;
-- Bilibili remote media only from approved HTTPS CDN/domain suffixes;
+- Bilibili remote media only from approved HTTPS CDN/domain suffixes with no explicit port or URL credentials; when Bilibili returns an `mcdn` primary such as `:8082`, SparkSub discards that candidate and promotes a policy-compatible portless backup before Native Messaging;
 - only `Referer` and `User-Agent` may cross with a Bilibili remote descriptor;
 - no Cookie or Authorization forwarding;
 - downloader arguments are arrays, never shell interpolation;

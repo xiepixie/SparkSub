@@ -178,11 +178,26 @@
       },
       events(filter = {}) {
         const minWeight = filter.minLevel && LEVEL_WEIGHT[filter.minLevel] !== undefined ? LEVEL_WEIGHT[filter.minLevel] : -1;
+        const excludeCodeSuffix = String(filter.excludeCodeSuffix || '');
         return clone(collection.filter((event) => (
           (!filter.scope || event.scope === filter.scope)
           && (!filter.sessionId || event.sessionId === filter.sessionId)
           && LEVEL_WEIGHT[event.level] >= minWeight
+          && (!excludeCodeSuffix || !String(event.code || '').endsWith(excludeCodeSuffix))
         )));
+      },
+      count(filter = {}) {
+        const minWeight = filter.minLevel && LEVEL_WEIGHT[filter.minLevel] !== undefined ? LEVEL_WEIGHT[filter.minLevel] : -1;
+        const excludeCodeSuffix = String(filter.excludeCodeSuffix || '');
+        let total = 0;
+        for (const event of collection) {
+          if (filter.scope && event.scope !== filter.scope) continue;
+          if (filter.sessionId && event.sessionId !== filter.sessionId) continue;
+          if (LEVEL_WEIGHT[event.level] < minWeight) continue;
+          if (excludeCodeSuffix && String(event.code || '').endsWith(excludeCodeSuffix)) continue;
+          total++;
+        }
+        return total;
       },
       clear(filter = {}) {
         if (!filter.scope && !filter.sessionId) {

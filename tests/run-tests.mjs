@@ -13,8 +13,10 @@ let mockFetch = async () => { throw new Error('Unexpected network request in tes
 const sessionStore = new Map();
 const storageAreas = { local: new Map(), sync: new Map() };
 const storageWriteHistory = [];
+const storageReadHistory = [];
 const createStorageArea = (area) => ({
   get: async (key) => {
+    storageReadHistory.push({ area, key: structuredClone(key) });
     if (typeof key === 'string') {
       return { [key]: storageAreas[area].get(key) };
     }
@@ -141,6 +143,7 @@ const context = vm.createContext({
   setTimeout,
   clearTimeout,
   Blob,
+  atob: (value) => Buffer.from(String(value), 'base64').toString('binary'),
   TextEncoder,
   TextDecoder,
   DOMException,
@@ -237,8 +240,216 @@ for (const file of [
 
 const { BSE } = context;
 
+const originalLocation = { ...context.location };
+context.location.href = 'https://www.bilibili.com/video/BV1rPtQegEtk/?spm_id_from=333.788.videopod.sections';
+context.location.origin = 'https://www.bilibili.com';
+context.location.hostname = 'www.bilibili.com';
+assert.equal(
+  BSE.Utils.rememberBilibiliMediaIdentity({ bvid: 'BV1rPtQegEtk', cid: 25955336526, page: 1, pageCount: 1 }),
+  'bili:BV1rPtQegEtk:cid25955336526',
+  '单P视频即使 DOM 没有活跃分P节点，也应接受 view API 已证明的精确 BVID+CID'
+);
+assert.equal(
+  BSE.Utils.getMediaKey(BSE.PLATFORM.BILIBILI, context.location.href),
+  'bili:BV1rPtQegEtk:cid25955336526',
+  '权威 metadata 回灌后当前页面 mediaKey 不应继续卡在粗粒度 p1'
+);
+
+const originalBiliIdentitySendMessage = context.chrome.runtime.sendMessage;
+context.location.href = 'https://www.bilibili.com/video/BV1NoSub0001/?spm_id_from=333.788.videopod.sections';
+context.chrome.runtime.sendMessage = async (msg) => {
+  if (msg?.type === 'BSE_FETCH_BILIBILI_RESOURCE' && msg.url.includes('/x/web-interface/view')) {
+    return {
+      success: true,
+      ok: true,
+      status: 200,
+      contentType: 'application/json; charset=utf-8',
+      text: JSON.stringify({
+        code: 0,
+        data: {
+          bvid: 'BV1NoSub0001',
+          aid: 13579,
+          cid: 24680,
+          title: '单P无字幕回归测试',
+          pages: [{ page: 1, cid: 24680, part: '正片', duration: 120 }]
+        }
+      })
+    };
+  }
+  if (msg?.type === 'BSE_FETCH_BILIBILI_RESOURCE' && msg.url.includes('/x/player/wbi/v2')) {
+    return {
+      success: true,
+      ok: true,
+      status: 200,
+      contentType: 'application/json; charset=utf-8',
+      text: JSON.stringify({ code: 0, data: { subtitle: { subtitles: [] } } })
+    };
+  }
+  return originalBiliIdentitySendMessage(msg);
+};
+const noSubtitleTracks = await BSE.Bilibili.discoverTracks();
+assert.deepEqual(Array.from(noSubtitleTracks), [], '平台确实无字幕时 discoverTracks 应正常返回空数组，而不是把无字幕误判成接口错误');
+assert.equal(
+  BSE.Utils.getMediaKey(BSE.PLATFORM.BILIBILI, context.location.href),
+  'bili:BV1NoSub0001:cid24680',
+  '单P无字幕视频也必须在字幕发现结束后留下精确 CID，供 local-asr 直接入队'
+);
+
+// BPX DOM 只允许提供已由 view topology 验证的活跃 CID；字幕轨道统一走
+// authoritative WBI/兼容 player path，避免两个 player 来源为同一媒体给出不同 subtitle_url。
+context.location.href = 'https://www.bilibili.com/video/BV12SY26cELW';
+BSE.Utils.rememberBilibiliMediaIdentity({ bvid: 'BV12SY26cELW', cid: 41795717836, page: 1, pageCount: 1 });
+let wrongSubtitleBodyRequests = 0;
+let bpxPlayerRequests = 0;
+context.chrome.runtime.sendMessage = async (msg) => {
+  if (msg?.type !== 'BSE_FETCH_BILIBILI_RESOURCE') return originalBiliIdentitySendMessage(msg);
+  if (msg.url.includes('/x/web-interface/view')) {
+    return {
+      success: true, ok: true, status: 200, contentType: 'application/json',
+      text: JSON.stringify({ code: 0, data: {
+        bvid: 'BV12SY26cELW', aid: 117253060168770, cid: 41795717836, duration: 192,
+        pages: [{ page: 1, cid: 41795717836, duration: 192, part: 'TCP' }]
+      } })
+    };
+  }
+  if (msg.url.includes('/x/player/v2?cid=')) {
+    bpxPlayerRequests++;
+    return {
+      success: true, ok: true, status: 200, contentType: 'application/json',
+      text: JSON.stringify({ code: 0, data: {
+        bvid: 'BV1WRONGVIDEO', cid: 999999,
+        subtitle: { subtitles: [{ id: 1, lan: 'zh-CN', lan_doc: '中文', subtitle_url: 'https://aisubtitle.hdslb.com/wrong.json' }] }
+      } })
+    };
+  }
+  if (msg.url.includes('/x/player/wbi/v2')) {
+    return {
+      success: true, ok: true, status: 200, contentType: 'application/json',
+      text: JSON.stringify({ code: 0, data: {
+        bvid: 'BV12SY26cELW', cid: 41795717836,
+        subtitle: { subtitles: [{ id_str: 'correct-track', lan: 'zh-CN', lan_doc: '中文', subtitle_url: 'https://aisubtitle.hdslb.com/correct.json' }] }
+      } })
+    };
+  }
+  if (msg.url.includes('/correct.json')) {
+    return {
+      success: true, ok: true, status: 200, contentType: 'application/json',
+      text: JSON.stringify({ body: [{ from: 0, to: 3, content: '当前视频字幕' }, { from: 188, to: 191, content: '当前视频结尾' }] })
+    };
+  }
+  if (msg.url.includes('/wrong.json')) {
+    wrongSubtitleBodyRequests++;
+    return {
+      success: true, ok: true, status: 200, contentType: 'application/json',
+      text: JSON.stringify({ body: [{ from: 0, to: 400, content: '其他视频字幕' }] })
+    };
+  }
+  return originalBiliIdentitySendMessage(msg);
+};
+const guardedTracks = await BSE.Bilibili.discoverTracks();
+assert.equal(guardedTracks.length, 1, 'BPX CID 定位后必须只由 authoritative WBI path 返回字幕轨道');
+assert.equal(bpxPlayerRequests, 0, 'BPX 不应再发起第二套 player 字幕轨道请求');
+assert.equal(guardedTracks[0].id, 'correct-track');
+assert.equal(String(guardedTracks[0].cid), '41795717836', '轨道必须携带经过播放器响应验证的 authoritative CID');
+const guardedCues = await BSE.Bilibili.loadTrack(guardedTracks[0]);
+assert.equal(guardedCues[0].content, '当前视频字幕');
+assert.equal(wrongSubtitleBodyRequests, 0, '跨视频 player 响应中的 subtitle_url 绝不能被下载');
+
+// authoritative WBI 自己若返回其他媒体，也必须拒绝该轨道并尝试身份正确的兼容接口。
+context.chrome.runtime.sendMessage = async (msg) => {
+  if (msg?.type !== 'BSE_FETCH_BILIBILI_RESOURCE') return originalBiliIdentitySendMessage(msg);
+  if (msg.url.includes('/x/web-interface/view')) {
+    return {
+      success: true, ok: true, status: 200, contentType: 'application/json',
+      text: JSON.stringify({ code: 0, data: {
+        bvid: 'BV12SY26cELW', aid: 117253060168770, cid: 41795717836, duration: 192,
+        pages: [{ page: 1, cid: 41795717836, duration: 192, part: 'TCP' }]
+      } })
+    };
+  }
+  if (msg.url.includes('/x/player/wbi/v2')) {
+    return {
+      success: true, ok: true, status: 200, contentType: 'application/json',
+      text: JSON.stringify({ code: 0, data: {
+        bvid: 'BV1WRONGVIDEO', cid: 123456,
+        subtitle: { subtitles: [{ id_str: 'wrong-track', lan: 'zh-CN', lan_doc: '中文', subtitle_url: 'https://aisubtitle.hdslb.com/wrong.json' }] }
+      } })
+    };
+  }
+  if (msg.url.includes('/x/player/v2?aid=')) {
+    return {
+      success: true, ok: true, status: 200, contentType: 'application/json',
+      text: JSON.stringify({ code: 0, data: {
+        bvid: 'BV12SY26cELW', cid: 41795717836,
+        subtitle: { subtitles: [{ id_str: 'compat-track', lan: 'zh-CN', lan_doc: '中文', subtitle_url: 'https://aisubtitle.hdslb.com/compat.json' }] }
+      } })
+    };
+  }
+  return originalBiliIdentitySendMessage(msg);
+};
+const compatTracksAfterMismatch = await BSE.Bilibili.discoverTracks();
+assert.equal(compatTracksAfterMismatch[0]?.id, 'compat-track', 'WBI 返回其他 BVID/CID 时必须拒绝并切换到身份正确的兼容 player');
+assert.equal(wrongSubtitleBodyRequests, 0, '被身份 guard 拒绝的 WBI subtitle_url 不得进入正文下载');
+
+// 即使 player 身份字段看起来正确，正文时长明显越过当前视频也不能 commit。
+context.chrome.runtime.sendMessage = async (msg) => {
+  if (msg?.type === 'BSE_FETCH_BILIBILI_RESOURCE' && msg.url.includes('/correct.json')) {
+    return {
+      success: true, ok: true, status: 200, contentType: 'application/json',
+      text: JSON.stringify({ body: [{ from: 0, to: 3, content: '伪装正文' }, { from: 468, to: 471, content: '错误视频结尾' }] })
+    };
+  }
+  return originalBiliIdentitySendMessage(msg);
+};
+await assert.rejects(
+  BSE.Bilibili.loadTrack(guardedTracks[0]),
+  (error) => error?.code === 'BILI_SUBTITLE_DURATION_MISMATCH',
+  '正文超过 authoritative 视频时长时必须在进入 UI/cache 前拦截'
+);
+context.chrome.runtime.sendMessage = originalBiliIdentitySendMessage;
+
+context.location.href = 'https://www.bilibili.com/video/BV1Ambiguous/?spm_id_from=333.788.videopod.sections';
+assert.equal(
+  BSE.Utils.rememberBilibiliMediaIdentity({ bvid: 'BV1Ambiguous', cid: 111111, page: 1, pageCount: 2 }),
+  null,
+  '多P页面没有显式 ?p=N 且 DOM 未证明活跃分P时，默认 P1 不能被当作权威证据'
+);
+assert.equal(
+  BSE.Utils.getMediaKey(BSE.PLATFORM.BILIBILI, context.location.href),
+  'bili:BV1Ambiguous:p1',
+  '多P身份无法证明时必须继续保持粗粒度页号，不能提前绑定 CID'
+);
+context.location.href = 'https://www.bilibili.com/video/BV1rPtQegEtk/?p=2';
+assert.equal(
+  BSE.Utils.rememberBilibiliMediaIdentity({ bvid: 'BV1rPtQegEtk', cid: 25955336526, page: 1, pageCount: 2 }),
+  null,
+  '显式 P2 页面不得接纳晚到的 P1 CID'
+);
+Object.assign(context.location, originalLocation);
+
+assert.equal(
+  BSE.Utils.getArtifactKey(BSE.PLATFORM.BILIBILI, 'https://www.bilibili.com/video/BV1StableKey?p=2', 'bili:BV1StableKey:cid9988'),
+  'bili:BV1StableKey:p2',
+  'B站学习产物必须按 BV+分P 形成稳定 artifactKey，不能因运行时拿到 CID 就分裂缓存'
+);
+assert.equal(
+  BSE.Utils.getArtifactKey(BSE.PLATFORM.BILIBILI, 'https://www.bilibili.com/video/BV1StableKey?spm_id_from=333.1007', 'bili:BV1StableKey:cid9988'),
+  null,
+  'B站 CID 已知但 URL 未证明分P时不得猜成 P1，避免 SPA 切分P瞬间恢复错误学习材料'
+);
+assert.equal(
+  BSE.Utils.getArtifactKey(BSE.PLATFORM.BILIBILI, 'https://www.bilibili.com/video/BV1StableKey?spm_id_from=333.1007', 'bili:BV1StableKey:p1'),
+  'bili:BV1StableKey:p1',
+  '运行时已经明确 p1 时应稳定映射到 p1 artifactKey'
+);
+assert.equal(
+  BSE.Utils.getArtifactKey(BSE.PLATFORM.YOUTUBE, 'https://www.youtube.com/watch?v=Ewd6CGwaEXY&t=120s&list=PL123', 'yt:Ewd6CGwaEXY'),
+  'yt:Ewd6CGwaEXY',
+  'YouTube 学习产物只绑定 videoId，不应被时间点或播放列表参数拆成多份'
+);
+
 const canonicalFrames = BSE.AiNoteCache.canonicalizeFrames({
-  first: { dataUrl: 'data:image/webp;base64,AAAA', timestamp: 12, label: 'first', source: 'planned', selection: { fingerprint: [1, 2, 3, 4], visualScore: 0.9 } },
+  first: { dataUrl: 'data:image/webp;base64,AAAA', timestamp: 12, label: 'first', chapterId: 'C01', expectedSurface: 'diagram', source: 'planned', selection: { fingerprint: [1, 2, 3, 4], visualScore: 0.9 } },
   duplicate: { dataUrl: 'data:image/webp;base64,AAAA', timestamp: 99, label: 'duplicate' },
   second: { dataUrl: 'data:image/png;base64,BBBB', timestamp: 3, label: 'second' },
   invalid: { dataUrl: 'https://example.com/not-inline.png', timestamp: 1 }
@@ -249,20 +460,52 @@ assert.equal(runtimeFrameMap['12']?.label, 'first', 'AI note frame cache must ex
 assert.equal(runtimeFrameMap['00:12']?.label, 'first', 'AI note frame cache must expose formatted clock aliases for renderer lookup');
 assert.equal(canonicalFrames.find((frame) => frame.timestamp === 12)?.selection, undefined, '候选筛选 fingerprint/评分只应存在于运行内存，不应写入长期图片缓存');
 assert.equal(canonicalFrames.find((frame) => frame.timestamp === 12)?.source, 'planned', '图片来源属于轻量语义，应保留以便重开后仍能区分用户手动图与自动证据');
+assert.equal(canonicalFrames.find((frame) => frame.timestamp === 12)?.chapterId, 'C01', '最终证据图应持久化所属章节，重开后不能只剩裸图片');
+assert.equal(canonicalFrames.find((frame) => frame.timestamp === 12)?.expectedSurface, 'diagram', '最终证据图应保留轻量视觉类型语义');
 const aiNoteCacheSource = fs.readFileSync(path.join(root, 'core/ai-note-cache.js'), 'utf8');
 assert.match(aiNoteCacheSource, /frameSetId[\s\S]+?storage\.set\([\s\S]+?noteKey\(mediaKey\)[\s\S]+?NOTE_INDEX_KEY[\s\S]+?deleteFrameRefs\(previousArtifact\.frameRefs\)/, 'AI Note 缓存应先写版本化图片集，再原子提交 note+索引指针，最后只清理被替换模式的旧图片');
 assert.match(aiNoteCacheSource, /catch \(error\)[\s\S]+?deleteFrameRefs\(refs\)/, '缓存元数据提交失败时必须只回滚本次新图片集，旧缓存不可被提前破坏');
+assert.match(aiNoteCacheSource, /const batchSize = 2[\s\S]+?frames\.slice\(start, start \+ batchSize\)[\s\S]+?withStore\('readwrite'/, '图文讲义截图写入必须小批量 Base64→Blob→IndexedDB，避免一次性物化所有高清 Blob');
 assert.match(aiNoteCacheSource, /saveLocks\.get\(mediaKey\)[\s\S]+?saveCommitted/, '同一 mediaKey 的 AI Note 保存必须串行化，避免两套图片版本交错提交');
+assert.match(aiNoteCacheSource, /function scheduleSweep[\s\S]+?setTimeout[\s\S]+?void sweep\(\)/, 'AI Note 保存后的容量回收应合并到后台执行，不得阻塞用户导入、补图或删除后的成功反馈');
+assert.doesNotMatch(aiNoteCacheSource, /const saved = await run[\s\S]{0,180}await sweep\(\)/, 'AI Note 保存关键路径不得同步等待完整缓存 sweep');
+assert.match(aiNoteCacheSource, /lruTouchMemory[\s\S]+?now - lastTouch >= LRU_TOUCH_INTERVAL_MS/, '连续切换同一视频的学习类型时，LRU touch 应在内存节流，避免每个 type 都跨 storage 读取索引');
+assert.match(aiNoteCacheSource, /RECORD_MEMORY_TTL_MS\s*=\s*30 \* 1000[\s\S]+?RECORD_MEMORY_LIMIT\s*=\s*2/, '长笔记 record 热缓存必须短 TTL 且严格限量，避免快速 type 切换重复跨 storage IPC 又不长期占内存');
+assert.match(aiNoteCacheSource, /async function listModesMany[\s\S]+?storage\.get\(NOTE_INDEX_KEY\)[\s\S]+?Array\.isArray\(entry\.modes\)/, '学习/复习结果指示器必须批量读取一次轻量索引，不能为了多个缓存别名重复扫描整份多模式 Markdown record');
 
 const multiArtifactMediaKey = 'yt:AIARTIFACT1';
-await BSE.AiNoteCache.save({ mediaKey: multiArtifactMediaKey, mode: 'summary', title: '快速回顾', markdown: '# 快速回顾\n摘要 A', imagesMap: {} });
-await BSE.AiNoteCache.save({ mediaKey: multiArtifactMediaKey, mode: 'deep_qa', title: '复盘自测', markdown: '# 复盘自测\n问题 B', imagesMap: {} });
-const cachedSummaryArtifact = await BSE.AiNoteCache.load(multiArtifactMediaKey, 'summary');
-const cachedQaArtifact = await BSE.AiNoteCache.load(multiArtifactMediaKey, 'deep_qa');
-assert.match(cachedSummaryArtifact?.markdown || '', /摘要 A/, '同一视频生成复盘自测后不得覆盖已有快速回顾');
-assert.match(cachedQaArtifact?.markdown || '', /问题 B/, '同一视频的复盘自测应作为独立学习产物恢复');
+const artifactSourceUrl = 'https://www.youtube.com/watch?v=AIARTIFACT1';
+const artifactFixtures = [
+  ['course_notes', '图文讲义', '# 图文讲义\n内容 A'],
+  ['keypoints', '关键要点', '# 关键要点\n内容 B'],
+  ['concept_deep', '概念深解', '# 概念深解\n内容 C'],
+  ['summary', '核心速览', '# 核心速览\n内容 D'],
+  ['deep_qa', '自测翻卡', '# 自测翻卡\n内容 E'],
+  ['error_check', '易错排查', '# 易错排查\n内容 F']
+];
+for (const [mode, title, markdown] of artifactFixtures) {
+  await BSE.AiNoteCache.save({ mediaKey: multiArtifactMediaKey, mode, title, markdown, sourceUrl: artifactSourceUrl, sourceCueFingerprint: 'c2-feedfacecafebeef', imagesMap: {} });
+}
+for (const [mode, _title, markdown] of artifactFixtures) {
+  const cached = await BSE.AiNoteCache.load(multiArtifactMediaKey, mode);
+  assert.equal(cached?.markdown, markdown, `AI Note Cache 必须独立恢复 ${mode} 产物`);
+  assert.equal(cached?.sourceUrl, artifactSourceUrl, `AI Note Cache 必须保留 ${mode} 产物的来源 URL 作为 provenance，但不能用它替代 mediaKey 主键`);
+  assert.equal(cached?.sourceCueFingerprint, 'c2-feedfacecafebeef', `AI Note Cache 必须记录 ${mode} 产物基于哪一版字幕生成，以便校对后只标记过期而不静默伪装为最新`);
+}
 const cachedArtifactModes = await BSE.AiNoteCache.listModes(multiArtifactMediaKey);
-assert.deepEqual(new Set(Array.from(cachedArtifactModes, (entry) => entry.mode)), new Set(['summary', 'deep_qa']), 'AI Note Cache 必须按 mode 保留多份学习产物');
+assert.deepEqual(new Set(Array.from(cachedArtifactModes, (entry) => entry.mode)), new Set(artifactFixtures.map(([mode]) => mode)), 'AI Note Cache 必须按六种学习/复习任务独立保留产物');
+const aiNoteIndex = storageAreas.local.get('bse_ai_note_index_v2');
+const indexedMultiArtifact = aiNoteIndex.find((entry) => entry.mediaKey === multiArtifactMediaKey);
+assert.equal(indexedMultiArtifact.modes.length, 6, 'AI Note LRU 索引必须携带轻量 mode 元数据，让任务圆点无需读取六份 Markdown 正文');
+assert.equal(Object.prototype.hasOwnProperty.call(indexedMultiArtifact.modes[0], 'markdown'), false, 'mode 索引不得复制 Markdown 正文，只保留 mode/title/updatedAt');
+const secondArtifactMediaKey = 'yt:AIARTIFACT2';
+await BSE.AiNoteCache.save({ mediaKey: secondArtifactMediaKey, mode: 'summary', title: '另一个视频', markdown: '# B 视频', sourceUrl: 'https://www.youtube.com/watch?v=AIARTIFACT2', imagesMap: {} });
+assert.equal((await BSE.AiNoteCache.load(multiArtifactMediaKey, 'summary'))?.markdown, '# 核心速览\n内容 D', '不同 mediaKey 的相同 mode 产物不得串读');
+assert.equal((await BSE.AiNoteCache.load(secondArtifactMediaKey, 'summary'))?.markdown, '# B 视频', '第二个视频必须拥有独立的学习产物桶');
+const modesByMediaKey = await BSE.AiNoteCache.listModesMany([multiArtifactMediaKey, secondArtifactMediaKey]);
+assert.equal(modesByMediaKey[multiArtifactMediaKey]?.length, 6, '批量 mode 查询必须一次返回当前视频全部六种产物摘要');
+assert.deepEqual(modesByMediaKey[secondArtifactMediaKey]?.map((entry) => entry.mode), ['summary'], '批量 mode 查询必须保持不同视频的结果桶隔离');
+await BSE.AiNoteCache.remove(secondArtifactMediaKey);
 await BSE.AiNoteCache.remove(multiArtifactMediaKey);
 
 // Native Messaging client behavior tests. These fail before core/native-host.js exists.
@@ -808,7 +1051,7 @@ resetNativeHost();
 assert.equal(BSE.I18n.t('follow'), '跟随');
 BSE.I18n.setLocale('en');
 assert.equal(BSE.I18n.t('follow'), 'Follow');
-assert.equal(BSE.I18n.t('ai_prompt_summary'), 'Quick Review Template');
+assert.equal(BSE.I18n.t('ai_settings_shared_connection'), 'Shared connection');
 assert.equal(BSE.I18n.t('tab_tracker'), 'Tracker Center');
 assert.equal(BSE.I18n.t('tracker_filter_all', { n: 4 }), 'All (4)');
 BSE.I18n.setLocale('zh-TW');
@@ -859,15 +1102,25 @@ const duplicateCues = BSE.Parsers.normalize([
 assert.equal(duplicateCues.length, 2, '连续重复字幕必须被自动去重');
 assert.equal(duplicateCues[0].to, 2.5, '重复字幕时间跨度应合并');
 
-// 3. AI Prompts Tests
-const aiSummaryPrompt = BSE.Formatters.generateAiPrompt('summary', jsonCues, false);
-assert.match(aiSummaryPrompt, /信息密度高的摘要|主题与主要结论/);
-assert.match(aiSummaryPrompt, /第一句 第二句/);
+// 3. External subtitle polishing prompt
+const subtitleFingerprint = BSE.Utils.subtitleFingerprint(jsonCues);
+assert.equal(subtitleFingerprint, BSE.Utils.subtitleFingerprint(jsonCues.map((cue) => ({ ...cue }))), '相同 cue 内容和时间轴必须得到稳定字幕指纹');
+assert.notEqual(subtitleFingerprint, BSE.Utils.subtitleFingerprint(jsonCues.map((cue, index) => index === 0 ? { ...cue, content: `${cue.content}修正` } : cue)), '字幕文本变化必须改变字幕指纹');
+const subtitlePatchToken = BSE.Utils.buildSubtitlePatchToken('yt:Proofread01', 'track-zh', jsonCues);
+assert.match(subtitlePatchToken, /^SPC1-[0-9a-f]{16}$/i, '校对任务必须生成紧凑稳定的任务标识');
+assert.notEqual(subtitlePatchToken, BSE.Utils.buildSubtitlePatchToken('yt:Proofread02', 'track-zh', jsonCues), '不同视频不得共享校对任务标识');
+assert.notEqual(subtitlePatchToken, BSE.Utils.buildSubtitlePatchToken('yt:Proofread01', 'track-en', jsonCues), '不同字幕轨道不得共享校对任务标识');
 
-const aiNotesPrompt = BSE.Formatters.generateAiPrompt('notes', jsonCues, true);
-assert.match(aiNotesPrompt, /深入学习和复盘|根据内容类型选择结构/);
-assert.match(aiNotesPrompt, /00:01  第一句/);
-assert.doesNotMatch(aiNotesPrompt, /\[00:01\]/, 'AI 提示词中的字幕时间不再使用方括号，避免与机器标记混淆');
+const subtitlePolishPrompt = BSE.Formatters.generateSubtitlePolishPrompt(jsonCues, false, { title: '测试视频', taskToken: subtitlePatchToken });
+assert.match(subtitlePolishPrompt, /保守校对|测试视频/);
+assert.match(subtitlePolishPrompt, new RegExp(`SPARKSUB_PATCH\\s+${subtitlePatchToken}`), '外部校对任务必须要求原样回显当前视频/轨道/字幕版本标识');
+assert.match(subtitlePolishPrompt, /L0001 \| 第一句/);
+assert.match(subtitlePolishPrompt, /只输出真正需要修改的行|NO_CHANGES/, '外部字幕校对应使用稀疏 patch 协议，避免重新返回整份字幕');
+assert.doesNotMatch(subtitlePolishPrompt, /00:01\s*\|/, '普通校对任务已有行号锚点，不应再携带冗余时间戳');
+
+const timestampedPolishPrompt = BSE.Formatters.generateSubtitlePolishPrompt(jsonCues, true, { title: '测试视频' });
+assert.match(timestampedPolishPrompt, /L0001 \| 00:01 \| 第一句/);
+assert.doesNotMatch(timestampedPolishPrompt, /\[00:01\]/, '需要诊断时间时也应保持行号与时间列分离，不使用方括号时间标签');
 
 // 4. Merged Markdown Tests
 const mockTree = {
@@ -958,6 +1211,16 @@ const blob = await zip.generateAsync({ type: 'blob' });
 assert.ok(blob, 'JSZip 应当成功生成压缩包 Blob');
 assert.ok(blob.size > 100, 'JSZip 生成的 Blob 大小应当有效');
 
+// Screenshot export stores canvas data URLs as base64. The ZIP entry must contain
+// decoded image bytes, not the ASCII base64 payload with a misleading .webp suffix.
+const webpHeaderBase64 = Buffer.from('RIFF1234WEBP', 'binary').toString('base64');
+const imageZip = new BSE.JSZip();
+imageZip.file('frame.webp', webpHeaderBase64, { base64: true });
+const imageEntry = imageZip.file('frame.webp');
+assert.ok(imageEntry, 'JSZip 应当能读取刚写入的截图条目');
+assert.equal(Buffer.from(imageEntry.data).toString('binary'), 'RIFF1234WEBP', 'base64 截图必须先解码为真实二进制后再写入 ZIP');
+assert.notEqual(Buffer.from(imageEntry.data).toString('ascii'), webpHeaderBase64, 'ZIP 内不得把 base64 文本伪装成 .webp 图片');
+
 // 6. Time & Clock
 assert.equal(BSE.Utils.findActiveCueIndex(jsonCues, 1.2), 0);
 assert.equal(BSE.Utils.findActiveCueIndex(jsonCues, 2.6), 1);
@@ -983,6 +1246,8 @@ assert.equal(BSE.Utils.SessionSnapshotManager.findSnapshot('yt:oversized'), null
 await BSE.Utils.UnifiedSubtitleCache.set('bili:BV1TestUnifiedCache:p1', {
   title: '统一缓存测试',
   author: '测试UP主',
+  trackId: 'track-zh',
+  trackSource: 'platform',
   language: 'zh',
   langDoc: '中文',
   cues: [
@@ -994,19 +1259,211 @@ const unifiedLoaded = await BSE.Utils.UnifiedSubtitleCache.get('bili:BV1TestUnif
 assert.ok(unifiedLoaded, '统一字幕缓存必须成功写入并读取');
 assert.equal(unifiedLoaded.cues.length, 2, '统一字幕缓存必须保留完整 cues 数组');
 assert.equal(unifiedLoaded.title, '统一缓存测试', '统一字幕缓存必须保留视频元数据');
+assert.equal(unifiedLoaded.trackId, 'track-zh', '统一字幕缓存必须记录当前正文属于哪条字幕轨道，防止跨轨道复用');
 assert.match(unifiedLoaded.plainText, /第一句统一缓存字幕.*第二句统一缓存字幕/, '读取时应从 cues 按需恢复纯文本投影');
+const unifiedCueOnly = await BSE.Utils.UnifiedSubtitleCache.get('bili:BV1TestUnifiedCache:p1', { includePlainText: false });
+assert.equal(unifiedCueOnly.plainText, '', '内容页只需要 cues 时不得额外拼接一份长 plainText，避免大字幕重复分配内存');
+
+// 同一运行上下文中的字幕缓存 mutation 必须按调用顺序提交。否则慢结束的旧刷新
+// 可以覆盖后发的新刷新，同时共享 index 也会发生 read-modify-write 丢更新。
+const raceMediaKey = 'bili:BV1CacheRace:p1';
+const raceStorageKey = `bse_sub_cache_${raceMediaKey}`;
+const originalUnifiedStorageSet = context.chrome.storage.local.set;
+let releaseFirstUnifiedWrite;
+let firstUnifiedWriteStartedResolve;
+const firstUnifiedWriteStarted = new Promise((resolve) => { firstUnifiedWriteStartedResolve = resolve; });
+const firstUnifiedWriteGate = new Promise((resolve) => { releaseFirstUnifiedWrite = resolve; });
+let raceBodyWriteCalls = 0;
+context.chrome.storage.local.set = async (values) => {
+  if (values && Object.prototype.hasOwnProperty.call(values, raceStorageKey)) {
+    raceBodyWriteCalls++;
+    if (raceBodyWriteCalls === 1) {
+      firstUnifiedWriteStartedResolve();
+      await firstUnifiedWriteGate;
+    }
+  }
+  return originalUnifiedStorageSet(values);
+};
+const oldCacheWrite = BSE.Utils.UnifiedSubtitleCache.set(raceMediaKey, {
+  trackId: 'zh-main', cues: [{ from: 0, to: 1, content: '旧刷新正文' }]
+});
+await firstUnifiedWriteStarted;
+const newCacheWrite = BSE.Utils.UnifiedSubtitleCache.set(raceMediaKey, {
+  trackId: 'zh-main', cues: [{ from: 0, to: 1, content: '新刷新正文' }]
+});
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(raceBodyWriteCalls, 1, '旧 cache write 未完成时，后发刷新不得并发进入共享 index 的 read-modify-write');
+releaseFirstUnifiedWrite();
+await Promise.all([oldCacheWrite, newCacheWrite]);
+context.chrome.storage.local.set = originalUnifiedStorageSet;
+const racedCache = await BSE.Utils.UnifiedSubtitleCache.get(raceMediaKey, { includePlainText: false });
+assert.equal(racedCache?.cues?.[0]?.content, '新刷新正文', '缓存最终内容必须服从刷新调用顺序，不能由网络完成先后决定');
 const persistedUnifiedRecord = storageAreas.local.get('bse_sub_cache_bili:BV1TestUnifiedCache:p1');
 assert.equal(persistedUnifiedRecord.plainText, '', '有规范 cues 时不得在持久层重复保存一份可派生 plainText');
-await BSE.Utils.UnifiedSubtitleCache.set('bili:BV1OversizedCache:p1', {
+
+const correctionMediaKey = 'bili:BV1CorrectionCache:p1';
+const correctionBaseCues = [
+  { from: 0, to: 2, content: '我们使用米尔沃斯做向量检索' },
+  { from: 2, to: 4, content: '然后使用h n s w索引' }
+];
+await BSE.Utils.UnifiedSubtitleCache.set(correctionMediaKey, {
+  title: '校对缓存测试',
+  trackId: 'zh-main',
+  trackSource: 'platform',
+  language: 'zh',
+  cues: correctionBaseCues
+});
+const correctionBodyKey = `bse_sub_cache_${correctionMediaKey}`;
+const correctionOverlayKey = `bse_sub_corrections_${correctionMediaKey}`;
+storageReadHistory.length = 0;
+storageWriteHistory.length = 0;
+const correctionSaved = await BSE.Utils.UnifiedSubtitleCache.recordCorrections(
+  correctionMediaKey,
+  'zh-main',
+  correctionBaseCues,
+  [
+    { index: 0, content: '我们使用 Milvus 做向量检索' },
+    { index: 1, content: '然后使用 HNSW 索引' }
+  ],
+  { trackId: 'zh-main', trackSource: 'platform', language: 'zh', cues: [
+    { ...correctionBaseCues[0], content: '我们使用 Milvus 做向量检索' },
+    { ...correctionBaseCues[1], content: '然后使用 HNSW 索引' }
+  ] }
+);
+assert.equal(correctionSaved, true, '显式字幕校对必须先把小型 correction overlay 持久化');
+assert.equal(storageReadHistory.some((entry) => Array.isArray(entry.key) && entry.key.includes(correctionBodyKey)), false, '新 schema 下保存 sparse correction 不得先读取完整字幕正文');
+assert.equal(storageWriteHistory.some((write) => correctionBodyKey in write), false, '只改少量字幕文本时不得重写完整正文缓存');
+assert.ok(storageWriteHistory.some((write) => correctionOverlayKey in write), '校对持久化只应写独立 sparse correction record');
+assert.equal(storageAreas.local.get(correctionBodyKey)?.corrections, undefined, '新版正文 record 不应继续内嵌 correction overlay');
+assert.equal(Array.isArray(storageAreas.local.get(correctionOverlayKey)?.cues), false, '独立 correction record 不得复制完整 cues 时间轴');
+assert.equal(storageAreas.local.get(correctionOverlayKey)?.corrections?.['zh-main']?.patches.length, 2, '独立 correction record 只保存变化行');
+const correctedCacheRecord = await BSE.Utils.UnifiedSubtitleCache.get(correctionMediaKey);
+assert.equal(correctedCacheRecord?.cues[0].content, '我们使用 Milvus 做向量检索', '统一字幕缓存读取必须自动呈现同轨道校对后的文本');
+assert.equal(correctedCacheRecord?.corrections?.['zh-main']?.patches.length, 2, '校对缓存应只保存发生变化的 patch，而不是另存一整份重复时间轴');
+const replayedCorrections = await BSE.Utils.UnifiedSubtitleCache.applyCorrections(correctionMediaKey, 'zh-main', correctionBaseCues, correctedCacheRecord);
+assert.equal(replayedCorrections.appliedCount, 2, '重新解析得到同一 base cues 后必须复用已有校对 patch，而不是重新做音频/文本对齐');
+storageReadHistory.length = 0;
+const directOverlayReplay = await BSE.Utils.UnifiedSubtitleCache.applyCorrections(correctionMediaKey, 'zh-main', correctionBaseCues);
+assert.equal(directOverlayReplay.appliedCount, 2, '没有 cachedRecord 时也应直接从独立 correction store 重放校对');
+assert.equal(storageReadHistory.some((entry) => Array.isArray(entry.key) && entry.key.includes(correctionBodyKey)), false, '新 schema 下重放 correction 只应读取小型 index + overlay，不得读取完整字幕正文');
+assert.equal(replayedCorrections.cues[1].content, '然后使用 HNSW 索引');
+const upstreamChanged = correctionBaseCues.map((cue, index) => index === 1 ? { ...cue, content: '上游字幕已经修改了这一句' } : { ...cue });
+const conflictedCorrections = await BSE.Utils.UnifiedSubtitleCache.applyCorrections(correctionMediaKey, 'zh-main', upstreamChanged, correctedCacheRecord);
+assert.equal(conflictedCorrections.appliedCount, 1, '上游原文变化后只能重放仍能证明锚点的校对项');
+assert.equal(conflictedCorrections.conflictCount, 1, '原文或时间锚点不再匹配的历史校对必须明确冲突而不是按行号硬贴');
+await BSE.Utils.UnifiedSubtitleCache.set(correctionMediaKey, {
+  title: '后台重新写入平台字幕',
+  trackId: 'zh-main',
+  trackSource: 'platform',
+  language: 'zh',
+  cues: correctionBaseCues
+});
+const correctedAfterGenericWrite = await BSE.Utils.UnifiedSubtitleCache.get(correctionMediaKey);
+assert.equal(correctedAfterGenericWrite?.cues[0].content, '我们使用 Milvus 做向量检索', '后台重新写入同轨道 base cues 后，统一读取仍必须恢复用户已保存的校对文本');
+assert.equal(correctedAfterGenericWrite?.corrections?.['zh-main']?.patches.length, 2, '普通缓存刷新不得删除用户 correction overlay');
+assert.ok(storageAreas.local.has(correctionOverlayKey), '正文刷新与 correction overlay 生命周期必须解耦');
+
+const legacyCorrectionMediaKey = 'bili:BV1LegacyCorrection:p1';
+const legacyCorrectionBodyKey = `bse_sub_cache_${legacyCorrectionMediaKey}`;
+const legacyCorrectionOverlayKey = `bse_sub_corrections_${legacyCorrectionMediaKey}`;
+const legacyCorrectionBase = [{ from: 0, to: 2, content: '米尔沃斯向量数据库' }];
+const legacySavedAt = Date.now();
+storageAreas.local.set(legacyCorrectionBodyKey, {
+  mediaKey: legacyCorrectionMediaKey,
+  title: '旧版校对迁移',
+  trackId: 'zh-main',
+  trackSource: 'platform',
+  language: 'zh',
+  langDoc: '中文',
+  cues: legacyCorrectionBase,
+  cueCount: 1,
+  plainText: '',
+  markdown: '',
+  corrections: {
+    'zh-main': {
+      trackId: 'zh-main',
+      cueCount: 1,
+      patches: [{ index: 0, from: 0, to: 2, originalContent: '米尔沃斯向量数据库', content: 'Milvus 向量数据库' }],
+      updatedAt: legacySavedAt
+    }
+  },
+  savedAt: legacySavedAt
+});
+const existingSubtitleIndex = storageAreas.local.get('bse_sub_cache_index') || [];
+storageAreas.local.set('bse_sub_cache_index', [
+  { key: legacyCorrectionBodyKey, bytes: 512, savedAt: legacySavedAt },
+  ...existingSubtitleIndex.filter((entry) => (typeof entry === 'string' ? entry : entry?.key) !== legacyCorrectionBodyKey)
+]);
+assert.equal(await BSE.Utils.UnifiedSubtitleCache.set(legacyCorrectionMediaKey, {
+  title: '旧版校对迁移刷新', trackId: 'zh-main', trackSource: 'platform', language: 'zh', cues: legacyCorrectionBase
+}), true, '旧版内嵌 correction 的正文第一次刷新应完成无损迁移');
+assert.equal(storageAreas.local.get(legacyCorrectionBodyKey)?.corrections, undefined, '迁移后的正文不应继续重复保存旧 correction');
+assert.equal(storageAreas.local.get(legacyCorrectionOverlayKey)?.corrections?.['zh-main']?.patches.length, 1, '旧版内嵌 correction 必须先迁移到独立 overlay key');
+assert.equal((await BSE.Utils.UnifiedSubtitleCache.get(legacyCorrectionMediaKey))?.cues?.[0]?.content, 'Milvus 向量数据库', '迁移完成后普通读取仍应自动重放旧校对结果');
+
+const oversizedCacheSaved = await BSE.Utils.UnifiedSubtitleCache.set('bili:BV1OversizedCache:p1', {
   title: '超大缓存拒绝测试',
   cues: [{ from: 0, to: 1, content: 'x'.repeat(1_000_000) }]
 });
+assert.equal(oversizedCacheSaved, false, '单条字幕缓存因容量上限被跳过时 set() 必须返回 false，不能向校对流程报告假成功');
 assert.equal(await BSE.Utils.UnifiedSubtitleCache.get('bili:BV1OversizedCache:p1'), null, '单条字幕缓存超过字节预算时应拒绝持久化，避免长期挤爆 local storage');
+const hugeCorrectionMediaKey = 'bili:BV1HugeCorrection:p1';
+const hugeCorrectionBase = Array.from({ length: 7000 }, (_, index) => ({
+  from: index * 2,
+  to: index * 2 + 1.8,
+  content: `第${index + 1}句 ${'长字幕正文'.repeat(18)}`
+}));
+assert.equal(await BSE.Utils.UnifiedSubtitleCache.set(hugeCorrectionMediaKey, {
+  title: '超长字幕校对',
+  trackId: 'zh-main',
+  cues: hugeCorrectionBase
+}), false, '超长 base subtitle 可以不进入正文缓存，但不能因此破坏后续 correction overlay');
+assert.equal(await BSE.Utils.UnifiedSubtitleCache.recordCorrections(
+  hugeCorrectionMediaKey,
+  'zh-main',
+  hugeCorrectionBase,
+  [{ index: 3456, content: '第3457句 Milvus 与 HNSW 专有名词已校正' }],
+  { title: '超长字幕校对', trackId: 'zh-main', language: 'zh', cues: hugeCorrectionBase }
+), true, '超长字幕只改少量行时必须允许降级保存 correction-only 记录，不能因为 base cues 超限而丢用户修改');
+const hugeCorrectionRecord = await BSE.Utils.UnifiedSubtitleCache.get(hugeCorrectionMediaKey, { includePlainText: false, applyCorrections: false });
+assert.equal(hugeCorrectionRecord?.cues?.length || 0, 0, 'correction-only 记录不得偷偷持久化超限的完整 base cues');
+assert.equal(hugeCorrectionRecord?.corrections?.['zh-main']?.patches.length, 1, 'correction-only 记录只应保存真正发生变化的 sparse patch');
+const hugeCorrectionReplay = await BSE.Utils.UnifiedSubtitleCache.applyCorrections(hugeCorrectionMediaKey, 'zh-main', hugeCorrectionBase, hugeCorrectionRecord);
+assert.equal(hugeCorrectionReplay.appliedCount, 1, '重新取得超长 base subtitle 后必须能安全重放 correction-only patch');
+assert.equal(hugeCorrectionReplay.cues[3456].content, '第3457句 Milvus 与 HNSW 专有名词已校正');
+assert.equal(await BSE.Utils.UnifiedSubtitleCache.recordCorrections(
+  hugeCorrectionMediaKey,
+  'zh-main',
+  hugeCorrectionReplay.cues,
+  [{ index: 3456, content: hugeCorrectionBase[3456].content }],
+  { title: '超长字幕校对', trackId: 'zh-main', language: 'zh', cues: hugeCorrectionReplay.cues }
+), true, '超长字幕撤销最后一个 correction 时必须能删除 correction-only 记录，不能因为 base cues 超限而留下幽灵修改');
+assert.equal(await BSE.Utils.UnifiedSubtitleCache.get(hugeCorrectionMediaKey, { includePlainText: false, applyCorrections: false }), null, '最后一个 correction 被撤销后，纯 correction 记录必须真正删除');
+assert.match(fs.readFileSync(path.join(root, 'core/utils.js'), 'utf8'), /const snapshotSize = serializedByteLength\(snapshot\)[\s\S]+?candidateSizes[\s\S]+?JSON\.stringify\(candidates\)/, 'SessionSnapshot 容量裁剪应复用单项大小预算，避免对长字幕列表反复 JSON.stringify 直到 fit');
 
 // 7. Manifest & File Integrity
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
 assert.equal(manifest.manifest_version, 3);
 assert.equal(manifest.version, '0.2.0');
+assert.equal(manifest.permissions.includes('offscreen'), false, 'Offscreen executor 已退出运行时架构后不得继续保留无调用方权限');
+assert.equal(manifest.permissions.includes('cookies'), false, '项目未使用 chrome.cookies API，不应继续申请 cookies 权限；登录态网络请求只依赖站点 host permission + fetch credentials');
+const feedContentScriptEntry = manifest.content_scripts.find((entry) => (
+  Array.isArray(entry.js) && entry.js.length === 1 && entry.js[0] === 'content/feed-injector.js'
+));
+const videoContentScriptEntry = manifest.content_scripts.find((entry) => (
+  Array.isArray(entry.js) && entry.js.includes('content/app.js')
+));
+assert.ok(feedContentScriptEntry, '推荐流按钮必须使用独立轻量 content script，不能依赖整套视频运行时');
+assert.ok(feedContentScriptEntry.matches.includes('*://*.bilibili.com/*'), '轻量 Feed 注入器应覆盖 B站推荐/搜索/空间等普通页面');
+assert.ok(videoContentScriptEntry, 'B站视频页必须存在独立的完整运行时 content script');
+assert.ok(videoContentScriptEntry.matches.includes('*://www.bilibili.com/video/*'), 'B站标准视频页必须静态加载完整运行时');
+assert.equal(videoContentScriptEntry.matches.includes('*://*.bilibili.com/*'), false, 'B站普通 Feed/搜索/空间页不得无条件解析完整播放器运行时');
+assert.equal(videoContentScriptEntry.matches.some((pattern) => pattern.includes('youtube.com')), false, 'YouTube 首页/搜索页不得预加载完整视频运行时；watch/shorts 由轻量 bootstrap 按需注入');
+assert.ok(feedContentScriptEntry.matches.some((pattern) => pattern.includes('youtube.com')), 'YouTube 首页与 SPA 必须保留轻量 Feed/bootstrap content script');
+assert.equal(manifest.content_scripts.some((entry) => (entry.js || []).includes('content/main-world-bridge.js')), false, 'YouTube MAIN bridge 不应在首页/搜索页静态注入；真实视频路由由 Service Worker 按需加载');
+for (const backgroundOnlyModule of ['core/asr-polisher.js', 'core/tracker.js', 'core/queue.js']) {
+  assert.equal(videoContentScriptEntry.js.includes(backgroundOnlyModule), false, `视频 content runtime 不得继续加载后台专属模块 ${backgroundOnlyModule}`);
+}
 
 const referencedFiles = [
   manifest.background.service_worker,
@@ -1037,9 +1494,18 @@ const sidepanelSource = fs.readFileSync(path.join(root, 'sidepanel/sidepanel.js'
 const rollingPanelSyncSource = fs.readFileSync(path.join(root, 'content/rolling-panel.js'), 'utf8');
 const trackerSyncSource = fs.readFileSync(path.join(root, 'core/tracker.js'), 'utf8');
 assert.match(contentAppSource, /if \(index !== lastPlaybackIndex\)[\s\S]{0,240}BSE_PLAYBACK_UPDATE/, '跨进程播放同步必须仅在当前句变化时发布');
+const diagnosticFunctionSource = contentAppSource.match(/function diagnostic\(stage, message\)[\s\S]*?(?=\n  function classifyError)/)?.[0] || '';
+assert.match(diagnosticFunctionSource, /BSE_DIAGNOSTIC_APPEND/, '媒体诊断必须通过轻量增量事件广播');
+assert.doesNotMatch(diagnosticFunctionSource, /publish\(true\)/, '媒体诊断热路径不得为了追加日志重新发送整份字幕 state');
+assert.doesNotMatch(contentAppSource, /diagnosticPublishTimer/, '媒体诊断不应保留触发 full publish 的旧延迟定时器');
+const contentRuntimeMessageSource = contentAppSource.match(/function installRuntimeMessages\(\)[\s\S]*?(?=\n  let mountGeneration)/)?.[0] || '';
+assert.doesNotMatch(contentRuntimeMessageSource, /message\?\.type === ['"]BSE_DIAGNOSTIC_APPEND['"]/, '内容页不得重新消费后台 Queue/AI 诊断并回声成 media 日志；诊断应直接到 Side Panel');
+assert.match(sidepanelSource, /sourceTabId = message\.tabId \?\? sender\?\.tab\?\.id[\s\S]{0,260}message\.scope === 'media'[\s\S]{0,260}sourceTabId !== activeTabId/, 'Side Panel 必须按发送者 tab 过滤媒体诊断，避免多视频标签页日志串台');
 assert.match(contentAppSource, /ad-showing[\s\S]{0,160}return/, 'YouTube 广告时必须暂停正片字幕时间轴同步');
+assert.match(contentAppSource, /function stopPlaybackSync\(\)[\s\S]+?clearInterval\(playbackSyncInterval\)[\s\S]+?removeEventListener\('timeupdate'/, '离开视频页必须释放播放同步 interval、旧 video listener 与相关工作集');
+assert.match(contentAppSource, /function ensurePlaybackSync\(\)[\s\S]{0,360}!BSE\.Utils\.isMatchingVideoUrl\(location\.href\)[\s\S]{0,240}setInterval\(syncPlaybackVideoElement, 500\)/, '500ms 播放器元素探测只应在真实视频页启动，Feed/搜索页不得常驻轮询');
 assert.match(contentAppSource, /state\.cueRevision \+= 1/, '新字幕正文提交时必须提高正文版本');
-assert.match(sidepanelSource, /currentKey[^\n]+cueRevision/, '侧边栏 DOM 缓存键必须识别同数量字幕刷新');
+assert.match(sidepanelSource, /(?:currentKey|cacheBaseKey)[^\n]+cueRevision/, '侧边栏 DOM 缓存键必须识别同数量字幕刷新');
 assert.match(rollingPanelSyncSource, /cueRenderKey[^\n]+cueRevision/, '滚动面板 DOM 缓存键必须识别同数量字幕刷新');
 assert.doesNotMatch(sidepanelSource, /AUTO_RESUME_DELAY|autoResumeTimer/, '侧边栏不得在用户阅读时自动抢回跟随');
 assert.doesNotMatch(rollingPanelSyncSource, /autoResumeDelay|autoResumeTimer/, '滚动面板不得在用户阅读时自动抢回跟随');
@@ -1047,6 +1513,8 @@ assert.match(trackerSyncSource, /if \(checkAllUpdatesPromise\) return checkAllUp
 assert.match(trackerSyncSource, /TRACKER_CHECK_CONCURRENCY\s*=\s*3/, '全量巡检应使用受控小并发，而不是串行人工延迟或无界并发');
 assert.match(trackerSyncSource, /Promise\.all\(Array\.from\(\{ length: workerCount \}/, '全量巡检必须通过固定 worker pool 合并执行');
 assert.match(trackerSyncSource, /updatedSubs\.push\(\{[\s\S]{0,220}title: sub\.title/, '追踪更新结果必须为通知提供订阅源标题');
+assert.match(trackerSyncSource, /SUMMARY:\s*'bse_tracker_summary_v1'[\s\S]+?function trackerSummary[\s\S]+?async function getTrackerSummary/, '追踪模块必须维护独立轻量 summary，隐藏 Workspace 不应为导航 badge 读取完整订阅历史');
+assert.match(trackerSyncSource, /setStorageItems\(\{[\s\S]{0,220}\[STORAGE_KEYS\.SUBSCRIPTIONS\]: sanitized,[\s\S]{0,160}\[STORAGE_KEYS\.SUMMARY\]: trackerSummary\(sanitized\)/, '订阅账本与轻量 summary 必须在同一次 storage set 中提交，避免投影与事实源长期漂移');
 
 const backgroundSource = fs.readFileSync(path.join(root, 'background/service-worker.js'), 'utf8');
 const bilibiliSource = fs.readFileSync(path.join(root, 'platform/bilibili.js'), 'utf8');
@@ -1072,11 +1540,27 @@ assert.doesNotMatch(backgroundSource, /parsed\.hostname\.endsWith\('bilibili\.co
 assert.match(backgroundSource, /BSE_FETCH_YOUTUBE_RESOURCE[\s\S]+?fetchYouTubeResource\(message\.url, sender\)/, 'YouTube 字幕代理必须传递发送者用于来源校验');
 assert.match(backgroundSource, /fetchYouTubeResource[\s\S]+?UNSAFE_REDIRECT[\s\S]+?BODY_TOO_LARGE/, 'YouTube 字幕代理必须限制重定向目标与响应体大小');
 assert.match(backgroundSource, /BSE_DOWNLOAD_MEDIA_FILE[\s\S]+?isTrustedSender\(sender, 'bilibili'\)/, '媒体下载通道必须验证消息来源');
+assert.match(backgroundSource, /updateBadgeFromUnread[\s\S]{0,320}getTrackerSummary/, '扩展图标未读 badge 应读取轻量 Tracker summary，不得每次加载完整订阅账本');
 assert.match(bilibiliSource, /requestBackgroundJson\((?:track\.subtitleUrl|cleanUrl)/, '哔哩哔字幕正文必须走后台通道');
+assert.match(bilibiliSource, /function assertPlayerIdentity[\s\S]+?BILI_PLAYER_MEDIA_MISMATCH/, 'B站播放器响应必须校验返回 BVID/CID，不能只相信请求参数');
+assert.doesNotMatch(bilibiliSource, /\[实验特性\/BPX\] 快速通道返回/, 'BPX 只能提供活跃 CID，不应继续维护第二套字幕轨道来源');
+assert.match(bilibiliSource, /const cid = domCid \|\| pageInfo\.cid \|\| viewData\.cid/, 'BPX 活跃 CID 应进入统一 authoritative player path');
+assert.match(bilibiliSource, /assertTrackStillCurrent\(track, '字幕正文请求前'\)[\s\S]+?assertTrackStillCurrent\(track, '字幕正文返回后'\)/, '字幕正文下载前后都必须确认轨道仍属于当前媒体');
+assert.match(bilibiliSource, /BILI_SUBTITLE_DURATION_MISMATCH/, 'B站前台字幕也必须有 authoritative duration 防错互锁');
+assert.match(appSource, /const isCurrentLoad = \(\) => \([\s\S]+?ownGeneration === trackGeneration[\s\S]+?mediaGeneration === generation[\s\S]+?expectedMediaKey === String\(state\.mediaKey \|\| ''\)/, '字幕正文事务必须同时绑定 track generation、media generation 与 mediaKey');
+assert.match(appSource, /if \(!isCurrentLoad\(\)\) return;\s*if \(cues\?\.length\) cacheBody/, '旧 generation 必须在写入正文内存缓存之前被淘汰');
+assert.match(appSource, /const loadController = new AbortController\(\)[\s\S]+?safeStorageGet[\s\S]+?ownGeneration !== generation \|\| loadController\.signal\.aborted/, '刷新事务必须使用局部 AbortController，并在异步设置读取后再次确认 generation');
+assert.match(appSource, /if \(payload\.isRefreshing === undefined\) state\.isRefreshing = false/, 'ready 状态不得提前清掉显式 refreshing 标志，否则刷新按钮会在请求完成前重新可点');
+assert.match(appSource, /function canHydrateSessionSnapshot[\s\S]+?selected\?\.bvid[\s\S]+?selected\?\.cid[\s\S]+?selected\.duration/, 'B站旧 SessionSnapshot 必须有明确 BVID/CID/duration 才能秒开，避免升级后继续复用历史污染正文');
+assert.match(appSource, /safeLegacyMatch = !cachedTrackId[\s\S]{0,160}platform !== BSE\.PLATFORM\.BILIBILI/, 'B站无 trackId 的旧持久缓存必须重新确认一次官方轨道，不能继续盲信 legacy body');
+assert.match(backgroundSource, /'core\/media-context\.js'[\s\S]+?'core\/batch-export\.js'[\s\S]+?'content\/app\.js'/, '动态补注入依赖必须与正常 content-script 链保持一致');
 assert.match(appSource, /revision/, '状态必须携带单调版本号');
 assert.match(appSource, /刷新失败，已保留现有字幕/, '刷新失败必须保留已成功字幕');
 assert.match(rollingPanelSource, /ResizeObserver/, '滚动面板必须监听播放器尺寸变化');
 assert.match(rollingPanelSource, /\[hidden\]\s*\{\s*display\s*:\s*none\s*!important/, '滚动面板必须可靠隐藏旧状态 DOM');
+assert.doesNotMatch(rollingPanelSource, /ai-drawer|ai-prompts-grid|data-prompt="(?:notes|summary|keypoints|questions)"/, '播放器旁滚动面板应保持低操作，不再维护与 Side Panel 重复的旧 AI Prompt 抽屉');
+assert.match(rollingPanelSource, /btn-learn-workspace[\s\S]+?openSidePanel\?\.\('learn'\)/, '播放器旁的学习入口应直接进入 Side Panel 学习工作区');
+assert.match(appSource, /function openSidePanel\(tab = ''\)[\s\S]+?BSE_OPEN_SIDE_PANEL[\s\S]+?tab/, '内容页打开 Side Panel 时应允许携带目标工作区，而不是另建一套学习 UI');
 assert.doesNotMatch(sidePanelSource, /targetId:\s*state\.authorInfo\?\.targetId\s*\|\|\s*videoId/, 'YouTube 视频 ID 不得冒充 Channel ID 创建无效订阅');
 assert.doesNotMatch(sidePanelSource, /state\.authorInfo\?\.targetId\s*\|\|\s*bvid/, 'Bilibili BV 号不得冒充 MID 创建无效 UP 主订阅');
 assert.doesNotMatch(sidePanelSource, /batchButton\?\.addEventListener\('click',\s*openBatchModal\)/, '侧边栏批量按钮不得把 MouseEvent 当成 BV 号传给 openBatchModal');
@@ -1100,9 +1584,14 @@ assert.equal(tsconfig.compilerOptions.noEmit, true, 'tsconfig 必须开启 noEmi
 
 // 9. Batch Modal & Custom Selection Tests
 assert.equal(BSE.Utils.escapeHtml('<script>alert("xss")&\'</script>'), '&lt;script&gt;alert(&quot;xss&quot;)&amp;&#39;&lt;/script&gt;', 'escapeHtml 应当正确转义 HTML 关键字符');
+assert.equal(BSE.Utils.normalizeImageUrl('//i0.hdslb.com/avatar.jpg'), 'https://i0.hdslb.com/avatar.jpg', '协议相对头像 URL 应统一转成 HTTPS');
+assert.equal(BSE.Utils.normalizeImageUrl('http://i0.hdslb.com/avatar.jpg'), 'https://i0.hdslb.com/avatar.jpg', '头像 URL 不应继续保存明文 HTTP');
+assert.equal(BSE.Utils.normalizeImageUrl(''), '', '空头像 URL 必须保持为空，不能制造伪地址');
 
 const sidePanelHtml = fs.readFileSync(path.join(root, 'sidepanel/sidepanel.html'), 'utf8');
 assert.match(sidePanelHtml, /batch-tree-toolbar-actions/, '侧边栏批量弹窗应包含分P全选/清空/反选/仅当前工具栏');
+assert.match(sidePanelSource, /function updateTreeSummaryAndScope[\s\S]+?const sectionStats = new Map\(\)[\s\S]+?const videoStats = new Map\(\)[\s\S]+?for \(const cb of allCbs\)/, '大合集勾选状态应单次遍历聚合 section/video 计数，不能对每个父节点重复扫描全部分P');
+assert.match(sidePanelCss, /\.batch-tree-item-node\s*\{[^}]*content-visibility:\s*auto[^}]*contain-intrinsic-size:\s*auto\s+30px/s, '大合集屏幕外分P条目应延迟布局绘制，避免一次性绘制完整目录树');
 assert.match(sidePanelHtml, /batch-quick-range-bar/, '批量弹窗应包含区间速选条');
 assert.match(sidePanelHtml, /batch-settings-stacked/, '批量弹窗应使用多行纵向分栏配置抽屉而非拥挤单行');
 assert.match(sidePanelHtml, /name="batch-output"/, '批量弹窗应包含输出动作单选组');
@@ -1129,12 +1618,28 @@ assert.match(contentAppSource, /changes\?\.bseSubtitlePreference[\s\S]{0,420}app
 assert.match(contentAppSource, /async function applySubtitlePreferenceChange[\s\S]{0,1800}selectBestTrack\(tracks[\s\S]{0,900}loadTrack\(selected/, '字幕偏好切换应优先复用当前轨道目录，只加载真正切换到的字幕正文');
 assert.doesNotMatch(contentAppSource, /subtitle_preference_changed['"],\s*true/, '字幕偏好切换不得强制重新跑完整轨道发现与网络刷新');
 const aiOutcomeTabs = [...sidePanelHtml.matchAll(/class="ai-mode-pill[^\"]*"[^>]+data-mode="([^"]+)"/g)].map((match) => match[1]);
-assert.deepEqual(aiOutcomeTabs, ['course_notes', 'summary', 'deep_qa'], 'AI 顶部只应保留学习讲义、快速回顾、复盘自测三种真实学习产物');
-assert.match(sidePanelHtml, /id="ai-prompts-toggle"/, '外部 AI 模板必须作为独立工具入口，而不是第四种学习产物');
+assert.deepEqual(aiOutcomeTabs, ['course_notes', 'keypoints', 'concept_deep', 'summary', 'deep_qa', 'error_check'], '学习与复习页必须按用户意图提供三种任务，而不是按 AI 技术分类');
+assert.match(sidePanelHtml, /id="ai-learn-mode-shell"[\s\S]+?data-mode="course_notes"[\s\S]+?data-mode="keypoints"[\s\S]+?data-mode="concept_deep"/, '学习 Workspace 必须提供图文讲义、关键要点、概念深解');
+assert.match(sidePanelHtml, /id="ai-review-mode-shell"[\s\S]+?data-mode="summary"[\s\S]+?data-mode="deep_qa"[\s\S]+?data-mode="error_check"/, '复习 Workspace 必须提供核心速览、自测翻卡、易错排查');
+assert.match(sidePanelHtml, /id="ai-review-protocol"/, '自测任务应明确表达先作答、后核对的使用流程');
+assert.doesNotMatch(sidePanelHtml, /id="ai-prompts-toggle"|class="ai-prompts-grid"/, '旧提示词库不应继续作为学习页内部的额外层级');
+assert.match(sidePanelHtml, /id="ai-btn-external-toggle"[^>]+aria-controls="ai-external-toolbar"/, '学习与复习主工具栏必须提供明确的外部 AI 执行入口');
 assert.doesNotMatch(sidePanelHtml, /class="ai-mode-pill[^\"]*"[^>]+data-mode="prompts"/, '提示词库不得重新混入学习产物 Tab');
-assert.match(sidePanelSource, /aiBtnSnipFrame\.hidden\s*=\s*!isDeepNotes/, '快速回顾和复盘自测必须隐藏截图工具，避免暗示图片参与纯文本产物');
-assert.match(sidePanelSource, /AiNoteCache\.load\(mediaKey, mode\)/, '切换学习产物时必须按 mode 独立恢复缓存，不能显示另一个模式的结果');
+assert.match(sidePanelSource, /aiBtnSnipFrame\.hidden\s*=\s*!usesVisualEvidence/, '快速回顾和复盘自测必须隐藏截图工具，避免暗示图片参与纯文本产物');
+assert.match(sidePanelSource, /for \(const key of cacheKeys\)[\s\S]{0,220}AiNoteCache\.load\(key, mode, \{ signal: restoreController\.signal \}\)/, '切换学习产物时必须按 mode 从当前视频的稳定缓存别名恢复，并允许在用户离开工作区时取消高清图物化');
 assert.match(aiNoteCacheSource, /artifacts:[\s\S]+?\[mode\]/, '同一视频的学习产物必须按 mode 独立保存，不能互相覆盖');
+assert.match(aiNoteCacheSource, /function noteKey\(mediaKey\)[\s\S]{0,120}NOTE_KEY_PREFIX[^\n]+mediaKey/, 'AI Note 底层持久化仍应使用显式 owner key，而不是标题或完整 URL');
+assert.match(sidePanelSource, /function renderCurrentAiArtifact\(\)[\s\S]{0,420}artifactKey !== activeArtifactKey[\s\S]{0,180}renderEmptyAiNoteState/, '最终学习产物渲染必须 fail-closed 校验 artifactKey 与当前视频内容身份，禁止跨视频沿用内存结果');
+assert.match(sidePanelSource, /async function saveCurrentNoteToCache\([^)]*\)[\s\S]{0,520}!activeArtifactKey \|\| activeArtifactKey !== noteArtifactKey/, '持久化任一学习/复习 mode 产物前都必须要求当前视频身份与产物身份完全一致');
+assert.match(sidePanelSource, /function currentAiArtifactKey[\s\S]{0,760}selected\?\.page[\s\S]{0,520}getArtifactKey/, '学习/复习缓存必须优先使用已确认的 B站 track.page，并在其他情况回退统一 artifactKey seam，不能直接复用可能在 pN\/cidN 间变化的运行时 key');
+assert.match(sidePanelSource, /sourceArtifactKey[\s\S]{0,180}sourceArtifactKey !== artifactKey/, '带来源 URL 的缓存如果证明属于另一视频，恢复时必须 fail-closed 拒绝显示');
+assert.match(sidePanelHtml, /id="ai-btn-clear-artifact"/, '学习/复习结果必须提供清空当前产物入口，误导入后不能只能一直看着错误缓存');
+assert.match(sidePanelSource, /clearCurrentAiArtifact[\s\S]{0,520}AiNoteCache\.remove\(key, \{ mode \}\)/, '清空当前产物必须删除当前视频当前 mode 的规范 key 与历史别名，避免旧 cid 缓存再次冒出来');
+assert.match(contentAppSource, /provisional[\s\S]{0,700}state\.tracks\.some[\s\S]{0,320}ownerMatches/, 'B站 pN 临时身份必须能通过当前轨道的 BVID\/CID\/page 证明并接纳精确 MediaContext，避免标签语境被自身拒绝');
+assert.match(sidePanelSource, /function stateMatchesTabUrl[\s\S]{0,520}mediaStateMatchesUrl/, 'Side Panel 必须用当前标签页 URL 校验收到的媒体状态，不能只相信旧 ready 状态');
+assert.match(sidePanelSource, /const directState = await chrome\.tabs\.sendMessage[\s\S]{0,240}stateMatchesTabUrl\(directState, currentTab\.url/, 'Side Panel 初始直连状态也必须先校验当前 URL，避免 SPA 切视频时读到上一视频状态');
+assert.match(sidePanelSource, /sameMediaIdentity[\s\S]{0,320}nextState\.status === 'empty'/, 'ready→empty 防抖只允许发生在同一 mediaKey，未知/新视频状态必须能清空旧笔记');
+assert.match(contentAppSource, /state\.mediaKey = mediaKey;[\s\S]{0,360}SessionSnapshotManager\?\.findSnapshot\(mediaKey\)[\s\S]{0,420}transitionTo\('ready'/, '内容页必须先提交新 mediaKey 再发布快照秒开状态，禁止新视频字幕携带旧视频身份广播');
 assert.match(sidePanelHtml, /id="tracker-search-input"/, '追踪中心应提供订阅搜索入口');
 assert.match(sidePanelHtml, /id="tracker-sort-select"/, '追踪中心应提供订阅排序入口');
 assert.match(sidePanelHtml, /id="tracker-status-line"[^>]+aria-live="polite"/, '追踪中心状态摘要应向辅助技术播报');
@@ -1146,7 +1651,7 @@ assert.match(sidePanelSource, /expandedTrackerCards\.has\(id\)[\s\S]{0,220}rende
 assert.match(sidePanelSource, /changes\['bse_subscriptions'\]/, '追踪 storage 监听必须订阅真实的 bse_subscriptions key');
 assert.doesNotMatch(sidePanelSource, /changes\['bse_tracker_subscriptions'\]/, '不得继续监听不存在的旧 tracker storage key');
 assert.doesNotMatch(sidePanelSource, /BSE_TRACKER_SUBSCRIPTIONS_UPDATED|BSE_TRACKER_UPDATE_BADGE/, '追踪同步应直接依赖真实 storage change，不再重复发送第二套广播/徽标消息');
-assert.match(sidePanelSource, /if \(currentTab === 'tracker'\)[\s\S]{0,160}scheduleTrackerRefresh/, '窗口重新聚焦时只有追踪页可见才应触发完整 tracker 刷新');
+assert.match(sidePanelSource, /if \(currentWorkspace === 'tracker'\)[\s\S]{0,160}scheduleTrackerRefresh/, '窗口重新聚焦时只有追踪一级 Workspace 可见才应触发完整 tracker 刷新');
 assert.doesNotMatch(sidePanelSource, /loadAndRenderTracker\(\)\.catch\(\(\) => \{\}\);\s*initializeQueueLanguageControl/, '侧栏初始化不得无条件加载完整 tracker 页面');
 assert.match(sidePanelSource, /getTrackerUnreadItems/, '追踪中心必须按逐条已读状态选择未读内容，不能只依赖前 N 条位置');
 assert.doesNotMatch(sidePanelSource, /matchingSub\.items\s*=\s*episodes/, '打开批量目录不得覆盖追踪账本并丢失已读/字幕状态');
@@ -1349,7 +1854,20 @@ const lightweightTrackerBlob = storageAreas.local.get('bse_subscriptions');
 assert.equal(lightweightTrackerBlob[0].items[0].subtitle.markdown, undefined, '追踪主存储不得内嵌 Markdown 正文');
 assert.equal(lightweightTrackerBlob[0].items[0].subtitle.plainText, undefined, '追踪主存储不得内嵌纯文本正文');
 assert.ok(JSON.stringify(lightweightTrackerBlob).length < 10000, '单条已提取字幕不应把追踪主存储膨胀到正文规模');
+const lightweightTrackerSummary = await BSE.Tracker.getTrackerSummary();
+assert.deepEqual(
+  { total: lightweightTrackerSummary.total, unread: lightweightTrackerSummary.unread },
+  { total: 1, unread: 1 },
+  '追踪导航摘要必须由正式压缩账本派生，只保存总订阅数和未读数'
+);
+assert.deepEqual(
+  { total: storageAreas.local.get('bse_tracker_summary_v1')?.total, unread: storageAreas.local.get('bse_tracker_summary_v1')?.unread },
+  { total: 1, unread: 1 },
+  '保存追踪账本时必须同步提交轻量 summary，避免隐藏页面为了 badge 再读完整订阅历史'
+);
 await BSE.Tracker.removeSubscription('metadata-only-cache');
+const emptyTrackerSummary = await BSE.Tracker.getTrackerSummary();
+assert.deepEqual({ total: emptyTrackerSummary.total, unread: emptyTrackerSummary.unread }, { total: 0, unread: 0 }, '删除订阅后轻量 summary 必须同步归零');
 const cappedStats = BSE.Tracker.getStorageStats(Array.from({ length: 105 }, (_, index) => ({
   id: `sub-${index}`, platform: 'youtube', type: 'channel', title: `频道 ${index}`, targetId: `UC${index}`, items: []
 })));
@@ -1411,6 +1929,7 @@ const bilibiliSub = {
   type: 'up',
   title: '测试 UP 主',
   targetId: '12345',
+  avatar: 'https://i0.hdslb.com/bfs/face/existing.jpg',
   lastCheckedAt: 0,
   unreadCount: 0,
   items: []
@@ -1429,6 +1948,129 @@ assert.equal(bilibiliUpdate.updated, true, 'Bilibili 后续巡检必须识别新
 assert.deepEqual(Array.from(bilibiliUpdate.newItems, (item) => item.id), ['BV1NEWVIDEO1']);
 assert.equal(bilibiliSub.unreadCount, 1, 'Bilibili 新投稿必须准确增加未读数');
 
+// 历史订阅缺头像时应走轻量 view API 自愈，并持久化规范化后的作者元数据。
+const avatarRepairSub = await BSE.Tracker.addSubscription({
+  id: 'bilibili:season:avatar-repair',
+  platform: 'bilibili',
+  type: 'season',
+  title: '旧合集',
+  author: '旧作者',
+  targetId: 'avatar-repair',
+  bvid: 'BV1AVATAR9',
+  sourceUrl: 'https://www.bilibili.com/video/BV1AVATAR9',
+  avatar: '',
+  items: []
+});
+mockFetch = async (url) => {
+  assert.match(String(url), /x\/web-interface\/view\?bvid=BV1AVATAR9/);
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ code: 0, data: { owner: { mid: 54321, name: '修复后的作者', face: '//i0.hdslb.com/bfs/face/repaired.jpg' } } })
+  };
+};
+const avatarRepairResult = await BSE.Tracker.repairSubscriptionMetadata(avatarRepairSub);
+assert.equal(avatarRepairResult.updated, true, '缺失头像的 B站订阅必须能恢复作者元数据');
+assert.equal(avatarRepairSub.avatar, 'https://i0.hdslb.com/bfs/face/repaired.jpg', '协议相对或 HTTP 头像地址应统一规范为 HTTPS');
+assert.equal(avatarRepairSub.author, '修复后的作者', '恢复头像时应同步修正作者名称');
+assert.equal(avatarRepairSub.ownerId, '54321', '恢复头像时应记录稳定 ownerId');
+const persistedAvatarRepair = await BSE.Tracker.getSubscription(avatarRepairSub.id);
+assert.equal(persistedAvatarRepair.avatar, avatarRepairSub.avatar, '头像自愈结果必须持久化，不能下次打开又退回字母占位');
+await BSE.Tracker.removeSubscription(avatarRepairSub.id);
+
+// A deleted/stale latestBvid must not permanently block Bilibili owner/avatar repair.
+// Try the subscription's current items/source roots until a video that still belongs
+// to the same owner + UGC season is found.
+const staleAvatarSub = await BSE.Tracker.addSubscription({
+  id: 'bilibili:season:stale-avatar-root',
+  platform: 'bilibili',
+  type: 'season',
+  title: '真题详解-27考研',
+  author: '-褴褛飞旋',
+  targetId: '8920915',
+  ownerId: '919346',
+  bvid: 'BV18ytf6sETY',
+  latestBvid: 'BV18ytf6sETY',
+  sourceUrl: 'https://www.bilibili.com/video/BV1sk896uEpp',
+  avatar: '',
+  items: [{
+    id: 'BV12SY26cELW',
+    title: 'TCP-[一图流]-408计算机考研笔记',
+    url: 'https://www.bilibili.com/video/BV12SY26cELW',
+    pubdate: 1789139796000,
+    isRead: true
+  }]
+});
+const staleAvatarRequests = [];
+mockFetch = async (url) => {
+  staleAvatarRequests.push(String(url));
+  if (String(url).includes('bvid=BV18ytf6sETY')) {
+    return { ok: true, status: 200, json: async () => ({ code: 62002 }) };
+  }
+  if (String(url).includes('bvid=BV12SY26cELW')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        code: 0,
+        data: {
+          bvid: 'BV12SY26cELW',
+          owner: { mid: 919346, name: '-褴褛飞旋', face: 'https://i2.hdslb.com/bfs/face/repaired-current.jpg' },
+          ugc_season: { id: 8920915, title: '真题详解-27考研' }
+        }
+      })
+    };
+  }
+  throw new Error(`unexpected avatar repair url: ${url}`);
+};
+const staleAvatarRepair = await BSE.Tracker.repairSubscriptionMetadata(staleAvatarSub);
+assert.equal(staleAvatarRepair.checked, true, '失效 latestBvid 后必须继续尝试当前订阅的其他有效 BV');
+assert.equal(staleAvatarSub.avatar, 'https://i2.hdslb.com/bfs/face/repaired-current.jpg', '有效候选必须恢复真实作者头像');
+assert.equal(staleAvatarSub.bvid, 'BV12SY26cELW', '恢复成功后应淘汰失效 root hint，避免下次仍先请求已删除 BV');
+assert.equal(staleAvatarSub.latestBvid, 'BV12SY26cELW', '恢复成功后 latestBvid 应指向仍有效的当前媒体');
+assert.match(staleAvatarRequests[0], /bvid=BV18ytf6sETY/, '应先验证现有 latestBvid，而不是无理由忽略持久化状态');
+assert.match(staleAvatarRequests[1], /bvid=BV12SY26cELW/, 'latestBvid 失效后应立即尝试已知当前条目');
+await BSE.Tracker.removeSubscription(staleAvatarSub.id);
+
+// Distinct media identities are authoritative. Two adjacent UGC episodes may
+// intentionally share the same title and publish only minutes apart; title/time
+// similarity must never collapse different BVIDs.
+const sameTitleEpisodesSub = await BSE.Tracker.addSubscription({
+  id: 'bilibili:season:same-title-distinct-media',
+  platform: 'bilibili',
+  type: 'season',
+  title: '同标题独立视频',
+  targetId: 'same-title-distinct-media',
+  items: [
+    {
+      id: 'BV12SY26cELW',
+      title: 'TCP-[一图流]-408计算机考研笔记',
+      url: 'https://www.bilibili.com/video/BV12SY26cELW',
+      pubdate: 1789139796000,
+      duration: 192,
+      isRead: true
+    },
+    {
+      id: 'BV1mmY26aE2w',
+      title: 'TCP-[一图流]-408计算机考研笔记',
+      url: 'https://www.bilibili.com/video/BV1mmY26aE2w',
+      pubdate: 1789139187000,
+      duration: 144,
+      isRead: false,
+      subtitle: { status: 'ready', cueCount: 99 }
+    }
+  ]
+});
+const sameTitleEpisodesLoaded = await BSE.Tracker.getSubscription(sameTitleEpisodesSub.id);
+assert.equal(sameTitleEpisodesLoaded.items.length, 2, '不同 BVID 即使标题完全相同且发布时间接近，也必须保留为两个独立视频');
+assert.deepEqual(
+  Array.from(sameTitleEpisodesLoaded.items, (item) => item.id),
+  ['BV12SY26cELW', 'BV1mmY26aE2w'],
+  'Tracker 去重必须以稳定媒体身份为准，不能用标题或时间启发式合并内容'
+);
+assert.equal(sameTitleEpisodesLoaded.items[1].subtitle?.status, 'ready', '独立媒体条目的字幕状态必须各自保留');
+await BSE.Tracker.removeSubscription(sameTitleEpisodesSub.id);
+
 // B站 UGC 合集拓扑追根与全量剧集提取巡检测试
 const seasonSub = {
   id: 'bilibili:season:3092932',
@@ -1437,6 +2079,7 @@ const seasonSub = {
   title: '视频合集',
   targetId: '3092932',
   bvid: 'BV1T1GA6pEvp',
+  latestBvid: 'BV1STALEROOT9',
   sourceUrl: 'https://www.bilibili.com/video/BV1T1GA6pEvp',
   lastCheckedAt: 0,
   unreadCount: 0,
@@ -1447,8 +2090,13 @@ const ugcEpisodes = Array.from({ length: 25 }, (_, i) => ({
   title: `第${i + 1}讲：AI与深度学习`,
   arc: { pubdate: 1000 + i * 10, duration: 300 }
 }));
+const seasonViewRequests = [];
 mockFetch = async (url) => {
   if (url.includes('x/web-interface/view')) {
+    seasonViewRequests.push(String(url));
+    if (String(url).includes('bvid=BV1STALEROOT9')) {
+      return { ok: true, status: 200, json: async () => ({ code: 62002 }) };
+    }
     return {
       ok: true,
       status: 200,
@@ -1473,6 +2121,9 @@ assert.equal(seasonBaseline.initialized, true, 'UGC合集首次巡检必须成�
 assert.equal(seasonSub.items.length, 25, 'UGC合集必须完整提取全部 25 集而不被 20 截断');
 assert.equal(seasonSub.title, '人工智能与机器学习实战', 'UGC合集巡检必须自动升级为精准真实合集标题');
 assert.equal(seasonSub.latestBvid, 'BV1EP25', 'UGC合集最新集 BVID 必须正确更新');
+assert.equal(seasonViewRequests.length, 2, '合集巡检遇到失效 latestBvid 时必须继续尝试其他已知 BV，而不是立即降级或放弃');
+assert.match(seasonViewRequests[0], /bvid=BV1STALEROOT9/, '应先验证持久化 latestBvid');
+assert.match(seasonViewRequests[1], /bvid=BV1T1GA6pEvp/, '失效 latestBvid 后必须继续尝试有效合集根视频');
 
 await BSE.Tracker.addSubscription(seasonSub);
 const reloadedSeason = await BSE.Tracker.getSubscription(seasonSub.id);
@@ -1851,21 +2502,22 @@ const youtubeBatchTree = {
   }],
   sections: [{ index: 1, key: 'section_0', title: 'Playlist', items: [], episodes: [] }]
 };
-const originalBatchNativeHost = BSE.NativeHost;
+const originalYoutubeBatchSendMessage = context.chrome.runtime.sendMessage;
 let youtubeBatchPayload = null;
-let youtubeBatchSignal = null;
-BSE.NativeHost = {
-  ...originalBatchNativeHost,
-  fetchYouTubeCaptions: async (payload, options = {}) => {
-    youtubeBatchPayload = payload;
-    youtubeBatchSignal = options.signal;
+context.chrome.runtime.sendMessage = async (message) => {
+  if (message?.type === 'BSE_FETCH_NATIVE_YOUTUBE_CAPTIONS') {
+    youtubeBatchPayload = message.payload;
     return {
-      cues: [{ from: 0, to: 2, content: 'English batch transcript' }],
-      language: 'en',
-      langDoc: 'English',
-      kind: 'auto'
+      success: true,
+      result: {
+        cues: [{ from: 0, to: 2, content: 'English batch transcript' }],
+        language: 'en',
+        langDoc: 'English',
+        kind: 'auto'
+      }
     };
   }
+  return originalYoutubeBatchSendMessage(message);
 };
 const youtubeBatchResult = await BSE.YouTube.runBatchExport(youtubeBatchTree, {
   scope: 'all',
@@ -1874,26 +2526,23 @@ const youtubeBatchResult = await BSE.YouTube.runBatchExport(youtubeBatchTree, {
   format: 'txt',
   withTimestamp: false
 });
-assert.equal(youtubeBatchPayload?.subtitlePreference, 'ai-first', 'YouTube 批量导出必须把用户字幕偏好传给 Native Host');
-assert.ok(youtubeBatchSignal && !youtubeBatchSignal.aborted, 'YouTube 批量抓取必须把可取消 AbortSignal 传给 Native Host');
+assert.equal(youtubeBatchPayload?.subtitlePreference, 'ai-first', 'YouTube 批量导出必须把用户字幕偏好透传给 Service Worker Native 代理');
 assert.equal(youtubeBatchResult.results[0].track?.lan, 'en', 'YouTube 批量结果必须保留真实语言代码');
 assert.equal(youtubeBatchResult.results[0].track?.lan_doc, 'English', 'YouTube 批量结果必须保留真实语言标签');
 assert.equal(youtubeBatchResult.results[0].track?.isAI, true, 'YouTube 批量结果必须保留自动字幕类型');
 
-let observedCancelledSignal = null;
-BSE.NativeHost = {
-  ...originalBatchNativeHost,
-  fetchYouTubeCaptions: (_payload, options = {}) => new Promise((_resolve, reject) => {
-    observedCancelledSignal = options.signal;
-    const abort = () => {
-      const error = new Error('cancelled');
-      error.name = 'AbortError';
-      error.code = 'CANCELLED';
-      reject(error);
-    };
-    if (options.signal?.aborted) abort();
-    else options.signal?.addEventListener('abort', abort, { once: true });
-  })
+let cancelledNativeJobId = '';
+let resolvePendingYoutubeCaption = null;
+context.chrome.runtime.sendMessage = async (message) => {
+  if (message?.type === 'BSE_FETCH_NATIVE_YOUTUBE_CAPTIONS') {
+    return await new Promise((resolve) => { resolvePendingYoutubeCaption = resolve; });
+  }
+  if (message?.type === 'BSE_NATIVE_CANCEL') {
+    cancelledNativeJobId = String(message.jobId || '');
+    resolvePendingYoutubeCaption?.({ success: false, error: 'cancelled' });
+    return { ok: true, cancelled: true };
+  }
+  return originalYoutubeBatchSendMessage(message);
 };
 const youtubeBatchControl = {};
 const pendingYoutubeBatch = BSE.YouTube.runBatchExport(youtubeBatchTree, {
@@ -1907,9 +2556,9 @@ assert.ok(youtubeBatchControl.controller, 'YouTube 批量任务必须暴露当�
 youtubeBatchControl.cancelled = true;
 youtubeBatchControl.controller.abort();
 const cancelledYoutubeBatch = await pendingYoutubeBatch;
-assert.equal(observedCancelledSignal?.aborted, true, '取消 YouTube 批量任务必须真实中止正在运行的 Native Host 请求');
-assert.equal(cancelledYoutubeBatch.cancelled, true, '取消后的 YouTube 批量任务必须返回 cancelled 状态而非伪装完成');
-BSE.NativeHost = originalBatchNativeHost;
+assert.match(cancelledNativeJobId, /^batch-dQw4w9WgXcQ-/, '取消 YouTube 批量任务必须把当前 jobId 发送给 Service Worker Native cancel');
+assert.equal(cancelledYoutubeBatch.cancelled, true, '取消后的 YouTube 批量任务必须立即返回 cancelled 状态而非等待 Host 慢响应');
+context.chrome.runtime.sendMessage = originalYoutubeBatchSendMessage;
 
 // 17. Queue URL Normalization
 const bvidNorm = BSE.Queue.normalizeVideoUrl('https://www.bilibili.com/video/BV1xx411c7mD?p=3');
@@ -1941,6 +2590,12 @@ assert.equal(added.length, 2, '批量加入队列必须返回 2 个任务条目'
 const queueList = await BSE.Queue.getQueue();
 assert.equal(queueList.length, 2, '队列中必须持久化存储 2 个任务条目');
 assert.equal(queueList[0].stage, 'queued');
+const queuedSummary = await BSE.Queue.getQueueSummary();
+assert.deepEqual(
+  { total: queuedSummary.total, pending: queuedSummary.pending },
+  { total: 2, pending: 2 },
+  '隐藏工作区需要能只读取轻量 Queue summary，而不是为了导航角标加载完整字幕任务'
+);
 
 // Simulate crashes in each resumable stage. A live execution lease must be left alone.
 const staleAt = Date.now() - 10 * 60 * 1000;
@@ -1981,6 +2636,12 @@ recovered[0].subtitle = {
   markdown: '### [00:00 - 00:05]\n\n测试转录文本第一句。测试转录文本第二句。'
 };
 await BSE.Queue.saveQueue(recovered);
+const recoveredSummary = await BSE.Queue.getQueueSummary();
+assert.deepEqual(
+  { total: recoveredSummary.total, pending: recoveredSummary.pending },
+  { total: recovered.length, pending: recovered.length - 1 },
+  'Queue summary 必须随完成状态同步更新，而不是成为第二套漂移状态'
+);
 
 const queueMd = await BSE.Queue.exportQueueMergedMarkdown();
 assert.ok(queueMd.includes('# SparkSub 离线视频转录合集'), '导出队列 Markdown 必须包含主标题');
@@ -2381,6 +3042,27 @@ assert.deepEqual(
   [signedBackup],
   'a scalar backup_url must normalize to a safe backup URL array'
 );
+const explicitPortPrimary = 'https://xy58x222x42x50xy.mcdn.bilivideo.cn:8082/upgcxcode/audio.m4a?deadline=999&sign=ported-primary';
+const portlessFallback = 'https://upos-sz-estgoss.bilivideo.com/upgcxcode/audio.m4a?deadline=999&sign=portless-backup';
+assert.deepEqual(
+  structuredClone(BSE.Media.selectBilibiliAudio([{
+    bandwidth: 68025,
+    base_url: explicitPortPrimary,
+    backupUrl: [portlessFallback]
+  }])),
+  {
+    kind: 'remote',
+    url: portlessFallback,
+    backupUrls: [],
+    headers: { Referer: 'https://www.bilibili.com/', 'User-Agent': 'Mozilla/5.0 (SparkSub)' }
+  },
+  'Bilibili mcdn :8082 primary URLs must be discarded so a SparkScribe-v2-compatible portless backup is promoted'
+);
+assert.equal(
+  BSE.Media.selectBilibiliAudio([{ bandwidth: 68025, base_url: explicitPortPrimary }]),
+  null,
+  'an explicit-port Bilibili URL without a safe backup must fail before native request construction instead of surfacing INVALID_REQUEST from SparkScribe'
+);
 
 const originalNativeHost = BSE.NativeHost;
 const captionsNotFound = async () => {
@@ -2395,7 +3077,11 @@ const setFakeNativeHost = (transcribe, fetchYouTubeCaptions = captionsNotFound, 
     getCapabilities: async () => capabilities,
     transcribe: async (...args) => {
       const result = await transcribe(...args);
-      return Array.isArray(result) ? { cues: result } : result;
+      const normalized = Array.isArray(result) ? { cues: result } : { ...(result || {}) };
+      if (Number(capabilities?.protocolVersion) === 2 && args[0]?.mediaKey && !normalized.mediaKey) {
+        normalized.mediaKey = args[0].mediaKey;
+      }
+      return normalized;
     },
     fetchYouTubeCaptions
   });
@@ -2434,19 +3120,24 @@ assert.equal(fallbackItem.stage, 'done', 'a valid native transcription must comp
 assert.equal(fallbackItem.subtitle?.source, 'native', 'native output must persist its subtitle source');
 assert.equal(fallbackItem.subtitle?.engine, 'local-asr', 'native engine IDs are optional diagnostics; missing IDs normalize to local-asr');
 assert.ok(fallbackItem.subtitle?.cueCount > 0 && fallbackItem.subtitle?.plainText, 'done requires non-empty cues and plain text');
+const lightweightDoneQueue = await BSE.Queue.getQueue({ hydrateText: false });
+assert.equal(lightweightDoneQueue[0]?.subtitle?.plainText, undefined, 'Queue 列表轻量读取不得为已完成任务预生成 plainText');
+assert.equal(lightweightDoneQueue[0]?.subtitle?.markdown, undefined, 'Queue 列表轻量读取不得为已完成任务预生成 Markdown');
+assert.equal(lightweightDoneQueue[0]?.subtitle?.srt, undefined, 'Queue 列表轻量读取不得为已完成任务预生成 SRT');
+assert.ok(lightweightDoneQueue[0]?.subtitle?.cues?.length > 0, '轻量读取仍必须保留 canonical cues 作为唯一字幕事实源');
 assert.deepEqual(Array.from(fallbackItem.mediaContext?.tags || []), ['计算机', '408', 'CRC'], '离线转录任务应保留当前 BVID 绑定的标签语境供后续 AI 使用');
 assert.equal(fallbackItem.mediaContext?.mediaKey, 'bili:BV1ASRFALL01:cid42', 'AI context 必须绑定当前 authoritative BVID+CID，不能成为无主缓存');
 assert.equal(fallbackItem.mediaContext?.category, '知识');
 assert.equal(nativeCalls[0].mediaKey, 'bili:BV1ASRFALL01:cid42', 'Native ASR request 必须携带 authoritative BVID+CID 作为端到端相关性标识');
 assert.deepEqual(structuredClone(nativeCalls[0].asrContext), {
   topic: '无字幕 B 站视频',
-  terms: ['知识', '计算机', '408', 'CRC']
-}, 'Bilibili 离线转录只上传短主题与受控标签，不上传简介/作者/正文');
+  terms: ['计算机', '408', 'CRC', '知识']
+}, 'Bilibili 离线转录应优先上传语义标签，分类仅作为剩余预算的兜底，不上传简介/作者/正文');
 const asrInputDiagnostic = queueASRDiagnostics.find((event) => event?.code === 'NATIVE_ASR_REQUEST');
 assert.ok(asrInputDiagnostic, '离线转录必须写入结构化 ASR 输入诊断日志');
 assert.match(asrInputDiagnostic.message, /media=bili:BV1ASRFALL01:cid42/);
 assert.match(asrInputDiagnostic.message, /topic=无字幕 B 站视频/);
-assert.match(asrInputDiagnostic.message, /terms=知识, 计算机, 408, CRC/);
+assert.match(asrInputDiagnostic.message, /terms=计算机, 408, CRC, 知识/);
 BSE.Queue.setDiagnosticReporter(null);
 assert.equal(JSON.stringify(storageWriteHistory).includes('secret-primary'), false, 'a Bilibili signed primary URL must never be persisted');
 assert.equal(JSON.stringify(storageWriteHistory).includes('secret-backup'), false, 'a Bilibili signed backup URL must never be persisted');
@@ -2494,6 +3185,92 @@ assert.equal(explicitLocalItem.subtitle?.source, 'native');
 assert.match(explicitLocalItem.subtitle?.plainText, /当前视频自己的 SparkScribe/);
 assert.doesNotMatch(explicitLocalItem.subtitle?.plainText || '', /平台已有字幕|官方字幕也不应/);
 context.chrome.tabs = tabsBeforeExplicitLocal;
+
+// Explicit local-ASR requests are not allowed to degrade to URL-only identity.
+// This protects mixed-version/stale content scripts from starting a task while
+// Bilibili is still switching BVID/CID in an SPA tab.
+await BSE.Queue.clearAll();
+await assert.rejects(
+  () => BSE.Queue.addToQueue([{
+    url: 'https://www.bilibili.com/video/BV1NOIDENT01',
+    processingIntent: 'local-asr'
+  }], { processingIntent: 'local-asr' }),
+  (error) => error?.code === 'INVALID_REQUEST',
+  'explicit Bilibili local-asr must require an exact current media identity'
+);
+
+// Protocol v2 echoes mediaKey. A result that claims another media owner must
+// never be committed even when its cues are otherwise perfectly valid.
+await BSE.Queue.clearAll();
+mockFetch = biliResponse();
+setFakeNativeHost(async (payload) => ({
+  cues: [{ from: 0, to: 2, content: '这份内容来自另一个视频，必须被拦截。' }],
+  mediaKey: 'bili:BV1OTHER0001:cid999'
+}));
+await BSE.Queue.addToQueue([{
+  url: 'https://www.bilibili.com/video/BV1ECHOGUARD1',
+  mediaKey: 'bili:BV1ECHOGUARD1:cid42',
+  processingIntent: 'local-asr'
+}], { processingIntent: 'local-asr' });
+await BSE.Queue.processPendingJobs();
+const echoMismatchItem = await getOnlyQueueItem();
+assert.equal(echoMismatchItem.stage, 'failed', 'cross-media native result must fail closed');
+assert.equal(echoMismatchItem.errorCode, 'RESULT_INCOMPLETE');
+assert.equal(echoMismatchItem.subtitle, undefined, 'cross-media native cues must never be persisted as subtitles');
+
+// An in-flight job created under an older or different media identity must never
+// satisfy a new explicit local-ASR click for the same queue ID. Reusing it would
+// make the UI appear to transcribe the current video while an old CID keeps running.
+await BSE.Queue.clearAll();
+await BSE.Queue.saveQueue([{
+  id: 'BV1ACTIVEID01',
+  url: 'https://www.bilibili.com/video/BV1ACTIVEID01',
+  platform: 'bilibili',
+  targetId: 'BV1ACTIVEID01',
+  title: '旧活动任务',
+  author: '测试',
+  stage: 'transcribing',
+  progress: 80,
+  sourceLanguage: 'zh',
+  processingIntent: 'auto',
+  expectedMediaKey: 'bili:BV1ACTIVEID01:cid41',
+  page: 1,
+  addedAt: Date.now(),
+  startedAt: Date.now()
+}]);
+await assert.rejects(
+  () => BSE.Queue.addToQueue([{
+    url: 'https://www.bilibili.com/video/BV1ACTIVEID01',
+    mediaKey: 'bili:BV1ACTIVEID01:cid42',
+    processingIntent: 'local-asr'
+  }], { processingIntent: 'local-asr' }),
+  (error) => error?.code === 'BUSY',
+  'active work owned by another CID must never be silently reused for the current video'
+);
+const activeIdentityItem = await getOnlyQueueItem();
+assert.equal(activeIdentityItem.expectedMediaKey, 'bili:BV1ACTIVEID01:cid41', 'rejecting the new click must not mutate the active job identity');
+assert.equal(activeIdentityItem.processingIntent, 'auto', 'rejecting the new click must not silently change the active job policy');
+
+// The CID captured by the page is only a claim until Bilibili's authoritative
+// view endpoint confirms the BVID -> page -> CID mapping. A stale SPA CID must
+// fail before media acquisition or SparkScribe invocation.
+await BSE.Queue.clearAll();
+nativeCalls = [];
+mockFetch = biliResponse();
+setFakeNativeHost(async (payload) => {
+  nativeCalls.push(structuredClone(payload));
+  return [{ from: 0, to: 2, content: '不应执行到本地转录。' }];
+});
+await BSE.Queue.addToQueue([{
+  url: 'https://www.bilibili.com/video/BV1CIDPROOF01',
+  mediaKey: 'bili:BV1CIDPROOF01:cid41',
+  processingIntent: 'local-asr'
+}], { processingIntent: 'local-asr' });
+await BSE.Queue.processPendingJobs();
+const staleCidItem = await getOnlyQueueItem();
+assert.equal(staleCidItem.stage, 'failed', 'stale page CID must fail closed after authoritative metadata resolution');
+assert.equal(staleCidItem.errorCode, 'INVALID_REQUEST');
+assert.equal(nativeCalls.length, 0, 'a CID rejected by Bilibili metadata must never reach SparkScribe');
 
 // A completed caption-first item must not block a later explicit offline request.
 // Clicking local-asr is an explicit re-run request, not a request to return the old done item.
@@ -3209,6 +3986,7 @@ await BSE.Queue.clearAll();
 storageAreas.local.delete('bse_transcription_queue_v1:index');
 const rawMigrationId = 'BV1ASRMIGR01';
 const rawMigrationKey = `bse_transcription_queue_v1:item:${encodeURIComponent(rawMigrationId)}`;
+const rawMigrationProjectionKey = `bse_transcription_queue_v1:projection:${encodeURIComponent(rawMigrationId)}`;
 const rawSignedDescriptor = { kind: 'remote', url: 'https://upos-sz-mirrorcos.bilivideo.com/x.m4a?upsig=raw-secret&wsSecret=raw-ws&wsTime=99', backupUrls: ['https://upos-sz-mirrorcos.bilivideo.com/y.m4a?sign%3Draw-secret'], headers: { Referer: 'https://www.bilibili.com/' } };
 storageAreas.local.set(rawMigrationKey, {
   id: rawMigrationId, platform: 'bilibili', targetId: rawMigrationId, url: `https://www.bilibili.com/video/${rawMigrationId}`, cover: 'https://i0.hdslb.com/cover.jpg', title: '直接注入旧数据', author: '测试', stage: 'failed', progress: 0,
@@ -3226,14 +4004,211 @@ assert.equal(migratedItem.url, `https://www.bilibili.com/video/${rawMigrationId}
 assert.equal(migratedItem.stageArtifacts?.captionTracks?.[0]?.baseUrl, 'https://caption.migration/needed?lang=en');
 assert.equal(storageWriteHistory.filter((write) => rawMigrationKey in write).length, 1, 'read migration must rewrite a changed per-item snapshot once');
 assert.equal(/raw-secret|raw-ws|raw-auth/.test(JSON.stringify(storageAreas.local.get(rawMigrationKey))), false, 'read migration must clean the underlying storage entry');
-assert.equal(storageAreas.local.get('bse_transcription_queue_v1:schema'), 2, 'queue migration must persist its storage schema version');
+assert.equal(storageAreas.local.get('bse_transcription_queue_v1:schema'), 3, 'queue migration must persist its storage schema version');
+const migratedProjection = storageAreas.local.get(rawMigrationProjectionKey);
+assert.ok(migratedProjection, 'queue v3 migration must backfill a lightweight list projection');
+assert.equal(migratedProjection.subtitle?.cues, undefined, 'queue list projection must never contain canonical cues');
+assert.equal(/plainText|markdown|\"srt\"|\"cues\"/.test(JSON.stringify(migratedProjection)), false, 'queue list projection must contain metadata only');
 storageWriteHistory.length = 0;
 await BSE.Queue.getQueue();
 assert.equal(storageWriteHistory.length, 0, 'a current indexed queue read must not rewrite or deep-sanitize persisted items');
 await BSE.Queue.saveItem(migratedItem);
 assert.equal(storageWriteHistory.length, 1, 'updating an existing indexed item should require one storage write');
+assert.ok(rawMigrationProjectionKey in storageWriteHistory[0], 'item and queue-list projection must update in the same storage write');
 assert.equal('bse_transcription_queue_v1:index' in storageWriteHistory[0], false, 'existing-item updates must not rewrite an unchanged queue index');
 assert.equal('bse_transcription_queue_v1:schema' in storageWriteHistory[0], false, 'existing-item updates must not rewrite an unchanged queue schema marker');
+
+await BSE.Queue.saveQueue([{
+  id: 'BV1FASTPATH01',
+  platform: 'bilibili',
+  targetId: 'BV1FASTPATH01',
+  url: 'https://www.bilibili.com/video/BV1FASTPATH01',
+  title: '进度快路径',
+  author: '测试',
+  stage: 'transcribing',
+  progress: 40,
+  stageHint: '正在转录',
+  addedAt: Date.now()
+}]);
+storageReadHistory.length = 0;
+storageWriteHistory.length = 0;
+await BSE.Queue.saveItem({
+  id: 'BV1FASTPATH01',
+  platform: 'bilibili',
+  targetId: 'BV1FASTPATH01',
+  url: 'https://www.bilibili.com/video/BV1FASTPATH01',
+  title: '进度快路径',
+  author: '测试',
+  stage: 'transcribing',
+  progress: 41,
+  stageHint: '正在转录',
+  addedAt: Date.now()
+});
+const fastPathReads = storageReadHistory.filter((entry) => entry.area === 'local');
+assert.equal(fastPathReads.length, 1, 'pending 任务的高频进度保存必须只读取当前 item + schema，不得扫描整个 Queue');
+assert.ok(Array.isArray(fastPathReads[0].key) && fastPathReads[0].key.includes('bse_transcription_queue_v1:schema'), 'pending fast path 必须验证当前 storage schema');
+assert.ok(fastPathReads[0].key.includes(`bse_transcription_queue_v1:item:${encodeURIComponent('BV1FASTPATH01')}`), 'pending fast path 只应读取当前任务记录');
+assert.equal(storageWriteHistory.length, 1, 'pending fast path 每次进度更新只应执行一次 storage write');
+assert.ok(`bse_transcription_queue_v1:projection:${encodeURIComponent('BV1FASTPATH01')}` in storageWriteHistory[0], 'pending progress write 必须在同一次 storage write 中同步 projection');
+assert.equal('bse_transcription_queue_v1:summary' in storageWriteHistory[0], false, 'pending→pending 不改变 total/pending，不能每秒重写 Queue summary');
+
+// Queue v3 list reads must stay metadata-only even when completed items contain long canonical cues.
+await BSE.Queue.clearAll();
+const projectionFixtureCues = (prefix) => Array.from({ length: 1200 }, (_, index) => ({
+  from: index * 2,
+  to: index * 2 + 1.5,
+  content: `${prefix} 第 ${index + 1} 句长字幕正文`
+}));
+const projectionFixtureItems = [
+  {
+    id: 'projection-detail-a', platform: 'youtube', targetId: 'PROJDETA001', url: 'https://www.youtube.com/watch?v=PROJDETA001',
+    title: 'Projection A', author: 'Author A', cover: 'https://i.ytimg.com/vi/PROJDETA001/hqdefault.jpg', stage: 'done', progress: 100,
+    sourceLanguage: 'zh', addedAt: 200, completedAt: 300,
+    subtitle: { language: 'zh-CN', langDoc: '中文', cueCount: 1200, source: 'native', engine: 'local-asr', cues: projectionFixtureCues('A') }
+  },
+  {
+    id: 'projection-detail-b', platform: 'youtube', targetId: 'PROJDETB001', url: 'https://www.youtube.com/watch?v=PROJDETB001',
+    title: 'Projection B', author: 'Author B', stage: 'done', progress: 100,
+    sourceLanguage: 'en', addedAt: 100, completedAt: 250,
+    subtitle: { language: 'en', langDoc: 'English', cueCount: 1200, source: 'platform', engine: 'youtube', captionKind: 'manual', cues: projectionFixtureCues('B') }
+  }
+];
+await BSE.Queue.saveQueue(projectionFixtureItems);
+storageReadHistory.length = 0;
+storageWriteHistory.length = 0;
+const projectedQueue = await BSE.Queue.getQueueProjection();
+assert.equal(projectedQueue.length, 2, 'queue projection must preserve every queue card');
+assert.equal(projectedQueue[0].subtitle?.cueCount, 1200, 'queue projection must retain cueCount without carrying cue bodies');
+assert.equal(projectedQueue[0].subtitle?.source, 'native', 'queue projection must retain card source metadata');
+assert.equal(/plainText|markdown|\"srt\"|\"cues\"/.test(JSON.stringify(projectedQueue)), false, 'normal queue projection result must not expose canonical or derived subtitle bodies');
+const projectionReadKeys = storageReadHistory.flatMap(({ key }) => Array.isArray(key) ? key : [key]).filter((key) => typeof key === 'string');
+assert.equal(projectionReadKeys.some((key) => key.startsWith('bse_transcription_queue_v1:item:')), false, 'opening the queue list on schema v3 must not read any full item record');
+assert.ok(projectionReadKeys.some((key) => key.startsWith('bse_transcription_queue_v1:projection:')), 'opening the queue list must read lightweight projection records');
+assert.equal(storageWriteHistory.length, 0, 'healthy schema-v3 projection reads must be read-only');
+
+// A dead indexed record must be repaired locally without rereading healthy completed cue bodies.
+const orphanItemKey = 'bse_transcription_queue_v1:item:projection-orphan';
+storageAreas.local.set('bse_transcription_queue_v1:index', [
+  ...storageAreas.local.get('bse_transcription_queue_v1:index'),
+  orphanItemKey
+]);
+storageReadHistory.length = 0;
+storageWriteHistory.length = 0;
+const repairedProjectionQueue = await BSE.Queue.getQueueProjection();
+assert.equal(repairedProjectionQueue.length, 2, 'dead queue index entries must not create phantom cards');
+const orphanRepairReadKeys = storageReadHistory.flatMap(({ key }) => Array.isArray(key) ? key : [key]).filter((key) => typeof key === 'string');
+assert.ok(orphanRepairReadKeys.includes(orphanItemKey), 'projection repair may inspect the one missing indexed item');
+assert.equal(orphanRepairReadKeys.includes('bse_transcription_queue_v1:item:projection-detail-a'), false, 'projection repair must not reread healthy canonical item A');
+assert.equal(orphanRepairReadKeys.includes('bse_transcription_queue_v1:item:projection-detail-b'), false, 'projection repair must not reread healthy canonical item B');
+assert.equal(storageAreas.local.get('bse_transcription_queue_v1:index').includes(orphanItemKey), false, 'dead indexed items must be removed from the authoritative queue index');
+assert.equal(storageAreas.local.get('bse_transcription_queue_v1:summary')?.total, 2, 'dead-index repair must restore Queue summary from surviving projections');
+
+// A detail action must read and hydrate exactly one canonical item, not the whole queue.
+storageReadHistory.length = 0;
+const projectedDetail = await BSE.Queue.getItem('projection-detail-a');
+assert.equal(projectedDetail?.subtitle?.cues?.length, 1200, 'single-item detail must preserve canonical cues');
+assert.match(projectedDetail?.subtitle?.plainText || '', /A 第 1 句长字幕正文/, 'single-item detail may derive text after explicit user demand');
+const detailReadKeys = storageReadHistory.flatMap(({ key }) => Array.isArray(key) ? key : [key]).filter((key) => typeof key === 'string');
+assert.ok(detailReadKeys.includes('bse_transcription_queue_v1:item:projection-detail-a'), 'single-item detail must read its own canonical item record');
+assert.equal(detailReadKeys.includes('bse_transcription_queue_v1:item:projection-detail-b'), false, 'single-item detail must not read another completed item');
+assert.equal(storageReadHistory.length, 1, 'schema-v3 single-item detail should use one storage read IPC');
+
+// Existing v2 installations pay one full-item migration, then all future list reads are projection-only.
+storageAreas.local.set('bse_transcription_queue_v1:schema', 2);
+storageAreas.local.delete('bse_transcription_queue_v1:projection:projection-detail-a');
+storageAreas.local.delete('bse_transcription_queue_v1:projection:projection-detail-b');
+storageReadHistory.length = 0;
+storageWriteHistory.length = 0;
+const migratedV2Projection = await BSE.Queue.getQueueProjection();
+assert.equal(storageAreas.local.get('bse_transcription_queue_v1:schema'), 3, 'first v2 queue-list read must upgrade storage to schema v3');
+assert.equal(migratedV2Projection.length, 2);
+assert.equal(/\"cues\"/.test(JSON.stringify(migratedV2Projection)), false, 'v2 migration must return only projection data to the caller');
+const v2MigrationReadKeys = storageReadHistory.flatMap(({ key }) => Array.isArray(key) ? key : [key]).filter((key) => typeof key === 'string');
+assert.ok(v2MigrationReadKeys.some((key) => key.startsWith('bse_transcription_queue_v1:item:')), 'v2 upgrade is allowed one full-item read to backfill projections');
+assert.equal(storageWriteHistory.length, 1, 'v2 upgrade must backfill item projections in one storage write');
+assert.ok('bse_transcription_queue_v1:projection:projection-detail-a' in storageWriteHistory[0], 'v2 migration write must contain the first item projection');
+assert.ok('bse_transcription_queue_v1:projection:projection-detail-b' in storageWriteHistory[0], 'v2 migration write must contain the second item projection');
+storageReadHistory.length = 0;
+storageWriteHistory.length = 0;
+await BSE.Queue.getQueueProjection();
+const postMigrationReadKeys = storageReadHistory.flatMap(({ key }) => Array.isArray(key) ? key : [key]).filter((key) => typeof key === 'string');
+assert.equal(postMigrationReadKeys.some((key) => key.startsWith('bse_transcription_queue_v1:item:')), false, 'after v2→v3 migration, reopening the queue must never reread canonical items');
+assert.equal(storageWriteHistory.length, 0, 'after migration, reopening the queue must not rewrite storage');
+
+storageReadHistory.length = 0;
+const selectedMergedExport = await BSE.Queue.exportQueueMergedMarkdown(['projection-detail-a']);
+assert.match(selectedMergedExport, /Projection A/, 'selected merged export must include the requested completed item');
+assert.equal(selectedMergedExport.includes('Projection B'), false, 'selected merged export must exclude unrequested completed items');
+const selectedExportReadKeys = storageReadHistory.flatMap(({ key }) => Array.isArray(key) ? key : [key]).filter((key) => typeof key === 'string');
+assert.ok(selectedExportReadKeys.includes('bse_transcription_queue_v1:item:projection-detail-a'), 'selected merged export must read the requested canonical item');
+assert.equal(selectedExportReadKeys.includes('bse_transcription_queue_v1:item:projection-detail-b'), false, 'selected merged export must not read unrequested canonical items');
+
+// Queue mutations and idle executor scans must stay proportional to active/selected items,
+// not historical completed transcript bodies.
+storageReadHistory.length = 0;
+storageWriteHistory.length = 0;
+const [narrowMutationItem] = await BSE.Queue.addToQueue('https://www.youtube.com/watch?v=MUTATE00001', {
+  title: 'Narrow mutation item',
+  author: 'Queue test'
+});
+let narrowMutationReadKeys = storageReadHistory.flatMap(({ key }) => Array.isArray(key) ? key : [key]).filter((key) => typeof key === 'string');
+assert.equal(narrowMutationReadKeys.some((key) => key.startsWith('bse_transcription_queue_v1:item:')), false, 'adding a new queue item must not read any historical canonical item');
+
+storageReadHistory.length = 0;
+storageWriteHistory.length = 0;
+await BSE.Queue.saveItem({
+  ...narrowMutationItem,
+  stage: 'done',
+  progress: 100,
+  stageHint: '完成',
+  completedAt: Date.now(),
+  subtitle: {
+    language: 'en',
+    langDoc: 'English',
+    cueCount: 1,
+    source: 'native',
+    engine: 'local-asr',
+    cues: [{ from: 0, to: 1, content: 'terminal transition' }]
+  }
+});
+narrowMutationReadKeys = storageReadHistory.flatMap(({ key }) => Array.isArray(key) ? key : [key]).filter((key) => typeof key === 'string');
+assert.ok(narrowMutationReadKeys.includes('bse_transcription_queue_v1:item:MUTATE00001'), 'terminal save must verify only the current canonical item');
+assert.equal(narrowMutationReadKeys.includes('bse_transcription_queue_v1:item:projection-detail-a'), false, 'terminal save must not read historical completed item A');
+assert.equal(narrowMutationReadKeys.includes('bse_transcription_queue_v1:item:projection-detail-b'), false, 'terminal save must not read historical completed item B');
+assert.equal(storageReadHistory.length, 1, 'terminal save should verify current item/schema/summary in one storage read IPC');
+assert.equal(storageWriteHistory.length, 1, 'terminal save must persist item, projection and summary in one storage write IPC');
+assert.ok('bse_transcription_queue_v1:summary' in storageWriteHistory[0], 'terminal transition must update Queue summary in the same write');
+
+storageReadHistory.length = 0;
+assert.equal(await BSE.Queue.removeFromQueue('MUTATE00001'), true);
+narrowMutationReadKeys = storageReadHistory.flatMap(({ key }) => Array.isArray(key) ? key : [key]).filter((key) => typeof key === 'string');
+assert.equal(narrowMutationReadKeys.some((key) => key.startsWith('bse_transcription_queue_v1:item:')), false, 'removing one item must use projection/index metadata without reading canonical bodies');
+
+storageReadHistory.length = 0;
+await BSE.Queue.processPendingJobs();
+narrowMutationReadKeys = storageReadHistory.flatMap(({ key }) => Array.isArray(key) ? key : [key]).filter((key) => typeof key === 'string');
+assert.equal(narrowMutationReadKeys.some((key) => key.startsWith('bse_transcription_queue_v1:item:')), false, 'idle executor scans over completed history must not read canonical item records');
+
+const retryProjectionFixture = {
+  id: 'projection-retry-one', platform: 'youtube', targetId: 'RETRYPROJ01', url: 'https://www.youtube.com/watch?v=RETRYPROJ01',
+  title: 'Retry projection fixture', author: 'Queue test', stage: 'failed', progress: 0, addedAt: 50,
+  errorCode: 'ASR_FAILED', error: 'failed'
+};
+await BSE.Queue.saveQueue([...projectionFixtureItems, retryProjectionFixture]);
+storageReadHistory.length = 0;
+const retriedProjectionItem = await BSE.Queue.retryItem(retryProjectionFixture.id);
+assert.equal(retriedProjectionItem?.stage, 'queued', 'retry must still restore the selected failed item');
+narrowMutationReadKeys = storageReadHistory.flatMap(({ key }) => Array.isArray(key) ? key : [key]).filter((key) => typeof key === 'string');
+assert.ok(narrowMutationReadKeys.includes('bse_transcription_queue_v1:item:projection-retry-one'), 'retry must load the selected item body');
+assert.equal(narrowMutationReadKeys.includes('bse_transcription_queue_v1:item:projection-detail-a'), false, 'retry must not load completed history item A');
+assert.equal(narrowMutationReadKeys.includes('bse_transcription_queue_v1:item:projection-detail-b'), false, 'retry must not load completed history item B');
+
+await BSE.Queue.removeFromQueue(retryProjectionFixture.id);
+storageReadHistory.length = 0;
+const projectionClearCount = await BSE.Queue.clearCompleted();
+assert.equal(projectionClearCount, 2, 'clearCompleted must remove both completed projection fixtures');
+narrowMutationReadKeys = storageReadHistory.flatMap(({ key }) => Array.isArray(key) ? key : [key]).filter((key) => typeof key === 'string');
+assert.equal(narrowMutationReadKeys.some((key) => key.startsWith('bse_transcription_queue_v1:item:')), false, 'clearCompleted must delete completed records from projection metadata without reading cue bodies');
 
 await BSE.Queue.clearAll();
 // Legacy whole-array installations also predate the queue index.
@@ -3400,8 +4375,88 @@ for (const locale of ['zh-CN', 'zh-TW', 'en']) {
   }
 }
 const taskFiveSidepanelSource = fs.readFileSync(path.join(root, 'sidepanel/sidepanel.js'), 'utf8');
+const taskFiveAsrPolisherSource = fs.readFileSync(path.join(root, 'core/asr-polisher.js'), 'utf8');
+const taskFiveFormattersSource = fs.readFileSync(path.join(root, 'core/formatters.js'), 'utf8');
 const taskFiveSidepanelHtml = fs.readFileSync(path.join(root, 'sidepanel/sidepanel.html'), 'utf8');
 const taskFiveRollingPanelSource = fs.readFileSync(path.join(root, 'content/rolling-panel.js'), 'utf8');
+
+// Side-panel interaction contract: every static button must have controller evidence,
+// and the controller must not keep querying DOM IDs that no longer exist. This catches
+// the class of regressions where a visual redesign leaves dead controls behind.
+const staticButtonIds = [...taskFiveSidepanelHtml.matchAll(/<button\b[^>]*\bid="([^"]+)"[^>]*>/g)].map((match) => match[1]);
+const elementBindings = new Map(
+  [...taskFiveSidepanelSource.matchAll(/(\w+): document\.querySelector\(['"]#([^'"]+)['"]\)/g)]
+    .map((match) => [match[2], match[1]])
+);
+for (const id of staticButtonIds) {
+  const property = elementBindings.get(id);
+  const directListener = property
+    ? new RegExp(`elements\\.${property}\\??\\.addEventListener|elements\\.${property}\\.addEventListener`).test(taskFiveSidepanelSource)
+    : false;
+  const selectorMentions = (taskFiveSidepanelSource.match(new RegExp(`#${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g')) || []).length;
+  assert.ok(
+    directListener || selectorMentions >= 2,
+    `sidepanel static button #${id} must have direct or delegated action wiring`
+  );
+}
+const queriedStaticIds = [
+  ...taskFiveSidepanelSource.matchAll(/document\.querySelector\(['"]#([^'"]+)['"]\)|document\.getElementById\(['"]([^'"]+)['"]\)/g)
+].map((match) => match[1] || match[2]);
+for (const id of new Set(queriedStaticIds)) {
+  assert.match(taskFiveSidepanelHtml, new RegExp(`id="${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`), `sidepanel controller must not query missing DOM id #${id}`);
+}
+assert.match(taskFiveSidepanelSource, /tabSubtitle\?\.addEventListener\('click',[\s\S]{0,120}switchWorkspace\('subtitle'\)/, '字幕主 Workspace 必须有真实切换逻辑');
+assert.match(taskFiveSidepanelSource, /tabLearn\?\.addEventListener\('click',[\s\S]{0,120}switchWorkspace\('learn'\)/, '学习主 Workspace 必须有真实切换逻辑');
+assert.match(taskFiveSidepanelSource, /tabReview\?\.addEventListener\('click',[\s\S]{0,120}switchWorkspace\('review'\)/, '复习主 Workspace 必须有真实切换逻辑');
+assert.match(taskFiveSidepanelSource, /\['learn', 'review', 'tracker', 'queue'\]\.includes\(tabId\)[\s\S]{0,120}switchWorkspace\(tabId\)/, '程序化导航必须直接识别学习/复习等一级 Workspace');
+assert.doesNotMatch(taskFiveSidepanelSource, /tabId === 'ai'/, '旧 ai tab 已无消息生产者和 DOM 入口，不应继续保留无期限兼容分支');
+assert.match(taskFiveSidepanelSource, /tabTracker\?\.addEventListener\('click',[\s\S]{0,120}switchWorkspace\('tracker'\)/, '追踪更新必须是一级 Workspace，不得再作为侧栏中的抽屉');
+assert.match(taskFiveSidepanelSource, /tabQueue\?\.addEventListener\('click',[\s\S]{0,120}switchWorkspace\('queue'\)/, '转录队列必须是一级 Workspace，不得再作为侧栏中的抽屉');
+assert.match(taskFiveSidepanelHtml, /id="tab-tracker"/, '一级工作区导航必须直接包含追踪');
+assert.match(taskFiveSidepanelHtml, /id="tab-queue"/, '一级工作区导航必须直接包含转录');
+assert.ok(taskFiveSidepanelHtml.indexOf('id="tab-tracker"') < taskFiveSidepanelHtml.indexOf('id="tab-queue"'), '一级工作区导航中追踪应位于转录之前');
+assert.doesNotMatch(taskFiveSidepanelHtml, /aux-drawer|aux-drawer-scrim|tracker-drawer-close|queue-drawer-close/, '一级工作区不得保留旧的嵌套抽屉 DOM');
+assert.doesNotMatch(taskFiveSidepanelSource, /openAuxDrawer|closeAuxDrawer|activeAuxDrawer|headerTrackerButton|headerQueueButton/, '控制器不得保留旧的嵌套抽屉状态机');
+assert.match(taskFiveSidepanelSource, /subtitleLocalAsr\?\.addEventListener\('click',[\s\S]{0,120}enqueueCurrentVideoForLocalASR/, '字幕页本机转录按钮必须绑定当前视频的 local-ASR 流程');
+assert.match(taskFiveSidepanelSource, /subtitlePolish\?\.addEventListener\('click',\s*openSubtitlePolishModal\)/, '字幕页“校对”主按钮只负责打开闭环工作流，不应点击即产生隐藏复制副作用');
+assert.match(taskFiveSidepanelSource, /subtitlePolishCopyTask\?\.addEventListener[\s\S]{0,900}generateSubtitlePolishPrompt/, '校对工作流必须由明确的“复制校对任务”动作调用专用提示词');
+assert.match(taskFiveSidepanelSource, /subtitlePolishApply\?\.addEventListener[\s\S]+?applyPolishResult[\s\S]+?type: 'BSE_APPLY_SUBTITLE_PATCHES'/, '外部校对结果必须经过统一稀疏对齐器后回填当前字幕，而不是停留在复制提示词的半流程');
+assert.match(taskFiveSidepanelSource, /subtitlePolishTextarea\?\.addEventListener\('input'[\s\S]+?materializeCues:\s*false/, '校对实时预览只应解析 sparse patch 统计，不得为了预览复制整份长字幕');
+assert.match(taskFiveSidepanelSource, /subtitlePolishApply\?\.addEventListener[\s\S]+?materializeCues:\s*false[\s\S]+?BSE_APPLY_SUBTITLE_PATCHES/, 'Side Panel 应用校对时只发送 patch，完整 cue 数组只能由内容页权威 owner 构造一次');
+assert.match(taskFiveSidepanelHtml, /id="subtitle-polish-modal"[\s\S]+?id="subtitle-polish-copy-task"[\s\S]+?id="subtitle-polish-textarea"[\s\S]+?id="subtitle-polish-apply"/, '字幕校对必须提供复制任务、粘贴结果与应用修改的完整闭环 UI');
+assert.match(contentAppSource, /BSE_APPLY_SUBTITLE_PATCHES[\s\S]+?expectedTrackId[\s\S]+?expectedCueRevision[\s\S]+?cacheBody[\s\S]+?persistCurrentSubtitleState/, '字幕 patch 应同时校验媒体、轨道和 cue revision，并更新内存缓存与持久化缓存');
+assert.match(contentAppSource, /const correctionPromise = correctionStore\.recordCorrections[\s\S]+?Promise\.resolve\(correctionPromise\)[\s\S]+?state\.cues = nextCues[\s\S]+?sendResponse\(\{ ok: true/, '显式校对应用必须先持久化 correction patch，再提交内存字幕并向 Side Panel 报告成功');
+assert.match(contentAppSource, /function scheduleSessionSnapshot[\s\S]+?requestIdleCallback[\s\S]+?timeout:\s*750[\s\S]+?setTimeout\(writePendingSessionSnapshot,\s*120\)/, '长字幕校对后的 SessionSnapshot 应在空闲阶段合并写入，不能阻塞用户应用校对的关键路径');
+const publicStateMetaSource = contentAppSource.match(/function publicStateMeta\([^]*?\n  }\n\n  function publish/)?.[0] || '';
+assert.ok(publicStateMetaSource, '内容页必须提供轻量 state meta');
+for (const field of ['mediaKey:', 'revision:', 'cueRevision:', 'selectedTrackId:']) {
+  assert.ok(publicStateMetaSource.includes(field), `轻量 state meta 必须包含 ${field}`);
+}
+assert.doesNotMatch(publicStateMetaSource, /\bcues\s*:/, '轻量 state meta 不得携带完整 cues，Side Panel 恢复焦点时不能默认复制整份长字幕');
+assert.match(taskFiveSidepanelSource, /loadInitialState\(\{ preferLightweight = false \} = \{\}\)[\s\S]+?BSE_GET_STATE_META[\s\S]+?if \(unchanged\) return;[\s\S]+?BSE_GET_STATE/, 'Side Panel 已有同媒体状态时应先比较轻量 revision meta，只有版本变化才请求完整字幕 state');
+assert.match(taskFiveSidepanelSource, /window\.addEventListener\('focus'[\s\S]{0,180}preferLightweight:\s*true[\s\S]+?visibilitychange[\s\S]{0,220}preferLightweight:\s*true/, '普通 focus/visibility 恢复必须走轻量 state 握手，不能反复 structured-clone 长 cues');
+assert.match(contentAppSource, /persistCurrentSubtitleState\(\{ persistUnified: false, deferSnapshot: true \}\)/, '字幕 correction 已 durable commit 后只应延后秒开快照，不得同步重复序列化整份 cues');
+assert.match(contentAppSource, /function persistentSubtitleKey[\s\S]+?bili:\$\{bvid\}:p\$\{page\}/, '字幕持久化必须使用稳定视频/分P身份，不能随运行时 pN/CID 探测阶段分裂成多份缓存');
+assert.match(contentAppSource, /let cues = options\.force \? null : readCachedBody\(cacheKey\)/, '强制重新解析必须真实绕过内存 body cache，不能名为 force 实际仍命中旧正文');
+assert.match(contentAppSource, /cachedTrackId[\s\S]+?requestedTrackId[\s\S]+?exactTrackMatch/, '统一字幕缓存只能复用同一 trackId 的正文，禁止中文/英文或人工/自动轨道互相污染');
+assert.match(contentAppSource, /applyCorrections\(subtitleKey,[\s\S]+?track\.id/, '重新抓取 base cues 后应按稳定视频+轨道身份安全重放已保存校对，不重新跑昂贵 alignment');
+assert.match(contentAppSource, /recordCorrections\([\s\S]+?subtitleKey[\s\S]+?appliedPatches/, '用户校对 overlay 必须绑定稳定字幕缓存 key，而不是瞬时 runtime CID key');
+assert.match(contentAppSource, /const appliedPatches = \[\][\s\S]+?const changedCount = appliedPatches\.length[\s\S]+?const nextCues = state\.cues\.map/, '内容页必须先验证少量 patch，再只在确有修改时复制一次完整 cues');
+assert.match(taskFiveSidepanelSource, /function renderTranscript\(\)[\s\S]{0,260}currentWorkspace !== 'subtitle'/, '隐藏的学习/复习/追踪/转录工作区不得在状态更新时后台构造长字幕 DOM');
+assert.match(taskFiveSidepanelSource, /transcriptViewCacheBaseKey[\s\S]+?transcriptViewCache\.get\(currentTab\)[\s\S]+?cachedView\.nodes/, '同一 cueRevision 下时间轴/阅读两种字幕视图应复用已构造 DOM，而不是每次 type 切换全量重建');
+assert.match(taskFiveSidepanelSource, /const timestampView = transcriptViewCache\.get\('timestamp'\)[\s\S]+?rowsByIndex/, '播放进度必须同步更新被暂时 detach 的时间轴视图，复用 DOM 后不能出现旧 active 行');
+assert.doesNotMatch(sidePanelCss, /\.ai-import-modal-(?:overlay|card|header|footer|desc|title)/, '字幕校对与外部 AI 导入应共享中性 workflow modal 样式，不保留 AI 专属弹层样式事实源');
+assert.doesNotMatch(taskFiveSidepanelSource, /querySelector\(['"]#tab-ai['"]\)/, '学习/复习继续通过统一 AI Workspace 驱动，不得恢复旧 tab-ai');
+
+const dynamicActionSelectors = [
+  '.tracker-btn-copy', '.tracker-btn-preview-toggle', '.tracker-expand-btn', '.tracker-btn-retry-sub',
+  '.tracker-btn-rename', '.tracker-btn-batch-card', '.tracker-btn-watch', '.tracker-btn-read', '.tracker-btn-del',
+  '.btn-apply', '.btn-preview', '.btn-quick-copy', '.btn-copy', '.btn-download-txt', '.btn-download-srt', '.btn-retry', '.btn-remove',
+  '.btn-delete-tray-card', '.batch-tree-sec-btn', '.batch-tree-video-btn'
+];
+for (const selector of dynamicActionSelectors) {
+  assert.ok(taskFiveSidepanelSource.includes(selector), `dynamic action ${selector} must retain an implemented handler`);
+}
 const taskFiveBackgroundSource = fs.readFileSync(path.join(root, 'background/service-worker.js'), 'utf8');
 assert.match(
   taskFiveBackgroundSource,
@@ -3413,6 +4468,75 @@ assert.match(taskFiveSidepanelSource, /scope:\s*'batch'[\s\S]+?sessionId:\s*diag
 const taskFiveQueueSource = fs.readFileSync(path.join(root, 'core/queue.js'), 'utf8');
 assert.match(taskFiveQueueSource, /code:\s*'NATIVE_CAPTION_FALLBACK'/, 'unexpected native caption fallback must emit a stable structured diagnostic');
 assert.doesNotMatch(taskFiveQueueSource, /console\.warn\('\[BSE Queue\] 本机字幕回退:/, 'recoverable native caption fallback must not bypass structured diagnostics');
+assert.match(taskFiveQueueSource, /const STORAGE_KEY_SUMMARY\s*=\s*`\$\{STORAGE_KEY_QUEUE\}:summary`/, 'Queue 必须为隐藏工作区维护独立的轻量 summary 存储键');
+assert.match(taskFiveQueueSource, /const STORAGE_KEY_PROJECTION_PREFIX\s*=\s*`\$\{STORAGE_KEY_QUEUE\}:projection:`/, 'Queue schema v3 必须为每个完整 item 维护独立轻量 list projection');
+assert.match(taskFiveQueueSource, /const QUEUE_STORAGE_SCHEMA_VERSION\s*=\s*3/, 'Queue list projection migration 必须由 schema v3 显式门控');
+assert.match(taskFiveQueueSource, /function queueSummary\(items = \[\]\)[\s\S]{0,260}total:[\s\S]{0,120}pending:/, 'Queue summary 必须只从正式任务数组派生 total/pending，不能成为第二套执行状态');
+assert.match(taskFiveQueueSource, /async function getQueueSummary\(\)[\s\S]{0,520}storage\.get\(STORAGE_KEY_SUMMARY\)/, '隐藏 Queue 状态读取必须直接读取 summary，旧安装才允许一次兼容回填');
+assert.match(taskFiveSidepanelSource, /if \(!renderList\)[\s\S]{0,700}BSE_QUEUE_GET_SUMMARY[\s\S]{0,420}return;/, 'Side Panel 隐藏转录工作区时只能通过后台读取轻量 summary，不得加载 Queue 核心或构造完整 Queue DOM');
+assert.match(taskFiveQueueSource, /function queueUpdateProjection\(item\)[\s\S]{0,420}id:[\s\S]{0,180}stage:[\s\S]{0,180}progress:[\s\S]{0,180}stageHint:/, 'Queue 高频进度广播必须使用轻量 item 投影，不能把完整字幕 cues 跨进程广播');
+assert.match(taskFiveQueueSource, /if \(success\) \{[\s\S]{0,120}broadcastQueueUpdate\(itemSnapshot\)/, 'Queue saveItem 应由核心统一广播轻量进度更新');
+assert.doesNotMatch(offscreenSource, /sendMessage\(\{\s*type:\s*['"]BSE_QUEUE_UPDATED['"][\s\S]{0,120}item:/, 'Offscreen 不得在 Queue 核心广播之后再发送第二条重复进度通知');
+assert.match(taskFiveSidepanelSource, /function applyQueueRuntimeUpdate\(update\)[\s\S]+?queueCardById\.get[\s\S]+?queue-card-progress-fill/, '可见 Queue 的同阶段进度更新应只 patch 当前卡片，不得每秒重读并重建整份队列');
+assert.match(taskFiveQueueSource, /async function readQueueFromStorage\(\{ hydrateText = true \} = \{\}\)[\s\S]+?hydrateText \? runtimeItems\.map\(hydrateQueueItemForRuntime\) : runtimeItems/, 'Queue 完整 item 读取必须允许执行器跳过 plainText/Markdown/SRT 派生');
+const targetedQueueSaveSource = taskFiveQueueSource.match(/async function trySaveItemTargeted\(itemSnapshot\)[\s\S]*?(?=\n  async function saveItem)/)?.[0] || '';
+assert.match(targetedQueueSaveSource, /storage\.get\(lookupKeys\)/, 'Queue 高频/终态保存必须只通过 targeted lookup 校验当前 item');
+assert.match(targetedQueueSaveSource, /projectionStorageKey\(itemSnapshot\.id\)/, 'Queue targeted save 必须在同一 write 中同步当前 item projection');
+assert.match(taskFiveQueueSource, /function serializeQueueProjectionMutation\(mutator\)[\s\S]{0,260}readQueueProjectionFromStorage/, '普通 Queue mutation 必须允许以 projection 为工作集，避免读取历史 canonical items');
+assert.match(taskFiveQueueSource, /async function getQueueProjection\(\)[\s\S]{0,180}readQueueProjectionFromStorage/, 'Queue 必须提供只读取 list projection 的正式接口');
+assert.match(taskFiveQueueSource, /async function processPendingJobs\(\)[\s\S]+?getQueueProjection\(\)[\s\S]+?readQueueItemsByIds\(candidates\.map/, 'Queue executor 必须先从 projection 选 pending，再只读取本批候选 item');
+assert.match(taskFiveQueueSource, /async function exportQueueMergedMarkdown\(itemIds\)[\s\S]{0,700}getQueueProjection\(\)[\s\S]{0,700}readQueueItemsByIds\(targetIds\)/, '合并导出必须先按 projection 筛选，再只读取实际要导出的 canonical items');
+assert.match(taskFiveQueueSource, /snapshots\.forEach\(\(item\) => \{[\s\S]{0,260}itemStorageKey\(item\.id\)[\s\S]{0,180}projectionStorageKey\(item\.id\)[\s\S]{0,180}queueListProjection\(item\)/, '完整 item 与 list projection 必须进入同一个 storage values 对象，不能额外制造 projection write IPC');
+assert.match(taskFiveSidepanelSource, /BSE_QUEUE_GET', hydrateText: false/, 'Side Panel 转录列表必须通过后台只读取 queue list projection，不得把 canonical cues 搬进 Side Panel');
+assert.match(taskFiveSidepanelSource, /async function loadQueueItemDetail\(id\)[\s\S]{0,420}BSE_QUEUE_GET_ITEM/, 'Side Panel 只有显式单卡操作才应通过后台单项接口读取该任务 canonical cues');
+assert.doesNotMatch(taskFiveSidepanelSource, /BSE\.Queue\b/, 'Side Panel 不应再拥有第二份 Queue 核心；任务事实、存储与执行协议统一由 Service Worker 持有');
+assert.doesNotMatch(taskFiveSidepanelHtml, /\.\.\/core\/queue\.js/, 'Side Panel 不应解析完整 core/queue.js，只保留轻量 QueueUI 控制器');
+assert.doesNotMatch(taskFiveSidepanelHtml, /\.\.\/core\/native-host\.js/, 'Side Panel 不应建立第二份 Native Messaging client；Native Host 连接统一由 Service Worker 持有');
+assert.match(taskFiveBackgroundSource, /message\.hydrateText === false[\s\S]{0,180}getQueueProjection/, '跨上下文 BSE_QUEUE_GET 的轻量模式必须返回 list projection，而不是完整 item records');
+assert.match(taskFiveBackgroundSource, /BSE_QUEUE_ENQUEUE[\s\S]{0,500}toListProjection/, '跨上下文 enqueue 返回值也必须投影化，复用历史 done item 时不得把 cues 带回页面');
+assert.match(taskFiveBackgroundSource, /BSE_QUEUE_GET_ITEM[\s\S]{0,260}getItem\(message\.id\)/, '显式单项内容动作必须有只读取一个 canonical item 的后台通道');
+assert.match(taskFiveBackgroundSource, /BSE_QUEUE_GET_SUMMARY[\s\S]{0,260}getQueueSummary/, 'Queue summary 必须由 Service Worker 暴露轻量读取通道，Side Panel 不得直接加载 Queue 核心');
+assert.match(taskFiveBackgroundSource, /BSE_QUEUE_GET_SETTINGS[\s\S]{0,260}getSettings/, 'Queue 设置读取必须由 Service Worker 统一代理');
+assert.match(taskFiveBackgroundSource, /BSE_QUEUE_SAVE_SETTINGS[\s\S]{0,300}saveSettings/, 'Queue 设置写入必须由 Service Worker 统一代理');
+assert.match(taskFiveBackgroundSource, /BSE_FETCH_NATIVE_YOUTUBE_CAPTIONS[\s\S]{0,240}isTrustedExtensionPageSender/, 'YouTube 批量 Native captions 代理必须限制为可信扩展页调用');
+assert.doesNotMatch(fs.readFileSync(path.join(root, 'platform/youtube.js'), 'utf8'), /BSE\.NativeHost\b/, 'YouTube UI adapter 不应直接拥有 Native Host；批量 captions 必须通过 Service Worker 代理');
+assert.match(fs.readFileSync(path.join(root, 'platform/youtube.js'), 'utf8'), /fetchBatchNativeCaptions[\s\S]{0,1000}BSE_NATIVE_CANCEL/, 'YouTube 批量取消必须同时终止 UI Promise 并通知 Service Worker 取消真实 Native job');
+assert.match(feedInjectorSource, /BSE_QUEUE_GET', hydrateText: false[\s\S]+?function applyQueueRuntimeUpdate[\s\S]+?if \(!applyQueueRuntimeUpdate\(message\.item\)\) scheduleQueueSync/, 'Feed 应消费 Queue 轻量进度投影，同阶段进度不得每秒重新获取整份队列');
+assert.doesNotMatch(feedInjectorSource, /BSE\.(?:Queue|Tracker|AsrPolisher|Formatters)/, '轻量 Feed 注入器不得重新加载或直接调用 Queue/Tracker/AI/Formatter 核心；跨上下文数据统一走 Service Worker');
+assert.match(feedInjectorSource, /__BSE_FEED_INJECTOR_INSTALLED__/, 'Feed 动态补注入必须有单实例 guard，避免重复 MutationObserver/runtime listener');
+assert.match(feedInjectorSource, /BSE_ENSURE_VIDEO_RUNTIME/, 'B站普通页同文档切入视频页时，轻量 Feed bootstrap 必须能够按需请求完整视频运行时');
+assert.match(feedInjectorSource, /async function loadQueueItemDetail\(itemId\)[\s\S]{0,360}BSE_QUEUE_GET_ITEM/, 'Feed 完成态点击复制时才允许读取单个 canonical item');
+assert.match(feedInjectorSource, /queueAliasCache[\s\S]+?function findQueueItem[\s\S]+?queueAliasCache\.get/, 'Feed 应维护 id\/targetId 轻量索引，不能为每个视频按钮反复 Array.from 全队列线性搜索');
+assert.match(taskFiveQueueSource, /chrome\.tabs\.query\(\{ url: \['\*:\/\/\*\.youtube\.com\/\*', '\*:\/\/\*\.bilibili\.com\/\*'\] \}\)/, 'Queue 高频广播只应投递到支持站点标签页，不得每秒扫描并尝试消息所有浏览器标签');
+assert.match(taskFiveSidepanelSource, /renderTracks\(\);[\s\S]{0,120}renderTranscript\(\);[\s\S]{0,120}if \(currentWorkspace === 'tracker'\) updateQuickSubscribeBar/, '媒体状态更新时不得在隐藏 Workspace 后台刷新追踪作者卡或触发作者元数据网络补全');
+assert.match(taskFiveSidepanelSource, /loadAndRenderQueue\(\{ renderList: false \}\)/, 'Side Panel 首屏只应预热 Queue summary，不应无条件读取完整任务');
+assert.doesNotMatch(taskFiveSidepanelSource, /chrome\.storage\.onChanged[\s\S]{0,420}bse_transcription_queue_v1/, 'Side Panel 不应同时监听 Queue runtime 广播与 storage change 形成双刷新源');
+assert.doesNotMatch(feedInjectorSource, /chrome\.storage\.onChanged[\s\S]{0,420}bse_transcription_queue_v1/, 'Feed 按钮应只消费统一 Queue 广播，不得再叠加 storage change 同步');
+assert.match(taskFiveBackgroundSource, /if \(changes\?\.bse_transcription_queue_v1\)/, 'Service Worker 只保留旧整数组 Queue key 的 storage 唤醒作为迁移兼容');
+assert.doesNotMatch(taskFiveBackgroundSource, /startsWith\(['"]bse_transcription_queue_v1:item:/, '每秒 Queue item 进度持久化不得反向唤醒正在运行的 Orchestrator');
+const workerImportSource = taskFiveBackgroundSource.match(/importScripts\([\s\S]*?\);/)?.[0] || '';
+assert.doesNotMatch(workerImportSource, /core\/jszip\.js/, 'Service Worker 没有 ZIP 交付职责，不应在每次启动时解析 JSZip');
+const dynamicInjectionSource = taskFiveBackgroundSource.match(/async function injectContentScripts\([\s\S]*?(?=\nchrome\.runtime\.onInstalled)/)?.[0] || '';
+assert.doesNotMatch(dynamicInjectionSource, /core\/(?:asr-polisher|tracker|queue)\.js/, '动态视频运行时补注入也不得重新加载后台专属 Queue/Tracker/AI 模块');
+assert.match(taskFiveBackgroundSource, /async function ensureVideoRuntime\(tabId, url = ''\)[\s\S]{0,900}videoRuntimeLoads\.get\(tabId\)[\s\S]{0,520}BSE_VIDEO_RUNTIME_PING[\s\S]{0,360}injectContentScripts\(tabId, url\)/, '视频运行时按 tab single-flight：先 ping，未安装才补注入，多个并发请求不得重复 executeScript');
+assert.match(taskFiveBackgroundSource, /BSE_ENSURE_VIDEO_RUNTIME[\s\S]{0,420}ensureVideoRuntime\(tabId, tabUrl\)/, '同文档路由进入播放页时必须统一经过 ensureVideoRuntime');
+assert.match(taskFiveBackgroundSource, /async function injectFeedContentScript[\s\S]{0,360}content\/feed-injector\.js/, '扩展更新补注入时普通站点页只能加载轻量 Feed runtime');
+assert.match(taskFiveBackgroundSource, /if \(isMatchingVideoUrl\(tab\.url\)\)[\s\S]{0,180}ensureVideoRuntime\(tab\.id, tab\.url\)/, '扩展更新时只有真实视频页才允许确保完整运行时');
+assert.equal((taskFiveSidepanelSource.match(/BSE_ORCHESTRATOR_NOTIFY/g) || []).length, 1, 'Side Panel 只应保留一次 pending-recovery wake；enqueue 成功后不得重复唤醒 Orchestrator');
+assert.match(taskFiveSidepanelSource, /let queueRecoveryWakeSent = false;/, 'Queue recovery wake 必须拥有显式 pending-epoch 状态');
+const queueProjectionLoadSource = taskFiveSidepanelSource.match(/async function performQueueLoadAndRender\([\s\S]*?(?=\n  async function loadAndRenderQueue)/)?.[0] || '';
+assert.match(queueProjectionLoadSource, /!queueRecoveryWakeSent[\s\S]{0,420}BSE_ORCHESTRATOR_NOTIFY/, 'Queue 可见页的恢复唤醒必须按 pending epoch 去重，进度广播不得反复 wake');
+assert.match(taskFiveBackgroundSource, /localLlmControllers\s*=\s*new Map\(\)[\s\S]+?BSE_CANCEL_LOCAL_LLM[\s\S]+?controller\.abort/, '长字幕精修取消必须真正中止正在进行的后台 LLM HTTP 请求，而不是只停止下一批');
+assert.match(taskFiveBackgroundSource, /\.finally\(\(\) => \{[\s\S]+?localLlmControllers\.delete\(requestId\)/, '后台 LLM AbortController 必须在请求结束后释放，不能形成长期句柄泄漏');
+assert.match(taskFiveAsrPolisherSource, /async function planVisualEvidence[\s\S]+?signal = null[\s\S]+?invokeLlm\(\{[\s\S]+?signal/, '图文讲义阶段一规划必须透传 AbortSignal，切视频或字幕更新后不得继续占用旧 LLM 请求');
+assert.match(taskFiveAsrPolisherSource, /async function generateCourseNotes[\s\S]+?signal = null[\s\S]+?invokeLlm\(\{[\s\S]+?signal/, '最终学习/复习生成必须透传 AbortSignal');
+assert.match(taskFiveSidepanelSource, /cancelActiveAiGeneration\('字幕内容已更新'\)[\s\S]+?aiGenerationRevision\+\+/, '字幕校对或刷新改变 cueRevision 时必须主动取消旧学习生成，而不是只在结果回来后丢弃');
+assert.match(taskFiveSidepanelSource, /capturePlannedEvidence\(plannedEvidence[\s\S]+?signal:\s*generationSignal/, '阶段一播放器取帧循环也必须响应同一生成取消信号');
+const restoreNoteFunctionSource = taskFiveSidepanelSource.match(/async function restoreNoteFromCache\([\s\S]*?(?=\n  \/\*\* @returns)/)?.[0] || '';
+assert.match(restoreNoteFunctionSource, /error\?\.name === 'AbortError'\) return;/, '用户切走学习页取消 IndexedDB/图片恢复时必须静默退出');
+assert.match(restoreNoteFunctionSource, /学习产物缓存恢复失败/, '非取消类缓存异常仍应保留可诊断提示');
+assert.match(taskFiveBackgroundSource, /BSE_MEDIA_CONTEXT_UPDATE[\s\S]{0,520}ownerMatches[\s\S]{0,300}BSE_MEDIA_CONTEXT_BROADCAST/, 'MediaContext 轻量更新只有 owner 匹配时才允许写后台缓存并广播，禁止视频切换瞬间发送无效语境');
+assert.match(taskFiveBackgroundSource, /BSE_DIAGNOSTIC_APPEND[\s\S]{0,520}eventMediaKey[\s\S]{0,300}diagnostics/, '轻量媒体诊断必须按 mediaKey 合并进后台 tab state，Side Panel 重开时仍能恢复最新诊断且不搬运 cues');
 assert.match(taskFiveSidepanelSource, /(?:sourceLanguage\s*,|sourceLanguage:\s*sourceLanguage)/, 'batch enqueue must forward the exact selected source language');
 assert.match(taskFiveSidepanelSource, /queue-source-language/, 'queue batch input must expose a source-language control');
 assert.ok(
@@ -3431,47 +4555,151 @@ assert.doesNotMatch(taskFiveSidepanelHtml, /id="btn-drag-all-tray"/, '侧边栏�
 assert.doesNotMatch(taskFiveSidepanelSource, /dataTransfer\.items\.add\(file\)/, '截图托盘不得把脚本生成 File 的 HTML5 drag 当成可靠的外部上传通道');
 assert.match(taskFiveSidepanelHtml, /复制精选拼图/, '外部 AI 的直接投递入口应使用可验证的剪贴板拼图方案');
 const taskFiveSidepanelCss = fs.readFileSync(path.join(root, 'sidepanel/sidepanel.css'), 'utf8');
+assert.match(taskFiveSidepanelCss, /button:focus-visible[\s\S]{0,260}outline:\s*2px solid var\(--primary\)/, '所有按钮必须共享可见键盘焦点，不得只给 AI 区单独做 focus ring');
+assert.match(taskFiveSidepanelCss, /button:disabled[\s\S]{0,220}cursor:\s*not-allowed/, '所有不可用按钮必须有统一 disabled 反馈');
+assert.match(taskFiveSidepanelCss, /button\[aria-busy="true"\][\s\S]{0,100}cursor:\s*progress/, '异步按钮必须有统一 busy 光标语义');
+assert.match(taskFiveSidepanelCss, /\.primary-tab\.active\s*\{[^}]*background:\s*var\(--active-bg\)[^}]*border-color:\s*var\(--active-border\)/s, '一级工作区必须共享统一 active 视觉状态');
+assert.match(taskFiveSidepanelCss, /\.workspace-nav-badge\s*\{[^}]*background:\s*#ff4757/s, '追踪未读与转录进行中状态必须在一级导航中提供紧凑 badge');
+assert.match(taskFiveSidepanelCss, /@media\s*\(prefers-reduced-motion:\s*reduce\)/, '侧边栏交互动画必须尊重系统减少动态效果设置');
 assert.doesNotMatch(taskFiveSidepanelCss, /\.note-image-wrap\s*\{[^}]*max-height:\s*220px[^}]*overflow:\s*hidden/s, '最终报告图片不得以固定 220px 高度裁掉板书、文档或代码内容');
 assert.match(taskFiveSidepanelCss, /\.note-img-thumbnail\s*\{[^}]*object-fit:\s*contain/s, '最终报告图片应完整 contain 显示，而不是 cover 裁切');
 assert.match(taskFiveSidepanelSource, /openNoteImagePreview/, 'zoom-in 光标必须对应真实的原图预览行为');
-assert.match(taskFiveSidepanelHtml, /class="ai-modes-bar" role="tablist"/, 'AI 模式选择应使用单一 segmented tablist，而不是四个互相竞争的独立大按钮');
-assert.match(taskFiveSidepanelSource, /activateAiMode[\s\S]+?aria-selected/, '模式切换必须同步视觉状态与 aria-selected 状态');
+assert.match(taskFiveSidepanelHtml, /id="ai-learn-mode-shell"[\s\S]+?class="ai-modes-bar" role="tablist"/, '学习 Workspace 应使用轻量任务选择，不再混入技术型 Prompt 入口');
+assert.match(taskFiveSidepanelHtml, /id="ai-review-mode-shell"[\s\S]+?class="ai-modes-bar" role="tablist"/, '复习 Workspace 应拥有自己的任务选择，而不是被固定成单一自测模式');
+assert.match(taskFiveSidepanelSource, /syncAiWorkspacePresentation[\s\S]+?aria-selected/, '任务切换必须同步视觉状态与 aria-selected 状态');
+assert.match(taskFiveSidepanelSource, /let lastLearnAiMode\s*=\s*['"]course_notes['"]/, '学习 Workspace 应拥有独立的最后任务状态');
+assert.match(taskFiveSidepanelSource, /let lastReviewAiMode\s*=\s*['"]summary['"]/, '复习 Workspace 应拥有独立的最后任务状态，并默认从核心速览进入');
+assert.match(taskFiveSidepanelSource, /config\.workspace === 'learn'\) lastLearnAiMode = mode[\s\S]+?config\.workspace === 'review'\) lastReviewAiMode = mode/, '学习与复习必须分别记住最后选择，互不污染');
+assert.match(taskFiveSidepanelSource, /const hotAiArtifacts = new Map\(\)[\s\S]+?HOT_AI_ARTIFACT_LIMIT = 6/, '同一视频的六种学习/复习产物应使用有界内存热缓存，避免 type 切换重复读取 storage/IndexedDB');
+assert.match(taskFiveSidepanelSource, /const hotAiDomViews = new Map\(\)[\s\S]+?HOT_AI_DOM_LIMIT = 3/, '纯文本长笔记 DOM 热缓存必须严格限量，不能为了切换速度无界保留整篇 DOM');
+assert.match(taskFiveSidepanelSource, /canCacheRenderedHtml = currentGeneratedNote\.mode !== 'course_notes'/, '图文讲义不得长期缓存包含截图 data URL 的 renderedHtml，避免图片数据在 HTML 字符串中再复制一份');
+assert.match(taskFiveSidepanelSource, /resetAiWorkbenchForMediaChange[\s\S]+?hotAiArtifacts\.clear\(\)[\s\S]+?hotAiDomViews\.clear\(\)/, '切视频时必须释放学习产物与长 DOM 热缓存，避免跨视频内存滞留');
+assert.match(taskFiveSidepanelSource, /const hot = readHotAiArtifact\(artifactKey, mode\)[\s\S]+?currentGeneratedNote = hot[\s\S]+?return;/, '已看过的学习/复习 type 应优先命中内存产物，不得每次切回都读取持久层');
+assert.doesNotMatch(taskFiveSidepanelSource, /currentWorkspace\s*=\s*currentAiMode\s*===\s*['"]deep_qa['"]/, '二级 AI mode 不得反向控制一级 Workspace');
+assert.match(taskFiveSidepanelCss, /\.ai-header-left\s*\{[^}]*grid-template-areas:\s*[\s\S]*"title model"[\s\S]*"desc desc"/s, '学习/复习页顶部应压成标题+模型状态、说明两层，避免侧栏首屏被三行元信息占满');
+assert.match(taskFiveSidepanelHtml, /<button class="ai-model-badge"[^>]*aria-controls="ai-settings-drawer"/, '模型状态必须是可键盘访问的真实按钮，并明确控制 AI 设置面板');
+assert.match(taskFiveSidepanelSource, /aiModelBadge\?\.setAttribute\('aria-expanded', String\(willOpen\)\)/, '模型状态按钮的 aria-expanded 必须与设置面板实际展开状态同步');
+assert.match(taskFiveSidepanelHtml, /id="ai-input-learn-model"[\s\S]+?id="ai-input-review-model"/, '学习与复习应各自拥有模型选择，而不是两个页面伪装成两套却共用一个模型输入框');
+assert.doesNotMatch(taskFiveSidepanelHtml, /id="ai-input-model"/, '共享 AI 设置不应继续保留语义不清的单一“生成模型”输入框');
+assert.match(taskFiveSidepanelHtml, /id="ai-settings-scope"[^>]*>接口与凭证由学习、复习共享/, 'AI 设置面板必须明确告诉用户 endpoint/API Key 是共享连接层');
+assert.doesNotMatch(taskFiveSidepanelSource, /function getWorkspaceAiModel/, 'Workspace 模型选择规则应由 AI 核心统一维护，Side Panel 不应保留第二套解析器');
+assert.match(taskFiveAsrPolisherSource, /function resolveAiModel[\s\S]+?scope === 'learn'[\s\S]+?scope === 'review'/, 'AI 核心必须统一解析学习/复习模型，避免其他调用入口绕过 Workspace 分流');
+assert.match(taskFiveSidepanelSource, /saveAiSettings\(\{[\s\S]+?learnModel:\s*draft\.learnModel[\s\S]+?reviewModel:\s*draft\.reviewModel/, '保存设置时必须一次持久化共享连接与学习/复习两个模型');
+assert.match(taskFiveSidepanelSource, /async function loadAiConfigToUi[\s\S]+?\(!refresh && savedAiConfig\)[\s\S]+?getAiSettings/, '学习/复习切换应优先复用内存 AI 配置，不能每次都重复跨 storage 读取同一份 endpoint/key/model');
+assert.match(taskFiveSidepanelSource, /AI_STATUS_PROBE_CACHE_LIMIT\s*=\s*6[\s\S]+?aiStatusProbeCache = new Map\(\)[\s\S]+?aiStatusProbeCache\.get\(probeKey\)/, '学习/复习不同模型的服务探测结果应分别短时缓存，来回切 Workspace 不得重复请求或串用上一模型状态');
+assert.match(taskFiveSidepanelSource, /const preserveDraft = Boolean\(savedAiConfig && elements\.aiSettingsDrawer && !elements\.aiSettingsDrawer\.hidden\)/, '切换学习/复习时不得因为后台配置刷新覆盖用户尚未保存的 AI 设置草稿');
+assert.match(taskFiveSidepanelSource, /subtitlePolishContext\.promptText[\s\S]+?generateSubtitlePolishPrompt/, '同一字幕版本重复复制校对任务时应复用已构造的长 Prompt，避免反复拼接整份字幕');
+assert.match(taskFiveSidepanelCss, /\.ai-workspace-model-field\.is-current\s*\{/, '设置面板应明确高亮当前工作区对应的模型配置，避免用户不知道正在配置哪一页');
+assert.match(taskFiveSidepanelCss, /\.review-protocol\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:/s, '自测三阶段流程应使用稳定网格，不得在窄侧栏随机折成两行');
 assert.match(taskFiveSidepanelCss, /\.ai-action-toolbar\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:/s, '主生成动作与次级工具应使用稳定网格层级，避免侧栏宽度变化时随意换行');
 assert.match(taskFiveSidepanelCss, /\.ai-external-flow-head/, '外部 AI 工作流应作为有标题的次级分组，而不是另一排同权重 CTA');
 assert.match(taskFiveSidepanelCss, /@media\s*\(max-width:\s*430px\)/, 'AI 工作台必须为窄侧栏提供明确响应式布局');
-assert.doesNotMatch(taskFiveSidepanelCss, /#0f8fd6|#5b5ce2/, '主生成按钮不得硬编码蓝紫渐变，必须动态跟随主题色 var(--primary)');
-assert.match(taskFiveSidepanelCss, /\.btn-ai-run\s*\{[^}]*background:\s*linear-gradient\([^;]*var\(--primary\)/s, '主生成按钮应使用基于 var(--primary) 派生的动态主题渐变');
-assert.match(taskFiveSidepanelCss, /\.btn-ai-tool\s*\{[^}]*height:\s*32px/s, '次级工具按钮高度应与外部 AI 步骤按钮统一为 32px');
-assert.match(taskFiveSidepanelCss, /\.btn-ai-subtool\s*\{[^}]*height:\s*32px/s, '外部协作步骤按钮高度应保持 32px');
-assert.match(taskFiveSidepanelCss, /\.ai-action-toolbar\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/s, '工具栏网格应为规范的 3 列均分结构');
-assert.match(taskFiveSidepanelCss, /\.btn-ai-run\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/s, '主生成按钮应通栏展示，避免在常见侧栏宽度下挤压次级工具');
+assert.doesNotMatch(taskFiveSidepanelCss, /#0f8fd6|#5b5ce2/, '主生成按钮不得保留散落的历史蓝紫色常量');
+assert.match(taskFiveSidepanelCss, /--on-primary:\s*#[0-9a-f]{6}/i, '主题系统必须显式定义 primary 填充上的文字颜色，不能默认所有主题都用白字');
+assert.match(taskFiveSidepanelCss, /\[data-theme="bilibili"\][\s\S]{0,900}--on-primary:\s*#0f172a/i, 'B站亮青主题必须使用高对比深色 on-primary 文本');
+assert.match(taskFiveSidepanelCss, /\.btn-ai-run\s*\{[^}]*background:\s*linear-gradient\([^;]*var\(--action-primary-start\)[^;]*var\(--action-primary-end\)[^}]*color:\s*var\(--action-primary-text\)/s, '主生成按钮应只消费主题级 action token，不再维护组件级主题分支');
+assert.doesNotMatch(taskFiveSidepanelCss, /\[data-theme="(?:dark|light|bilibili|youtube)"\]\s+\.btn-ai-run/, 'AI 主按钮不得重新引入按主题散落的组件覆写');
+assert.doesNotMatch(taskFiveSidepanelCss, /background:\s*var\(--primary\)[^}]{0,180}color:\s*#(?:fff|ffffff)/is, 'solid primary 填充上的文字必须使用 --on-primary，避免亮主题色叠白字导致对比不足');
+assert.match(taskFiveSidepanelCss, /\.btn-ai-tool\s*\{[^}]*height:\s*28px/s, '次级工具按钮应压到 28px，把视觉优先级让给长笔记正文');
+assert.match(taskFiveSidepanelCss, /\.btn-ai-subtool\s*\{[^}]*height:\s*28px/s, '外部协作步骤按钮应与次级工具保持同一紧凑密度');
+assert.match(taskFiveSidepanelCss, /\.ai-action-toolbar\s*\{[^}]*grid-template-columns:\s*repeat\(6,\s*minmax\(0,\s*1fr\)\)/s, '工具栏应使用 6 列底网格，让内置 AI 与外部 AI 成为同一层的两种执行方式');
+assert.match(taskFiveSidepanelCss, /\.btn-ai-run\s*\{[^}]*grid-column:\s*span\s*3[^}]*height:\s*32px[^}]*font-size:\s*10\.75px/s, '内置 AI 主动作应占半行但保持紧凑，不能比正文更抢视觉权重');
+assert.match(taskFiveSidepanelCss, /\.ai-external-entry\s*\{[^}]*grid-column:\s*span\s*3[^}]*border-style:\s*solid/s, '外部 AI 入口应与内置生成并列，并以正式执行方式而不是虚线占位控件呈现');
 assert.match(taskFiveSidepanelCss, /\.ai-progress-box\s*\{[^}]*var\(--primary\)/s, 'AI 进度提示框背景与边框必须使用主题色派生');
 assert.doesNotMatch(taskFiveSidepanelCss, /\.ai-note-placeholder\s*\{[^}]*grid-template-columns:\s*36px/s, 'AI 提示占位框不得使用固定 36px 强行挤压标题为纵向细条');
 assert.match(taskFiveSidepanelCss, /\.ai-note-placeholder\s*\{[^}]*display:\s*flex/s, 'AI 提示占位框应使用弹性容器自然排布图标与文本主体');
 assert.match(taskFiveSidepanelHtml, /class="ai-note-placeholder"[\s\S]+?class="placeholder-icon"[\s\S]+?class="placeholder-body"/, 'AI 提示占位框应包含规范的图标与文本主体包裹层');
-assert.match(taskFiveSidepanelCss, /\.ai-note-content\s*\{[^}]*overflow-wrap:\s*break-word/s, 'AI 报告正文必须包含长文本与宽元素溢出保护');
+assert.match(taskFiveSidepanelCss, /\.ai-note-content\s*\{[^}]*overflow-wrap:\s*anywhere/s, 'AI 报告正文必须允许超长术语与 URL 在窄侧栏安全换行');
+assert.match(taskFiveSidepanelCss, /\.ai-note-content\s*\{[^}]*font-size:\s*var\(--ai-note-font\)[^}]*line-height:\s*1\.78[^}]*color:\s*var\(--text-body\)/s, '长笔记正文必须使用独立阅读字号和充足行高，控制区字号不能反过来主导页面');
+assert.match(taskFiveSidepanelCss, /\.note-rendered-content > p,[\s\S]+?content-visibility:\s*auto[\s\S]+?contain-intrinsic-size:\s*auto\s+112px/, '长学习笔记的屏幕外正文块应延迟布局和绘制，避免一次性渲染整篇内容');
+assert.match(taskFiveSidepanelCss, /\.cue\s*\{[^}]*content-visibility:\s*auto[^}]*contain-intrinsic-size:\s*auto\s+44px/s, '长时间轴字幕的屏幕外 cue 应延迟布局绘制');
+assert.match(taskFiveSidepanelCss, /\.paragraph\s*\{[^}]*content-visibility:\s*auto[^}]*contain-intrinsic-size:\s*auto\s+96px/s, '长阅读模式字幕段落应延迟布局绘制');
+assert.match(taskFiveSidepanelSource, /function scheduleTranscriptCacheRelease[\s\S]+?transcriptViewCache\.clear\(\)[\s\S]+?renderedMediaKey = null[\s\S]+?querySelectorAll\('\.cue, \.paragraph'\)[\s\S]+?30 \* 1000/, '离开字幕 Workspace 较久后必须同时释放缓存引用和真实字幕 DOM，不能只清 Map 却让上千节点继续挂在隐藏容器');
+assert.match(taskFiveSidepanelSource, /function scheduleAiWorkingSetRelease[\s\S]+?hotAiArtifacts\.clear\(\)[\s\S]+?hotAiDomViews\.clear\(\)[\s\S]+?runtimePersisted[\s\S]+?60 \* 1000/, '离开学习/复习较久后应释放可重建的长笔记工作集，但只有已经持久化的 payload 才允许被清理');
+assert.match(taskFiveSidepanelSource, /function renderCurrentAiArtifact[\s\S]+?aiWorkspaceVisible[\s\S]+?if \(!aiWorkspaceVisible\) return true/, '后台生成在隐藏 Workspace 完成时不得构造长 Markdown DOM，只保存当前 artifact 并在用户回来后按需展示');
+assert.match(taskFiveSidepanelSource, /currentArtifactMatches[\s\S]+?if \(currentArtifactMatches\)[\s\S]+?renderCurrentAiArtifact\(\)/, '当前内存里存在未保存或刚生成的匹配产物时必须优先直接恢复，不能因 DOM 回收重新读取旧持久缓存覆盖它');
+assert.match(taskFiveSidepanelSource, /function scheduleQueueWorkingSetRelease[\s\S]+?queueCache = \[\][\s\S]+?queueList\?\.replaceChildren\(\)[\s\S]+?60 \* 1000/, '离开转录 Workspace 较久后应释放完整 Queue 数据与卡片 DOM，隐藏页只保留轻量 summary');
+assert.match(taskFiveSidepanelSource, /diagnosticTechnical\?\.open[\s\S]+?renderedTechnicalDiagnosticsSignature/, '折叠的技术诊断不得在每次状态广播时重新格式化数百条日志，展开后才按变化物化正文');
+assert.match(taskFiveSidepanelSource, /function ingestMediaDiagnosticsIncremental[\s\S]+?canAppendOnly[\s\S]+?list\.slice\(previousCount\)/, '同一媒体诊断 session 的 full-state 广播只应 ingest 新增尾部，不能每次从第一条历史日志重新遍历');
+assert.match(taskFiveSidepanelSource, /trackerSearchTimer[\s\S]+?setTimeout\(\(\) => \{[\s\S]+?renderTrackerList\(\)[\s\S]+?100\)/, '追踪搜索应合并连续键入，避免最多百张卡片在每个按键上同步全量重建');
+assert.match(taskFiveSidepanelSource, /function loadTrackerSummary[\s\S]+?getTrackerSummary[\s\S]+?updateTrackerCountsAndBadge\(summary\)/, '非追踪 Workspace 的一级导航 badge 必须读取轻量 Tracker summary，不得为此替换 subscriptionsCache 或加载完整历史');
+assert.doesNotMatch(taskFiveSidepanelCss, /\.cue\s*\{[^}]*transition:\s*all/s, '上千条 cue 不应对 all 属性创建过宽的 transition 跟踪');
+assert.match(taskFiveSidepanelCss, /--ai-note-font:\s*clamp\(13\.5px,[^;]+15px\)/s, '阅读字号应在窄侧栏与宽侧栏之间响应式增长，而不是固定在 12px 级');
+assert.match(taskFiveSidepanelCss, /\.ai-mode-pill\s*\{[^}]*min-height:\s*28px[^}]*font-size:\s*var\(--ai-control-font\)/s, '学习/复习任务选择应保持紧凑，视觉上低于正文内容');
+assert.match(taskFiveSidepanelCss, /@media\s*\(max-width:\s*560px\)[\s\S]{0,180}\.ai-mode-kind\s*\{[^}]*display:\s*none/s, '典型侧栏宽度应隐藏任务副标签，只保留真正需要决策的任务名');
+assert.match(taskFiveSidepanelCss, /\.note-quote\s*\{[^}]*color:\s*var\(--text\)[^}]*font-size:\s*1em[^}]*font-weight:\s*540/s, '引用块是知识内容而非辅助元信息，必须维持正文级字号与更高文字对比');
+assert.match(taskFiveSidepanelCss, /\.note-table tr:nth-child\(even\)\s*\{[^}]*color-mix\([^}]*var\(--surface-2\)[^}]*var\(--bg\)/s, 'Markdown 表格斑马纹必须由主题 surface token 派生，不能只在暗色主题可见');
+assert.match(taskFiveSidepanelCss, /\.note-table\s*\{[^}]*font-size:\s*\.93em/s, '表格属于笔记正文，字号只能轻微收敛，不能重新掉回难读的小字');
+assert.match(taskFiveSidepanelCss, /--note-code-bg:\s*#0d1117[\s\S]+?\[data-theme="light"\][\s\S]+?--note-code-bg:\s*#f6f8fa/s, '代码块必须有独立的暗色/浅色阅读背景，而不是浅色主题仍强制黑底');
+assert.match(taskFiveSidepanelCss, /\.math-block\s*\{[^}]*color:\s*var\(--text\)/s, '公式属于正文内容，不能把主题强调色当作公式正文颜色');
+assert.doesNotMatch(taskFiveSidepanelHtml, /ai-note-result-container/, '最终笔记应直接流入学习/复习 Workspace，不再套一层会压缩长文的结果卡片');
+assert.match(taskFiveSidepanelHtml, /<article class="ai-note-content"[^>]*id="ai-note-content"/, '最终 Markdown 应使用独立文档语义直接呈现在工作区中');
+assert.match(taskFiveSidepanelHtml, /<img class="brand-mark" src="\.\.\/icons\/icon-32\.png"[^>]*>/, 'Side Panel 左上角必须使用打包的真实扩展图标，不再用字母 S 伪造品牌图标');
+assert.match(taskFiveSidepanelCss, /\.ai-note-content\s*\{[^}]*max-width:\s*100%[^}]*min-width:\s*0[^}]*overflow-x:\s*hidden/s, '最终笔记 flex item 必须允许收缩并把宽内容交给表格/代码等局部滚动容器');
+assert.match(taskFiveSidepanelCss, /\.note-table-wrap\s*\{[^}]*max-width:\s*100%[^}]*overflow-x:\s*auto/s, 'Markdown 表格只能在自身容器横向滚动，不能撑宽整篇笔记');
+assert.match(taskFiveSidepanelCss, /\.note-code-wrap\s*\{[^}]*max-width:\s*100%[\s\S]*?\.note-code-block\s*\{[^}]*overflow-x:\s*auto/s, '代码块应在局部滚动层容纳长代码，不让工作区横向溢出');
 assert.doesNotMatch(taskFiveSidepanelHtml, />\s*1\.\s*复制规划词\s*</, '外部 AI 回流会发生两次，不应继续用错误的线性 1/2/3 编号误导操作顺序');
-assert.match(taskFiveSidepanelSource, /const isDeepNotes\s*=\s*currentAiMode\s*===\s*'course_notes'[\s\S]+?aiExternalToolbar\.hidden\s*=\s*!isDeepNotes/, '画面规划型外部 AI 工作流只应出现在学习讲义模式');
-assert.match(taskFiveSidepanelSource, /emptyStateCopy[\s\S]+?summary[\s\S]+?deep_qa/, '模式切换应同步更新空状态说明，而不是只换生成按钮文案');
+assert.match(taskFiveSidepanelSource, /syncExternalAiPanelState[\s\S]+?currentAiMode === 'course_notes'[\s\S]+?aiExternalPlanStage\.hidden\s*=\s*!isVisualExternalFlow/, '外部 AI 应作为所有学习产物的替代执行路径，但只有图文讲义暴露取帧规划阶段');
+assert.match(taskFiveSidepanelSource, /visualPlanReady[\s\S]+?aiExternalResultStage\.hidden\s*=\s*isVisualExternalFlow\s*&&\s*!visualPlanReady/, '图文外部协作在阶段一未完成前不得同时暴露阶段二操作，用户一次只需要理解当前步骤');
+assert.match(taskFiveSidepanelSource, /aiExternalResetPlan\?\.addEventListener[\s\S]+?manualFrames\s*=\s*manualFrames\.filter\(\(frame\) => frame\?\.source !== 'planned'\)/, '重新规划只应清除自动规划帧并保留用户手动截图，避免重做步骤造成额外劳动');
+assert.match(taskFiveSidepanelCss, /\.ai-external-stage\.is-complete \.ai-external-stage-actions\s*\{[^}]*display:\s*none/s, '阶段一完成后旧操作应自动收起，只保留轻量完成状态与重新规划入口');
+assert.match(taskFiveSidepanelSource, /if \(currentAiMode !== 'course_notes'\)[\s\S]+?buildCourseNotePrompt[\s\S]+?mode:\s*currentAiMode/, '所有纯文本学习/复习任务必须能一次复制完整外部 AI 任务，不依赖视觉规划流程');
+assert.match(taskFiveSidepanelSource, /const importMode = currentAiMode[\s\S]+?mode:\s*importMode/, '外部 AI 最终 Markdown 必须按当前学习/复习模式保存，不能强制落到 course_notes');
+assert.match(taskFiveSidepanelSource, /externalVideoPlan\s*=\s*\{[\s\S]+?summary:[\s\S]+?chapters,[\s\S]+?visualRequests:[\s\S]+?visualEvidence/, '外部 AI 导入阶段一规划后必须保留完整章节骨架，不能只留下截图结果');
+assert.match(taskFiveSidepanelSource, /buildCourseNotePrompt\?\.\(\{[\s\S]{0,420}videoIR:\s*externalVideoPlan/, '外部 AI 阶段二必须复用阶段一导入的章节规划，不能重新从字幕规划一遍');
+assert.match(taskFiveSidepanelSource, /function buildPlannedEvidenceFrame[\s\S]+?chapterId:\s*request\.chapterId[\s\S]+?expectedSurface:\s*request\.expectedSurface \|\| request\.contentHint/, '规划截图必须通过统一证据构造 seam 保留 chapterId 与视觉类型到最终合成层');
+assert.match(taskFiveFormattersSource, /note-timeline-heading[\s\S]+?note-timeline-jump[\s\S]+?data-seek/, '最终笔记的时间范围大标题必须渲染为真实可点击的视频回跳入口');
+assert.match(taskFiveSidepanelSource, /const isPlanImport = externalImportKind === 'plan'[\s\S]+?const parsedJson = isPlanImport/, '规划 JSON 与最终 Markdown 必须由显式导入入口区分，不能再根据内容自动猜测当前步骤');
+assert.match(taskFiveSidepanelHtml, /id="ai-btn-import-plan"[\s\S]+?id="ai-btn-open-import-modal"/, '图文协作必须分别提供“导入规划”和“导入结果”，避免一个入口同时承担两种协议');
+assert.match(taskFiveSidepanelSource, /aiBtnExternalToggle\.addEventListener\('click', \(\) => \{[\s\S]{0,180}externalPanelOpen = !externalPanelOpen[\s\S]{0,120}syncExternalAiPanelState/, '外部 AI 主入口只负责展开/收起协作流程，不得点击即产生隐式复制副作用');
+assert.doesNotMatch(taskFiveSidepanelSource, /aiBtnExternalToggle\.addEventListener\('click'[\s\S]{0,400}copyCurrentTextTaskForExternalAi/, '外部 AI 主入口不得再次偷偷复制纯文本任务');
+assert.match(taskFiveSidepanelSource, /AI_MODE_CONFIG[\s\S]+?course_notes[\s\S]+?summary[\s\S]+?deep_qa/, '学习/复习文案与能力应由单一 mode config 驱动，避免多处分支漂移');
+assert.match(taskFiveSidepanelSource, /const uiText = \(key, params\) => BSE\.I18n\?\.t\(key, params\) \|\| key/, '学习/复习共享 UI 必须使用显式模块级 i18n seam，避免依赖其他函数的局部 t 变量');
+assert.match(taskFiveSidepanelSource, /function applyReviewRecallProtection[\s\S]+?review-flip-card[\s\S]+?review-answer-disclosure/, '自测页应优先逐题隐藏答案，并在外部结果不满足配对结构时降级为整段答案折叠');
+assert.doesNotMatch(taskFiveSidepanelSource, /dataset\.reviewWarning\s*=\s*t\(|review-answer-summary['"][\s\S]{0,160}textContent\s*=\s*t\(/, 'Recall UI 不得引用不存在的自由 t() 变量');
+assert.match(taskFiveSidepanelSource, /function renderCurrentAiArtifact[\s\S]+?applyReviewRecallProtection/, '所有学习产物必须经过统一渲染 seam，避免某条更新路径绕过 Recall 保护');
+assert.match(taskFiveSidepanelSource, /function renderManualTray[\s\S]+?createDocumentFragment\(\)[\s\S]+?replaceChildren\(fragment\)/, '截图托盘必须批量提交 DOM，避免拼接包含多份 base64 的巨型 innerHTML 字符串');
+assert.doesNotMatch(taskFiveSidepanelSource, /aiManualTrayList\.innerHTML/, '截图托盘不得重新使用 innerHTML 重建全部高清 data URL');
+assert.match(taskFiveSidepanelSource, /function capturePlannedEvidence[\s\S]+?type: 'BSE_CAPTURE_BEST_FRAME'[\s\S]+?buildPlannedEvidenceFrame/, '内置与外部规划必须共享同一阶段一媒体执行 seam，避免两套截图循环漂移');
+assert.doesNotMatch(taskFiveSidepanelSource, /retryableCaptureErrors|TARGET_NOT_BUFFERED|FRAME_NOT_DECODED|FINAL_FRAME_NOT_READY/, 'Side Panel 不得理解播放器缓冲/解码错误或维护第二套重试策略');
+assert.match(taskFiveSidepanelSource, /manualFrames = captureResult\.frames[\s\S]{0,900}renderManualTray\(\)/, '外部规划应在统一媒体执行完成与候选初筛后只提交一次托盘视图');
+assert.ok(taskFiveFormattersSource.includes("new RegExp(`___${kind}_(\\\\d+)___`, 'g')"), '长 Markdown 占位符还原应按类型单次扫描，而不是每个公式/代码块重新扫描整份 HTML');
+assert.doesNotMatch(taskFiveFormattersSource, /(?:tableBlocks|frameBlocks|imageBlocks|mathBlocks|mathInlines|codeBlocks)\.forEach\([\s\S]{0,140}html\.replace/, '长笔记渲染不得恢复每个块时反复全字符串 replace');
+assert.match(taskFiveFormattersSource, /loading="lazy" decoding="async"/, '笔记中的大图应延迟加载并异步解码，降低长文首屏主线程压力');
+assert.match(taskFiveSidepanelCss, /\.review-flip-card\s*\{/, '逐题自测翻卡必须有清晰的视觉层级');
+assert.match(taskFiveSidepanelCss, /\.review-answer-disclosure\s*\{/, '外部 AI 非结构化结果的降级答案折叠必须保留清晰视觉层级');
+assert.match(taskFiveAsrPolisherSource, /## 自测题[\s\S]+?### Q1[\s\S]+?## 参考答案[\s\S]+?### A1[\s\S]+?## 仍值得回看/, '自测提示词必须提供 Qn\/An 稳定配对结构，让 UI 可以逐题保护答案');
 assert.match(taskFiveSidepanelSource, /AI_EVIDENCE_FRAME_MAX_WIDTH\s*=\s*1536/, '最终证据帧应保留 1536px 级横向细节，避免代码/公式截图过早压缩');
 assert.match(taskFiveSidepanelSource, /AI_EVIDENCE_FRAME_QUALITY\s*=\s*0\.9/, '最终证据帧 WebP 质量应保持在 0.90，候选数量受控后无需继续使用过度保守压缩');
-assert.match(taskFiveSidepanelSource, /previousMediaKey[\s\S]+?resetAiWorkbenchForMediaChange/, '媒体 key 变化时必须显式重置 AI 工作台，避免上一视频截图与报告污染下一视频');
+assert.match(taskFiveSidepanelSource, /previousArtifactKey[\s\S]+?nextArtifactKey[\s\S]+?resetAiWorkbenchForMediaChange/, '逻辑视频 artifactKey 变化时必须显式重置 AI 工作台；同一 B站分P仅 pN\/cidN 运行时身份变化不应误清当前材料');
 assert.match(taskFiveSidepanelSource, /function renderEmptyAiNoteState[\s\S]+?aiNoteContent\.innerHTML\s*=\s*''/, '新视频没有缓存时必须真正清空旧报告 DOM，而不能只清内存对象');
 assert.match(taskFiveSidepanelSource, /function createMediaOperationContext[\s\S]+?mediaKey[\s\S]+?tabId/, '异步截图/生成操作必须绑定启动时的 mediaKey + tabId');
 assert.match(taskFiveSidepanelSource, /expectedMediaKey/, 'Side Panel 截图请求必须把预期 mediaKey 发送给内容页做双端校验');
 const taskFiveContentSource = fs.readFileSync(path.join(root, 'content/app.js'), 'utf8');
+assert.match(taskFiveContentSource, /function getImageSource[\s\S]+?data-src[\s\S]+?data-lazy-src[\s\S]+?srcset/, '作者头像读取必须兼容站点懒加载图片来源，不能只依赖 img.src');
+assert.match(taskFiveContentSource, /BSE_GET_MEDIA_CONTEXT[\s\S]+?resolveCurrentMediaContext\(\{ force: true \}\)/, 'AI 开始前必须能向当前视频页按需确认最新 MediaContext，避免字幕先就绪而标签仍未加载的竞态');
+assert.match(taskFiveSidepanelSource, /function ensureCurrentPromptMediaContext[\s\S]+?BSE_GET_MEDIA_CONTEXT/, 'Side Panel 的内置与外部 AI 应共享同一个处理前媒体语境握手');
+assert.match(taskFiveSidepanelSource, /planVisualEvidence\?\.\(\{[\s\S]{0,260}mediaContext: generationState\.mediaContext/, '内部图文规划必须显式传入与外部协作相同的 MediaContext');
+assert.match(taskFiveSidepanelSource, /generateCourseNotes\?\.\(\{[\s\S]{0,260}mediaContext: generationState\.mediaContext/, '内部学习/复习生成必须显式传入统一 MediaContext，而不是只有外部复制才能看到标签');
+assert.match(taskFiveSidepanelSource, /platform !== 'bilibili' \|\| state\.authorInfo\.avatar/, 'B站作者信息缺头像时不得因为已有姓名和合集信息就提前跳过 view API 兜底');
+assert.match(taskFiveSidepanelSource, /TRACKER_CONTENT_REPAIR_BUDGET\s*=\s*2[\s\S]+?emptySubs[\s\S]+?slice\(0, remainingContentRepairBudget\)/, '旧订阅内容修复也必须有独立小预算，打开追踪页不能同时触发大量历史网络修复');
+assert.match(taskFiveSidepanelSource, /TRACKER_METADATA_REPAIR_BUDGET\s*=\s*4[\s\S]+?repairSubscriptionMetadata\(sub, \{ activeBvid \}\)/, '追踪页应对历史缺失的 B站头像执行有界的元数据自愈，并限制单次 Side Panel 生命周期的修复预算');
+assert.match(trackerSyncSource, /async function repairSubscriptionMetadata[\s\S]+?collectBilibiliViewCandidates[\s\S]+?fetchBilibiliView[\s\S]+?bilibiliViewMatchesSubscription[\s\S]+?mergeBilibiliOwnerMetadata/, '追踪核心必须遍历可信 BVID 候选，通过 view API 校验订阅归属后恢复作者头像，失效 latestBvid 不能阻断修复');
 assert.match(taskFiveContentSource, /message\.expectedMediaKey\s*&&\s*message\.expectedMediaKey\s*!==\s*state\.mediaKey/, '内容页必须拒绝来自旧媒体上下文的截帧请求');
 assert.match(taskFiveContentSource, /BSE_APPLY_EXTERNAL_SUBTITLE[\s\S]+?expectedMediaKey[\s\S]+?MEDIA_CONTEXT_CHANGED/, '离线转录结果回灌播放器前必须再次校验 mediaKey，页面切换后不得载入旧视频字幕');
 assert.match(taskFiveContentSource, /BSE_RESOLVE_YOUTUBE_IN_TAB[\s\S]+?currentUrlVideoId\s*!==\s*requestedVideoId[\s\S]+?state\.mediaKey[\s\S]+?MEDIA_CONTEXT_CHANGED/, 'YouTube 标签页解析必须同时验证 URL videoId 与当前 mediaKey，不能只相信调用方筛选 tab');
 assert.match(taskFiveContentSource, /FETCH_VIDEO_SUBTITLE[\s\S]+?result\?\.videoId[\s\S]+?MEDIA_CONTEXT_CHANGED/, 'YouTube MAIN-world bridge 返回后必须再次验证 result.videoId，防止 SPA 期间旧结果串台');
+assert.match(taskFiveSidepanelSource, /const detail = await loadQueueItemDetail\(item\.id\)[\s\S]{0,220}const itemMediaKey = String\(detail\.mediaContext\?\.mediaKey \|\| detail\.expectedMediaKey \|\| ''\)/, '侧边栏载入队列结果必须按需读取单个完整 item，并优先保留任务自身的 exact media owner');
 assert.match(taskFiveSidepanelSource, /BSE_APPLY_EXTERNAL_SUBTITLE[\s\S]+?expectedMediaKey:\s*tabMediaKey/, '侧边栏手动载入离线字幕必须先验证目标 URL，再携带当前 tab 的 authoritative media identity');
 assert.match(taskFiveSidepanelSource, /mediaStateMatchesUrl\?\.\(tabState, item\.url\)/, '旧队列条目即使没有 mediaContext，也必须先证明当前 tab 属于该任务 URL 才能载入');
-assert.match(taskFiveSidepanelSource, /isCurrentVideoPage\s*&&\s*!enqueueMediaKey[\s\S]+?QUEUE_MEDIA_IDENTITY_UNAVAILABLE/, '当前视频页发起离线转录时必须拿到 authoritative mediaKey；SPA 状态不稳定时禁止退化为 URL-only 猜 CID');
-const emptyTranscribeHandlerSource = taskFiveSidepanelSource.match(/elements\.emptyTranscribe\?\.addEventListener\('click'[\s\S]*?elements\.queueCapabilityRefresh/)?.[0] || '';
-assert.match(emptyTranscribeHandlerSource, /processingIntent:\s*'local-asr'/, 'Side Panel 的“离线转录”必须显式使用 local-asr intent');
-assert.match(emptyTranscribeHandlerSource, /const targetUrl = activeTab\?\.url \|\| ''/, 'Side Panel 离线转录只能使用当前 active tab URL 作为目标');
-assert.doesNotMatch(emptyTranscribeHandlerSource, /state\?\.mediaKey[\s\S]{0,180}youtube\.com\/watch|state\?\.mediaKey[\s\S]{0,180}bilibili\.com\/video/, 'Side Panel 不得从缓存 state.mediaKey 反推 URL 猜测当前媒体');
-assert.doesNotMatch(emptyTranscribeHandlerSource, /BSE_COMMAND[\s\S]{0,120}REFRESH/, 'Side Panel 的“离线转录”不得先刷新/复用平台字幕');
+const sidepanelLocalAsrFlow = taskFiveSidepanelSource.match(/async function enqueueCurrentVideoForLocalASR[\s\S]*?elements\.emptyTranscribe\?\.addEventListener/)?.[0] || '';
+assert.match(sidepanelLocalAsrFlow, /const targetUrl = activeTab\?\.url \|\| ''/, 'Side Panel 本机转录只能使用当前 active tab URL 作为目标');
+assert.match(sidepanelLocalAsrFlow, /mediaStateMatchesUrl\?\.\(latestState, targetUrl\) === true/, '本机转录必须证明内容页状态仍属于当前 active tab URL');
+assert.match(sidepanelLocalAsrFlow, /const enqueueMediaKey = latestMatchesTarget[\s\S]{0,120}: ''/, '本机转录只能从匹配当前 URL 的页面状态取得 authoritative mediaKey');
+assert.match(sidepanelLocalAsrFlow, /if \(!enqueueMediaKey\)[\s\S]+?QUEUE_MEDIA_IDENTITY_UNAVAILABLE/, 'SPA 媒体身份不稳定时必须 fail closed，禁止退化成 URL-only 猜 CID');
+assert.match(sidepanelLocalAsrFlow, /processingIntent:\s*'local-asr'/, 'Side Panel 的本机转录必须显式使用 local-asr intent');
+assert.doesNotMatch(sidepanelLocalAsrFlow, /state\?\.mediaKey[\s\S]{0,180}youtube\.com\/watch|state\?\.mediaKey[\s\S]{0,180}bilibili\.com\/video/, 'Side Panel 不得从缓存 state.mediaKey 反推 URL 猜测当前媒体');
+assert.doesNotMatch(sidepanelLocalAsrFlow, /BSE_COMMAND[\s\S]{0,120}REFRESH/, 'Side Panel 的本机转录不得先刷新或复用平台字幕');
 const rollingLocalASRHandlerSource = taskFiveRollingPanelSource.match(/\.btn-transcribe-asr'\)\?\.addEventListener\('click'[\s\S]*?\.btn-retry/)?.[0] || '';
 assert.match(rollingLocalASRHandlerSource, /processingIntent:\s*'local-asr'/, '播放器旁“离线转录”必须显式使用 local-asr intent');
 assert.doesNotMatch(rollingLocalASRHandlerSource, /actions\.refresh/, '播放器旁“离线转录”不得重新进入字幕发现链');
@@ -3483,7 +4711,10 @@ const testCues = [{ from: 0, to: 2, content: 'We use Quen and yTch' }, { from: 2
 const testPrompt = BSE.AsrPolisher.buildPolishingPrompt('Hugging Face Journal Club', testCues);
 assert.match(testPrompt, /Hugging Face Journal Club/);
 assert.match(testPrompt, /L0001 \| We use Quen and yTch/);
+assert.match(testPrompt, /只输出真正需要修改的行|NO_CHANGES/, '本机 LLM 精修与外部校对必须复用同一稀疏返回协议，避免模型重写整份字幕');
 assert.doesNotMatch(testPrompt, /\[1\] We use Quen/, 'ASR 校对提示词使用独立行号语法，不再与字幕时间方括号混用');
+assert.match(taskFiveAsrPolisherSource, /function splitPolishingCueChunks[\s\S]+?maxChars = 24000[\s\S]+?maxCues = 240/, '本机长字幕精修必须有有界字符/cue 双预算，短字幕保持单请求，长字幕才分块');
+assert.match(taskFiveAsrPolisherSource, /for \(let index = 0; index < chunks\.length; index\+\+\)[\s\S]+?polished\.push\(\.\.\.applied\.cues\)/, '长字幕精修应逐块合并结果，一块失败不得迫使整条字幕重新对齐');
 
 const aligned = BSE.AsrPolisher.alignPolishedCues(
   testCues,
@@ -3492,10 +4723,33 @@ const aligned = BSE.AsrPolisher.alignPolishedCues(
 assert.equal(aligned.length, 2);
 assert.equal(aligned[0].content, 'We use Qwen and PyTorch');
 assert.equal(aligned[1].content, 'and Codex tool.');
+const proofreadToken = BSE.Utils.buildSubtitlePatchToken('yt:Proofread01', 'track-en', testCues);
+const sparsePolish = BSE.AsrPolisher.applyPolishResult(testCues, `SPARKSUB_PATCH ${proofreadToken}\nL0001 | We use Qwen and PyTorch`, { expectedTaskToken: proofreadToken });
+const sparsePreview = BSE.AsrPolisher.applyPolishResult(testCues, `SPARKSUB_PATCH ${proofreadToken}\nL0001 | We use Qwen and PyTorch`, { expectedTaskToken: proofreadToken, materializeCues: false });
+assert.equal(sparsePreview.cues, testCues, '校对预览只计算 patch，不应复制完整 cue 数组');
+assert.equal(sparsePreview.changedCount, 1, '轻量预览仍必须准确报告真实修改数');
+assert.equal(sparsePolish.mode, 'indexed');
+assert.equal(sparsePolish.taskToken, proofreadToken);
+assert.equal(sparsePolish.changedCount, 1, '稀疏校对只应产生真实变化的 patch');
+assert.equal(sparsePolish.patches[0].index, 0);
+assert.equal(sparsePolish.cues[1].content, testCues[1].content, '未返回的行必须直接复用现有字幕，不做重新对齐');
+const timestampEchoPolish = BSE.AsrPolisher.applyPolishResult(testCues, 'L0002 ｜ [00:02] and Codex tool.');
+assert.equal(timestampEchoPolish.cues[1].content, 'and Codex tool.', '模型误把输入时间列一起回显时应剥离时间，并兼容全角分隔符');
+const missingTokenPolish = BSE.AsrPolisher.applyPolishResult(testCues, 'L0001 | We use Qwen and PyTorch', { expectedTaskToken: proofreadToken });
+assert.equal(missingTokenPolish.mode, 'token_missing', 'Side Panel 导入缺少任务标识时必须拒绝，不能只靠 Lxxxx 猜归属');
+const wrongTokenPolish = BSE.AsrPolisher.applyPolishResult(testCues, 'SPARKSUB_PATCH SPC1-deadbeefdeadbeef\nL0001 | We use Qwen and PyTorch', { expectedTaskToken: proofreadToken });
+assert.equal(wrongTokenPolish.mode, 'token_mismatch', '另一视频、轨道或旧字幕版本的校对结果必须被任务标识拦截');
+const noChangePolish = BSE.AsrPolisher.applyPolishResult(testCues, 'NO_CHANGES');
+assert.equal(noChangePolish.mode, 'no_changes');
+assert.equal(noChangePolish.changedCount, 0);
+const unsafePolish = BSE.AsrPolisher.applyPolishResult(testCues, '这是一个没有行号且行数不匹配的自由段落');
+assert.equal(unsafePolish.mode, 'unmatched', '无法证明行归属时必须 fail-closed，不做模糊猜测');
+const arbitrarySameLineCount = BSE.AsrPolisher.applyPolishResult(testCues, '完全无关的第一段\n完全无关的第二段');
+assert.equal(arbitrarySameLineCount.mode, 'unmatched', '旧全量纯文本兼容只有在多数行仍能证明与原字幕相关时才允许按位置回填');
 const legacyAligned = BSE.AsrPolisher.alignPolishedCues(testCues, '[1] Legacy one\n[2] Legacy two');
 assert.equal(legacyAligned[0].content, 'Legacy one', '旧 [N] 返回格式继续兼容，避免已有模型配置突然失效');
 
-const dynamicAiPrompt = BSE.Formatters.generateAiPrompt('polish', [{ from: 0, to: 1, content: 'test' }], false, { title: 'AI 论文研读' });
+const dynamicAiPrompt = BSE.Formatters.generateSubtitlePolishPrompt([{ from: 0, to: 1, content: 'test' }], false, { title: 'AI 论文研读' });
 assert.match(dynamicAiPrompt, /AI 论文研读/);
 
 // === AI Media Context Pack ===
@@ -3516,9 +4770,13 @@ assert.equal(contextPack.mediaKey, 'bili:BV1C1896KE3m:cid41281980079');
 assert.deepEqual(Array.from(contextPack.tags), ['计算机', '考研', '408', 'CRC', '计算机网络'], '媒体语境必须去重标签并保持平台顺序');
 assert.equal(contextPack.category, '校园学习');
 assert.equal(contextPack.partTitle, 'CRC循环冗余检验');
+const learningPromptContext = BSE.MediaContext.formatPromptContext(contextPack);
+assert.match(learningPromptContext, /标题：CRC循环冗余检验-\[一图流\]-408计算机考研笔记/, 'AI 语境必须显式保留视频标题');
+assert.match(learningPromptContext, /标签：计算机、考研、408、CRC、计算机网络/, 'AI 语境必须把规范化标签作为高优先级主题信息');
+assert.doesNotMatch(learningPromptContext, /真题详解-27考研|作者\/频道|平台：|简介：/, '学习/翻译 Prompt 语境不应携带对理解帮助很低的作者、平台和长简介');
 const asrContextHint = BSE.MediaContext.buildASRContext(contextPack);
 assert.equal(asrContextHint.topic, 'CRC循环冗余检验-[一图流]-408计算机考研笔记', 'ASR context 应只保留短主题，不携带简介全文');
-assert.deepEqual(Array.from(asrContextHint.terms), ['校园学习', '计算机', '考研', '408', 'CRC', '计算机网络'], 'ASR context 只保留分类与最多 6 个去重术语');
+assert.deepEqual(Array.from(asrContextHint.terms), ['计算机', '考研', '408', 'CRC', '计算机网络', '校园学习'], 'ASR context 应优先保留语义标签，仍有预算时再补分类，最多 6 个去重术语');
 assert.equal(Object.prototype.hasOwnProperty.call(asrContextHint, 'description'), false, 'ASR context 不得上传页面简介');
 assert.equal(Object.prototype.hasOwnProperty.call(asrContextHint, 'author'), false, 'ASR context 不得上传作者信息');
 const translationContext = BSE.MediaContext.buildTranslationContext({
@@ -4023,6 +5281,13 @@ const mockVideoElement = {
   currentTime: 42.5,
   duration: 360.0,
   paused: true,
+  readyState: 4,
+  seeking: false,
+  buffered: {
+    length: 1,
+    start: () => 0,
+    end: () => 360
+  },
   listeners: {},
   addEventListener(event, handler, opts) {
     this.listeners[event] = this.listeners[event] || [];
@@ -4043,6 +5308,7 @@ const mockVideoElement = {
 
 let lastDrawnCanvas = null;
 const mockDoc = {
+  hidden: false,
   querySelector(selector) {
     if (selector.includes('video')) return mockVideoElement;
     return null;
@@ -4114,6 +5380,83 @@ const frameAtTime = await capturePromise;
 assert.equal(frameAtTime.success, true);
 assert.equal(mockVideoElement.currentTime, 42.5, 'restoreTime 为 true 时必须自动恢复回原本播放位置 42.5s');
 
+// seeked 不是“目标帧已解码”的同义词：网络慢时 readyState 仍不足，必须继续等待 loadeddata/canplay。
+let bufferingTime = 10;
+const bufferingVideo = {
+  videoWidth: 1280,
+  videoHeight: 720,
+  duration: 300,
+  paused: true,
+  readyState: 1,
+  seeking: false,
+  buffered: { length: 0, start: () => 0, end: () => 0 },
+  listeners: {},
+  get currentTime() { return bufferingTime; },
+  set currentTime(value) { bufferingTime = value; },
+  addEventListener(event, handler) {
+    this.listeners[event] = this.listeners[event] || [];
+    this.listeners[event].push(handler);
+  },
+  removeEventListener(event, handler) {
+    this.listeners[event] = (this.listeners[event] || []).filter((item) => item !== handler);
+  },
+  dispatchEvent(event) {
+    for (const handler of [...(this.listeners[event] || [])]) handler();
+  }
+};
+const bufferingPromise = BSE.Media.captureVideoFrameAt(100, { videoElement: bufferingVideo, timeoutMs: 300 });
+bufferingVideo.dispatchEvent('seeked');
+await new Promise((resolve) => setTimeout(resolve, 20));
+assert.equal(bufferingVideo.readyState, 1, '测试必须先停留在仅有元数据、目标帧尚未可读的状态');
+bufferingVideo.readyState = 2;
+bufferingVideo.buffered = { length: 1, start: () => 95, end: () => 105 };
+bufferingVideo.dispatchEvent('loadeddata');
+const bufferingFrame = await bufferingPromise;
+assert.equal(bufferingFrame.success, true, 'seeked 后应继续等目标帧真正可读，而不是网卡时立即截旧画面');
+
+// 后台标签页仍应允许按媒体事件完成截图；焦点/页面 rAF 不应成为截图前提。
+mockDoc.hidden = true;
+const backgroundPromise = BSE.Media.captureVideoFrameAt(140, { videoElement: mockVideoElement, timeoutMs: 300, restoreTime: true });
+mockVideoElement.dispatchEvent('seeked');
+const backgroundFrame = await backgroundPromise;
+assert.equal(backgroundFrame.success, true, '标签页失焦/后台时仍应完成截图，不得依赖 requestAnimationFrame');
+mockDoc.hidden = false;
+
+// 可见但暂停的视频也不能把 requestVideoFrameCallback 当成硬前提：seeked + HAVE_CURRENT_DATA 已足够证明 Canvas 可读。
+let visiblePausedTime = 20;
+let requestedVideoFrameCallbacks = 0;
+const visiblePausedVideo = {
+  videoWidth: 1280,
+  videoHeight: 720,
+  duration: 300,
+  paused: true,
+  readyState: 4,
+  seeking: false,
+  buffered: { length: 1, start: () => 0, end: () => 300 },
+  listeners: {},
+  get currentTime() { return visiblePausedTime; },
+  set currentTime(value) { visiblePausedTime = value; },
+  addEventListener(event, handler) {
+    this.listeners[event] = this.listeners[event] || [];
+    this.listeners[event].push(handler);
+  },
+  removeEventListener(event, handler) {
+    this.listeners[event] = (this.listeners[event] || []).filter((item) => item !== handler);
+  },
+  dispatchEvent(event) {
+    for (const handler of [...(this.listeners[event] || [])]) handler();
+  },
+  requestVideoFrameCallback() {
+    requestedVideoFrameCallbacks++;
+    return 1;
+  }
+};
+const visiblePausedPromise = BSE.Media.captureVideoFrameAt(160, { videoElement: visiblePausedVideo, timeoutMs: 120 });
+visiblePausedVideo.dispatchEvent('seeked');
+const visiblePausedFrame = await visiblePausedPromise;
+assert.equal(visiblePausedFrame.success, true, '可见但暂停的视频 seek 完成后不应因为 rVFC 没有下一帧而假超时');
+assert.equal(requestedVideoFrameCallbacks, 0, '截图就绪判定不应依赖页面呈现回调，避免暂停/后台页节流影响取帧');
+
 let stubbornCurrentTime = 5;
 const stubbornVideo = {
   videoWidth: 1280,
@@ -4148,7 +5491,7 @@ const unconfirmedSeekFrame = await BSE.Media.captureVideoFrameAt(100, {
   timeoutMs: 5
 });
 assert.equal(unconfirmedSeekFrame.success, false, 'currentTime 已变化但没有 seeked/解码确认时也不得抓取可能仍是旧内容的 Canvas');
-assert.equal(unconfirmedSeekFrame.error, 'SEEK_TIMEOUT_UNCONFIRMED');
+assert.equal(unconfirmedSeekFrame.error, 'FRAME_NOT_DECODED');
 
 // 7d. AI 视觉证据截帧不能只靠“窗口靠后”猜测：应在目标附近采样少量真实像素并选择稳定代表帧，结束后恢复播放位置。
 const stableSeekTicker = setInterval(() => mockVideoElement.dispatchEvent('seeked'), 8);
@@ -4167,6 +5510,52 @@ assert.equal(stableFrame.selection?.strategy, 'visual', '存在像素签名时�
 assert.equal(stableFrame.selection?.sampledTimestamps.length, 3, '默认只采样少量候选帧，避免过度寻道');
 assert.ok(Number.isFinite(stableFrame.selection?.visualScore), '视觉候选应携带可诊断的评分');
 assert.equal(mockVideoElement.currentTime, 42.5, '稳定帧筛选结束后必须恢复用户原播放位置');
+
+// 瞬态未缓冲由 Media Module 内部重试一次；Side Panel 不应发送第二次业务请求。
+let retryTime = 20;
+let retryAssignments = 0;
+const retryVideo = {
+  videoWidth: 1280,
+  videoHeight: 720,
+  duration: 300,
+  paused: true,
+  readyState: 1,
+  seeking: false,
+  buffered: { length: 0, start: () => 0, end: () => 0 },
+  listeners: {},
+  get currentTime() { return retryTime; },
+  set currentTime(value) {
+    retryTime = value;
+    retryAssignments++;
+    if (retryAssignments >= 2) {
+      this.readyState = 4;
+      this.buffered = { length: 1, start: () => 0, end: () => 300 };
+      queueMicrotask(() => this.dispatchEvent('seeked'));
+    }
+  },
+  addEventListener(event, handler) {
+    this.listeners[event] = this.listeners[event] || [];
+    this.listeners[event].push(handler);
+  },
+  removeEventListener(event, handler) {
+    this.listeners[event] = (this.listeners[event] || []).filter((item) => item !== handler);
+  },
+  dispatchEvent(event) {
+    for (const handler of [...(this.listeners[event] || [])]) handler();
+  }
+};
+const retriedStableFrame = await BSE.Media.captureStableVideoFrame({
+  windowStart: 200,
+  windowEnd: 210,
+  targetSec: 205
+}, {
+  videoElement: retryVideo,
+  maxWidth: 1280,
+  timeoutMs: 100
+});
+assert.equal(retriedStableFrame.success, true, '第一次目标窗口未缓冲时应由 Media Module 有限重试并恢复');
+assert.equal(retriedStableFrame.warning, 'RETRIED_AFTER_BUFFERING', '重试成功应留下轻量诊断标记供上层展示');
+assert.equal(retryTime, 20, '网络重试完成后仍必须恢复用户原播放位置');
 
 // 7e. 边界异常防御：未就绪视频与画布跨域污染
 const unreadyVideo = { videoWidth: 0, videoHeight: 0, currentTime: 0 };
@@ -4220,14 +5609,54 @@ const imagesMap = {
 const renderedHtml = BSE.Formatters.renderNoteToHtml(testMarkdown, { imagesMap });
 assert.match(renderedHtml, /<h1 class="note-h1">/, '应正确渲染 H1 标题');
 assert.match(renderedHtml, /<h5 class="note-h5">/, '应正确渲染 H5 标题');
+const timelineHeadingHtml = BSE.Formatters.renderNoteToHtml('## [01:15–03:30] 切线与割线的几何关系');
+assert.match(timelineHeadingHtml, /note-timeline-heading[^>]+data-range-start="75"[^>]+data-range-end="210"/, '带时间范围的二级标题必须保留章节起止秒数');
+assert.match(timelineHeadingHtml, /class="note-timeline-jump" data-seek="75"/, '章节时间轴必须渲染成可回跳视频起点的真实按钮');
+assert.match(timelineHeadingHtml, /01:15–03:30/, '章节标题必须向用户直接显示该节覆盖的视频范围');
+assert.match(timelineHeadingHtml, /note-timeline-title">切线与割线的几何关系<\/span>/, '时间轴不应吞掉章节标题正文');
 assert.match(renderedHtml, /<hr class="note-hr"/, '应正确渲染分割线');
 assert.match(renderedHtml, /note-image-card/, '应正确将 frame:// Markdown 图片引用转换为 note-image-card');
 assert.match(renderedHtml, /note-card-delete-btn/, '图片卡片上必须包含可删除图片的按钮');
 assert.match(renderedHtml, /data-seek="75"/, '图片跳转按钮必须携带精确的秒数 75s');
 assert.match(renderedHtml, /katex/, 'KaTeX 应成功将数学公式渲染为专业排版结构');
+
+// 8b-0. 数学公式排版深度优化测试：\( ... \) 与 \[ ... \] 识别、CJK 汉字支持、加粗与标题样式深度适配
+const mathMixedMarkdown = `### 模型二：识别乘积求导 $f'(x) = 2x$
+若分子看起来像：
+\\[ u'v + uv' \\]
+优先猜：
+$$ (uv)' $$
+一坨复杂分式便可以整体压缩成一个 **$du$**。
+模型三：“\\(e^{框框}\\times圆圈\\)”
+`;
+const mathRenderedHtml = BSE.Formatters.renderNoteToHtml(mathMixedMarkdown);
+assert.match(mathRenderedHtml, /<h3 class="note-h3">[\s\S]*?katex[\s\S]*?<\/h3>/, '标题中的行内公式应成功渲染为 KaTeX 结构');
+assert.match(mathRenderedHtml, /katex-display/, '块级公式 \\[ ... \\] 与 $$ ... $$ 应生成专业 display 排版');
+assert.doesNotMatch(mathRenderedHtml, /\\\(|\\\[|\\\]|\\\)/, '渲染后不得将 \\( 或 \\[ 等 LaTeX 定界符原样泄漏给用户');
+assert.match(mathRenderedHtml, /<strong>[\s\S]*?katex[\s\S]*?<\/strong>/, '加粗中的数学公式必须被正确包裹在 strong 标签中');
+assert.match(mathRenderedHtml, /cjk_fallback/, '公式中的 CJK 汉字必须通过 KaTeX 回退机制优雅排版');
+
+// 样式断言：公式去除大深色卡片背景与硬边框，深度适配加粗与标题
+assert.match(taskFiveSidepanelCss, /\.katex-display-wrap,\s*\.katex-display\s*\{[^}]*background:\s*transparent/s, '块级公式应移除突兀厚重的深色卡片背景');
+assert.match(taskFiveSidepanelCss, /\.katex-display-wrap,\s*\.katex-display\s*\{[^}]*border:\s*none/s, '块级公式应移除硬边框，保持干净学术排版流');
+assert.match(taskFiveSidepanelCss, /strong\s+\.katex/s, '必须具备 strong / 加粗环境下的公式字重与字体深度适配');
+assert.match(taskFiveSidepanelCss, /\.note-h1\s+\.katex/s, '必须具备标题环境下的公式比例与字重适配');
+assert.match(taskFiveSidepanelCss, /\.ai-note-content\s+\.katex\s*\{[^}]*color:\s*inherit/s, '公式必须继承父级文本颜色，避免标题/加粗中掉色');
 assert.match(renderedHtml, /<table class="note-table">/, 'Markdown 表格应成功解析为 table 结构');
 assert.match(renderedHtml, /<th style="text-align:left">误区维度<\/th>/, '表头单元格与对齐方式必须正确');
 assert.match(renderedHtml, /<pre class="note-code-block"><code class="language-python">/, '多行代码块应成功解析并保留代码语言');
+assert.match(renderedHtml, /<table class="note-table">/, '表格块不得因为新的文档流解析器被段落包裹');
+assert.doesNotMatch(renderedHtml, /<p class="note-p">\s*<div|<p class="note-p">\s*<table/i, '块级内容不得被非法包在段落中交给浏览器自行纠正');
+const boundaryMarkdown = `**为什么不成立**\r\n\r\n视频最后专门用这个例子说明产品边界。\r\n\r\n假设已经知道：\r\n\r\n\`id = 100\`\r\n\r\nMilvus 确实能够查询。\r\n\r\n> 从海量向量中找到一批相似候选。\r\n\r\n**正确判断**\r\n\r\nMilvus：\r\n\r\n**能做 ID 精确查询 ≠ 最适合以 ID 精确查询为主要访问模式。**`;
+const boundaryHtml = BSE.Formatters.renderNoteToHtml(boundaryMarkdown);
+assert.match(boundaryHtml, /<p class="note-p note-emphasis-label"><strong>为什么不成立<\/strong><\/p>/, '独立粗体小标题必须稳定渲染，不能把 ** 标记原样露给用户');
+assert.match(boundaryHtml, /<p class="note-p note-emphasis-label"><strong>正确判断<\/strong><\/p>/, 'CRLF 导入的 Markdown 也必须正确识别独立粗体标签');
+assert.match(boundaryHtml, /<code class="note-inline-code">id = 100<\/code>/, '行内代码必须在长笔记中保持正确样式');
+assert.match(boundaryHtml, /<blockquote class="note-quote">从海量向量中找到一批相似候选。<\/blockquote>/, '引用块必须形成真实块级结构');
+assert.doesNotMatch(boundaryHtml, /\*\*为什么不成立\*\*|\*\*正确判断\*\*/, '已识别的粗体 Markdown 标记不得泄漏到最终 HTML');
+const listHtml = BSE.Formatters.renderNoteToHtml('- 第一条\n- 第二条\n\n1. 第一步\n2. 第二步');
+assert.match(listHtml, /<ul class="note-list"><li>第一条<\/li><li>第二条<\/li><\/ul>/, '无序列表必须拥有合法 ul 容器');
+assert.match(listHtml, /<ol class="note-list"><li>第一步<\/li><li>第二步<\/li><\/ol>/, '有序列表必须拥有合法 ol 容器');
 const builtFrameReference = BSE.Formatters.buildFrameReference('01:15', '几何切线板书');
 assert.equal(builtFrameReference, '![几何切线板书](frame://01:15)', '新的截图引用应使用自然 Markdown 语法');
 const transformedFrameReference = BSE.Formatters.transformFrameReferences(builtFrameReference, (ref) => `${ref.seconds}:${ref.label}`);
@@ -4258,6 +5687,11 @@ assert.match(hostileTableHtml, /&lt;img src=x onerror=alert\(1\)&gt;/i, '表格�
 const hostileMarkdownImageHtml = BSE.Formatters.renderNoteToHtml('![危险图片](javascript:alert(1))');
 assert.doesNotMatch(hostileMarkdownImageHtml, /<img\b/i, 'javascript: Markdown 图片 URL 不得生成 img 标签');
 assert.doesNotMatch(hostileMarkdownImageHtml, /javascript:/i, '不安全图片协议不应进入最终 HTML');
+const safeLinkHtml = BSE.Formatters.renderNoteToHtml('[Milvus 文档](https://milvus.io/docs)');
+assert.match(safeLinkHtml, /<a class="note-link" href="https:\/\/milvus\.io\/docs" target="_blank" rel="noopener noreferrer">Milvus 文档<\/a>/, '普通 Markdown 链接应渲染为安全可读的外部链接');
+const hostileLinkHtml = BSE.Formatters.renderNoteToHtml('[危险链接](javascript:alert(1))');
+assert.doesNotMatch(hostileLinkHtml, /href="javascript:/i, '外部 AI Markdown 中的 javascript: 链接必须被拒绝');
+assert.doesNotMatch(hostileLinkHtml, /<a\b/i, '不安全协议不得生成可点击链接');
 
 const hostileScreenshotHtml = BSE.Formatters.renderNoteToHtml('[SCREENSHOT: 00:05 "<script>alert(1)</script>"]', {
   imagesMap: {
@@ -4305,6 +5739,14 @@ const evidenceShortlist = BSE.VisualDetector.selectEvidenceFrames([
 assert.equal(evidenceShortlist.length, 2, '全局证据筛选应在预算内保留高价值画面');
 assert.ok(evidenceShortlist.some((frame) => frame.source === 'manual'), '用户手动截图必须优先保留');
 assert.ok(evidenceShortlist.some((frame) => frame.timestamp === 180), '与手动画面不同的信息应保留以维持内容覆盖');
+const chapterCoverageShortlist = BSE.VisualDetector.selectEvidenceFrames([
+  { dataUrl: 'data:image/webp;base64,C1A', timestamp: 0, chapterId: 'C01', source: 'planned', selection: { strategy: 'visual', visualScore: 0.92, stabilityScore: 0.9 } },
+  { dataUrl: 'data:image/webp;base64,C1B', timestamp: 10, chapterId: 'C01', source: 'planned', selection: { strategy: 'visual', visualScore: 0.88, stabilityScore: 0.88 } },
+  { dataUrl: 'data:image/webp;base64,C2A', timestamp: 20, chapterId: 'C02', source: 'planned', selection: { strategy: 'visual', visualScore: 0.84, stabilityScore: 0.84 } }
+], { videoDuration: 120, maxFrames: 2 });
+assert.equal(chapterCoverageShortlist.length, 2);
+assert.ok(chapterCoverageShortlist.some((frame) => frame.chapterId === 'C01'));
+assert.ok(chapterCoverageShortlist.some((frame) => frame.chapterId === 'C02'), '证据预算收紧时，chapterId 应在质量接近的候选间提供轻量章节覆盖，而不是把两张都留在同一章');
 const nonAdjacentDuplicateShortlist = BSE.VisualDetector.selectEvidenceFrames([
   { dataUrl: 'data:image/webp;base64,A', timestamp: 0, source: 'planned', selection: { visualScore: 0.6, stabilityScore: 0.7, fingerprint: [100, 100, 100, 100] } },
   { dataUrl: 'data:image/webp;base64,B', timestamp: 10, source: 'planned', selection: { visualScore: 0.7, stabilityScore: 0.7, fingerprint: [0, 255, 0, 255] } },
@@ -4333,6 +5775,51 @@ assert.ok(BSE.VisualDetector.evidenceBudgetForDuration(3600) > BSE.VisualDetecto
 
 // 8d. 两阶段视觉证据规划与 AI 模型配置契约
 const originalMockFetch = mockFetch;
+
+// 8d-0: Learn / Review share one connection but persist independent model choices.
+const workspaceAiSettings = await BSE.Ai.saveAiSettings({
+  endpoint: 'http://localhost:8083/v1',
+  apiKey: '',
+  learnModel: '  vision-learn-model  ',
+  reviewModel: ' fast-review-model '
+});
+assert.equal(workspaceAiSettings.learnModel, 'vision-learn-model', '学习模型应独立保存并去除首尾空白');
+assert.equal(workspaceAiSettings.reviewModel, 'fast-review-model', '复习模型应独立保存并去除首尾空白');
+const reloadedWorkspaceAiSettings = await BSE.Ai.getAiSettings();
+assert.equal(reloadedWorkspaceAiSettings.endpoint, 'http://localhost:8083/v1', '学习与复习必须共享同一个连接端点');
+assert.equal(reloadedWorkspaceAiSettings.learnModel, 'vision-learn-model');
+assert.equal(reloadedWorkspaceAiSettings.reviewModel, 'fast-review-model');
+assert.ok(reloadedWorkspaceAiSettings.model, '旧版通用模型字段必须保留，供字幕精修等非学习/复习能力兼容使用');
+assert.equal(BSE.Ai.resolveAiModel(reloadedWorkspaceAiSettings, 'learn'), 'vision-learn-model', '学习模型路由必须由 AI 核心统一解析');
+assert.equal(BSE.Ai.resolveAiModel(reloadedWorkspaceAiSettings, 'review'), 'fast-review-model', '复习模型路由必须由 AI 核心统一解析');
+
+// Old settings only had one `model`. Read-time normalization must inherit it
+// into both workspaces without mutating storage or silently resetting the user.
+storageAreas.local.set('bse_ai_settings_v1', {
+  endpoint: 'http://localhost:8083/v1',
+  apiKey: '',
+  model: 'legacy-single-model',
+  timeoutMs: 120000
+});
+const migratedLegacyAiSettings = await BSE.Ai.getAiSettings();
+assert.equal(migratedLegacyAiSettings.learnModel, 'legacy-single-model', '旧单模型设置应自动成为学习模型');
+assert.equal(migratedLegacyAiSettings.reviewModel, 'legacy-single-model', '旧单模型设置应自动成为复习模型');
+await BSE.Ai.saveAiSettings(workspaceAiSettings);
+
+let scopedModelBody = null;
+mockFetch = async (_url, options = {}) => {
+  scopedModelBody = JSON.parse(options.body || '{}');
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ model: scopedModelBody.model, choices: [{ message: { content: 'ok' } }] }),
+    text: async () => JSON.stringify({ model: scopedModelBody.model, choices: [{ message: { content: 'ok' } }] })
+  };
+};
+await BSE.Ai.invokeLlm({ prompt: 'review route', scope: 'review' });
+assert.equal(scopedModelBody.model, 'fast-review-model', '核心 LLM 调用的 review scope 必须使用复习模型');
+await BSE.Ai.invokeLlm({ prompt: 'learn route', scope: 'learn' });
+assert.equal(scopedModelBody.model, 'vision-learn-model', '核心 LLM 调用的 learn scope 必须使用学习模型');
 
 // 8d-1: 服务目录探测只描述可见模型，不得擅自把用户选择切换成“推荐模型”。
 mockFetch = async (url) => ({
@@ -4473,6 +5960,9 @@ const llmPlan = await BSE.Ai.planVisualEvidence({
 assert.strictEqual(llmPlan.strategy, 'llm', 'LLM 成功响应时 strategy 必须为 llm');
 assert.strictEqual(llmPlan.chapters.length, 1);
 assert.strictEqual(llmPlan.chapters[0].id, 'C01');
+assert.strictEqual(llmPlan.chapters[0].windowStart, 0);
+assert.strictEqual(llmPlan.chapters[0].windowEnd, 120);
+assert.equal(llmPlan.chapters[0].timeStr, undefined, '章节时间显示应由数值范围派生，阶段一不应同时维护冗余 timeStr 状态');
 assert.strictEqual(llmPlan.visualRequests.length, 1);
 assert.strictEqual(llmPlan.visualRequests[0].id, 'SW_1');
 assert.strictEqual(llmPlan.visualRequests[0].expectedSurface, 'diagram', '新 samplingWindows.contentHint 应归一到内部媒体执行字段');
@@ -4488,9 +5978,10 @@ const standalonePrompt = BSE.Ai.buildPlanningPrompt({
   manualFrames: [{ timestamp: 30, timeStr: '00:30', label: '重要例题' }]
 });
 assert.match(standalonePrompt, /用户已标记的时间点/, '规划提示词必须自然说明用户手动锚点');
-assert.match(standalonePrompt, /时间窗口规划|供自动化播放器后续取样/, '规划阶段必须明确是基于字幕的时间窗口规划任务');
-assert.match(standalonePrompt, /艺术、纪录片|作品、人物、地点/, '时间窗口规划必须覆盖人文与强视觉视频，而不只面向数学板书');
+assert.match(standalonePrompt, /第一阶段[\s\S]+章节骨架[\s\S]+时间窗口/, '规划阶段必须明确只负责章节骨架与播放器取样窗口');
+assert.match(standalonePrompt, /作品\/文献\/场景|软件界面|公式\/板书/, '取样规划必须覆盖不同类型的强视觉内容，而不只面向数学板书');
 assert.match(standalonePrompt, /"samplingWindows"/, '新规划协议应使用 samplingWindows，而不是要求文本模型执行媒体操作');
+assert.doesNotMatch(standalonePrompt, /"timeStr"\s*:/, '章节范围只维护数值 windowStart/windowEnd，规划 JSON 不应再保存冗余 timeStr 字段');
 assert.doesNotMatch(standalonePrompt, /"visualRequests"|"visualEvidence"|值得查看画面|筛选截图|重要视觉信息|视觉检查需求/, '文本规划提示词不应使用容易让模型误判为直接媒体操作的协议词');
 assert.match(standalonePrompt, /00:00  大家好/, '规划字幕使用清晰的时间列，不再使用方括号时间标签');
 assert.doesNotMatch(standalonePrompt, /\[Task Nature|\[Guidelines for Visual|passive data|not system instructions/i, '规划提示词不应堆叠伪系统元指令');
@@ -4510,6 +6001,15 @@ const extracted = BSE.Ai.extractJsonFromText(noisyLlmResponse);
 assert.ok(extracted, '必须成功从带思考标签和包裹文本中提取合法 JSON');
 assert.strictEqual(extracted.summary, '微积分中值定理与导数应用');
 assert.strictEqual(extracted.visualRequests.length, 1);
+const normalizedChapters = BSE.Ai.normalizePlanChapters({
+  chapters: [null, { id: 'C02', title: '应用边界', startSec: '120', endSec: '240', coreIdea: '何时不能直接套定理' }]
+});
+assert.equal(normalizedChapters.length, 1, '章节协议 seam 应忽略无效章节项');
+assert.equal(normalizedChapters[0].id, 'C02');
+assert.equal(normalizedChapters[0].title, '应用边界');
+assert.equal(normalizedChapters[0].windowStart, 120);
+assert.equal(normalizedChapters[0].windowEnd, 240);
+assert.equal(normalizedChapters[0].coreConcept, '何时不能直接套定理', '章节协议 seam 应吸收旧别名并只保留第二阶段真正需要的稳定字段');
 const normalizedSampling = BSE.Ai.normalizeSamplingWindows({
   samplingWindows: [null, { windowStart: '60', windowEnd: '90', targetSec: '75', samplingGoal: '核对图形关系', contentHint: 'diagram' }]
 });
@@ -4522,21 +6022,41 @@ assert.strictEqual(legacySamplingWindows.length, 1, '旧 visualRequests 返回�
 assert.strictEqual(legacySamplingWindows[0].id, 'VR_1');
 
 // 8d-2: Prompt 严谨性测试 (区分有图与无图)
+const pureTextKeypointsPrompt = BSE.Ai.buildCourseNotePrompt({
+  title: contextPack.title,
+  cues: sampleCues,
+  mediaContext: contextPack,
+  mode: 'keypoints'
+});
+assert.match(pureTextKeypointsPrompt, /标签：计算机、考研、408、CRC、计算机网络/, '纯文本学习任务必须真正带入 MediaContext 标签');
+assert.doesNotMatch(pureTextKeypointsPrompt, /真题详解-27考研|作者：/, '纯文本学习任务不应导出作者名');
+assert.doesNotMatch(pureTextKeypointsPrompt, /00:00\s+大家好/, '纯文本学习/复习任务不需要时间定位时不得携带逐句时间戳');
+const pureTextReviewPrompt = BSE.Ai.buildCourseNotePrompt({ title: contextPack.title, cues: sampleCues, mediaContext: contextPack, mode: 'deep_qa' });
+assert.doesNotMatch(pureTextReviewPrompt, /\[MM:SS\]|00:00\s+大家好/, '自测任务既不应要求模型生成时间，也不应为字幕附加时间戳');
+
 const promptWithImages = BSE.Ai.buildCourseNotePrompt({
   title: '高数课程',
   cues: sampleCues,
+  mediaContext: contextPack,
   capturedFrames: [
-    { timestamp: 75, timeStr: '01:15', label: '几何切线板书', reason: '黑板推导', dataUrl: 'data:image/webp;base64,AAA' }
+    { timestamp: 75, timeStr: '01:15', label: '几何切线板书', evidenceGoal: '补充切线与割线的图形关系', chapterId: 'C01', expectedSurface: 'diagram', dataUrl: 'data:image/webp;base64,AAA' }
   ],
   videoIR: {
-    chapters: [{ title: '中值定理引论', timeStr: '00:00', coreConcept: '斜率连续性' }]
+    summary: '从几何斜率直观进入中值定理',
+    chapters: [{ id: 'C01', title: '中值定理引论', windowStart: 0, windowEnd: 120, coreConcept: '斜率连续性' }]
   },
   mode: 'course_notes'
 });
-assert.match(promptWithImages, /### 可用画面/, '多模态提示词必须清楚列出已筛选的可用画面');
+assert.match(promptWithImages, /### 已筛选画面/, '多模态提示词必须清楚列出真正进入第二阶段的画面证据');
 assert.match(promptWithImages, /frame:\/\/MM:SS/, '报告图片引用应使用自然 Markdown frame:// 占位语法');
 assert.match(promptWithImages, /看不清的文字、公式、图例或细节不要猜测/, '画面信息不清晰时应自然要求模型不要猜测');
-assert.match(promptWithImages, /### 已规划的内容脉络/, '多模态提示词应注入 Phase 1 规划的内容脉络');
+assert.match(promptWithImages, /C01 · diagram/, '截图的 chapterId 与视觉类型必须一路进入第二阶段，避免图片脱离所属章节');
+assert.match(promptWithImages, /整体主线：从几何斜率直观进入中值定理/, '阶段一 summary 必须服务第二阶段导读，而不是生成后被丢弃');
+assert.match(promptWithImages, /### 已按阶段一章节分组的字幕/, '第二阶段不应重新从平铺字幕判断章节归属');
+assert.match(promptWithImages, /#### C01 字幕/, '阶段一时间范围必须用于确定性地给第二阶段分组字幕，分组结果只需保留稳定 chapterId 避免重复标题元数据');
+assert.match(promptWithImages, /### 阶段一已经确定的章节骨架/, '多模态提示词必须把 Phase 1 章节结果当作第二阶段写作骨架');
+assert.match(promptWithImages, /\`## \[00:00–02:00\] 中值定理引论\`/, '阶段二必须把章节开始和结束时间直接固化为可渲染的 Markdown 大标题契约');
+assert.match(promptWithImages, /不要重新切章/, '第二阶段不得重复执行第一阶段已经完成的章节规划');
 assert.match(promptWithImages, /人文、历史、社会科学/, '最终报告应根据学科类型自适应组织，而不是固定数学模板');
 assert.match(promptWithImages, /00:00  大家好/, '最终报告字幕应使用自然时间列');
 assert.doesNotMatch(promptWithImages, /\[Language & Output Format|\[Mathematical Formula|passive text data|not system instructions/i, '最终报告提示词不应堆叠伪系统级元指令');
@@ -4544,11 +6064,13 @@ assert.doesNotMatch(promptWithImages, /\[Language & Output Format|\[Mathematical
 const promptWithoutImages = BSE.Ai.buildCourseNotePrompt({
   title: '高数课程',
   cues: sampleCues,
+  mediaContext: contextPack,
   capturedFrames: [],
   mode: 'course_notes'
 });
 assert.match(promptWithoutImages, /本次没有可用截图/, '没有真实图片时应自然说明当前为纯文本整理');
 assert.doesNotMatch(promptWithoutImages, /### 可用画面/, '无图片时不应伪造已上传的画面清单');
+assert.doesNotMatch(promptWithoutImages, /00:00\s+大家好/, '没有画面映射需求时，图文讲义的纯文本降级也不应浪费 token 携带时间戳');
 
 BSE.NativeHost = originalNativeHost;
 console.log('✅ 单元测试全部通过：JSZip 打包、AI 提示词生成、合集/多P Merged Markdown、自然段落切分、逐P独立勾选架构、多行自适应配置、TypeScript 渐进式类型体系、批量导出容灾与容错降级机制、B站 DASH 独立音频直链提取、BPX 播放器选集 DOM 探测与全场景活动页支持、UP主/合集订阅追踪系统 (MD5/WBI/RSS XML/Alarms/Storage/ImportExport)、后台无人值守字幕抓取与一键 Markdown 字幕、本地 ASR 回退、受限媒体描述符与进度租约、端侧大模型 ASR 吞音语义纠错与时间轴回填、跨视频媒体一致性与时长防错互锁 (Anti-Media-Mismatch Guard)、标签页直取字幕状态机与前台 Feed 按钮多端同步、通道 A 高清视频截帧与时间轴自动恢复机制、AI 课程图文 Video Understanding IR 规划、视觉状态检测器 (VisualStateDetector)、GFM Markdown 表格与代码块排版、KaTeX 完整数学公式渲染与多模态交互工作台。');

@@ -14,6 +14,12 @@
     Referer: 'https://www.bilibili.com/',
     'User-Agent': globalThis.navigator?.userAgent || 'Mozilla/5.0 (SparkSub)'
   });
+  const TRANSIENT_CAPTURE_ERRORS = new Set([
+    'TARGET_NOT_BUFFERED',
+    'FRAME_NOT_DECODED',
+    'NO_STABLE_FRAME',
+    'FINAL_FRAME_NOT_READY'
+  ]);
 
   function isBilibiliCdnHost(hostname) {
     const host = String(hostname || '').toLowerCase();
@@ -24,7 +30,17 @@
     if (typeof value !== 'string' || !value.trim()) return '';
     try {
       const parsed = new URL(value.trim());
-      if (parsed.protocol !== 'https:' || !isBilibiliCdnHost(parsed.hostname)) return '';
+      // Keep this browser-side descriptor policy identical to SparkScribe's
+      // BrowserNativeURLPolicy. Bilibili sometimes publishes an mcdn primary
+      // URL on an explicit port such as :8082 while also providing ordinary
+      // HTTPS backup URLs. Passing any explicit-port URL makes the native v2
+      // request fail validation before audio download even starts, so discard
+      // those candidates here and promote a compatible backup instead.
+      if (parsed.protocol !== 'https:'
+        || parsed.port
+        || parsed.username
+        || parsed.password
+        || !isBilibiliCdnHost(parsed.hostname)) return '';
       return parsed.href;
     } catch {
       return '';
@@ -93,6 +109,14 @@
     };
   }
 
+  function resolveVideoElement(videoElement = null) {
+    if (videoElement) return videoElement;
+    if (typeof document === 'undefined') return null;
+    return document.querySelector('.bpx-player-video-wrap video')
+      || document.querySelector('#movie_player video')
+      || document.querySelector('video');
+  }
+
   /**
    * 从当前页面中的 HTML5 <video> 元素捕获高分辨率画面 (通道 A)
    * @param {HTMLVideoElement} [videoElement]
@@ -106,10 +130,7 @@
     if (typeof document === 'undefined') {
       return { success: false, error: 'NO_DOM_ENVIRONMENT', message: '当前非浏览器 DOM 环境' };
     }
-    const video = videoElement
-      || document.querySelector('.bpx-player-video-wrap video')
-      || document.querySelector('#movie_player video')
-      || document.querySelector('video');
+    const video = resolveVideoElement(videoElement);
 
     if (!video) {
       return { success: false, error: 'NO_VIDEO_ELEMENT', message: '未找到有效视频播放器元素' };
@@ -214,36 +235,102 @@
     }
   }
 
+  function bufferedContains(video, targetSeconds, tolerance = 0.35) {
+    const ranges = video?.buffered;
+    if (!ranges || typeof ranges.length !== 'number') return false;
+    for (let i = 0; i < ranges.length; i++) {
+      try {
+        if (targetSeconds >= ranges.start(i) - tolerance && targetSeconds <= ranges.end(i) + tolerance) return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  function isFrameReady(video, targetSeconds, tolerance = 0.45) {
+    const currentTime = Number(video?.currentTime);
+    const readyState = Number(video?.readyState);
+    return Number.isFinite(currentTime)
+      && Math.abs(currentTime - targetSeconds) <= tolerance
+      && !video?.seeking
+      && (!Number.isFinite(readyState) || readyState >= 2)
+      && Number(video?.videoWidth) > 0
+      && Number(video?.videoHeight) > 0;
+  }
+
   /**
-   * 只负责把播放器寻道到目标秒并等待解码画面就绪，不做高清图片编码。
+   * 跳到目标时间后等待“目标时间已到 + seek 结束 + 当前解码帧可读”。
+   * 这里故意不依赖 requestAnimationFrame / requestVideoFrameCallback：它们属于页面呈现节奏，
+   * 暂停或后台标签页都可能被节流，而 Canvas 截帧真正需要的是媒体元素已经拥有可读的当前帧。
    * @param {HTMLVideoElement} video
    * @param {number} targetSeconds
    * @param {number} timeoutMs
-   * @returns {Promise<boolean>} true 表示收到 seeked，false 表示超时后使用当前已解码画面
+   * @returns {Promise<{ ok: boolean, target: number, buffered: boolean, background: boolean, reason?: string }>}
    */
-  async function seekVideoTo(video, targetSeconds, timeoutMs) {
-    const target = Math.max(0, Math.min(Number(video.duration) || targetSeconds, targetSeconds));
-    if (Math.abs((Number(video.currentTime) || 0) - target) <= 0.3) return true;
+  async function seekAndWaitForFrame(video, targetSeconds, timeoutMs) {
+    const duration = Number(video.duration);
+    const target = Math.max(0, Math.min(Number.isFinite(duration) && duration > 0 ? duration : targetSeconds, targetSeconds));
+    const background = typeof document !== 'undefined' && Boolean(document.hidden);
+    const startedBuffered = bufferedContains(video, target);
 
     return new Promise((resolve) => {
       let settled = false;
-      const cleanup = () => video.removeEventListener('seeked', onSeeked);
-      const finish = (seeked) => {
+      let pollTimer = null;
+      const initiallyReady = isFrameReady(video, target);
+      let seekObserved = initiallyReady;
+      const passiveEventNames = ['loadeddata', 'canplay', 'progress', 'timeupdate'];
+
+      const cleanup = () => {
+        clearTimeout(timeoutTimer);
+        if (pollTimer !== null) clearTimeout(pollTimer);
+        video.removeEventListener('seeked', onSeeked);
+        passiveEventNames.forEach((name) => video.removeEventListener(name, check));
+      };
+      const finish = (ok, reason) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
         cleanup();
-        resolve(seeked);
+        resolve({ ok, target, buffered: bufferedContains(video, target) || startedBuffered, background, reason });
+      };
+      const scheduleCheck = () => {
+        if (settled || pollTimer !== null) return;
+        pollTimer = setTimeout(() => {
+          pollTimer = null;
+          check();
+        }, 80);
+      };
+      const check = () => {
+        if (settled) return;
+        if (seekObserved && isFrameReady(video, target)) {
+          finish(true);
+          return;
+        }
+        scheduleCheck();
       };
       const onSeeked = () => {
-        const schedule = typeof requestAnimationFrame === 'function'
-          ? requestAnimationFrame
-          : (cb) => setTimeout(cb, 30);
-        schedule(() => setTimeout(() => finish(true), 40));
+        seekObserved = true;
+        check();
       };
-      const timer = setTimeout(() => finish(false), timeoutMs);
-      video.addEventListener('seeked', onSeeked, { once: true });
-      video.currentTime = target;
+      const timeoutTimer = setTimeout(() => {
+        const currentTime = Number(video.currentTime);
+        const closeToTarget = Number.isFinite(currentTime) && Math.abs(currentTime - target) <= 1.5;
+        const hasBufferedRanges = video?.buffered && typeof video.buffered.length === 'number';
+        const reason = closeToTarget
+          ? (hasBufferedRanges && !bufferedContains(video, target) ? 'TARGET_NOT_BUFFERED' : 'FRAME_NOT_DECODED')
+          : 'SEEK_TARGET_MISMATCH';
+        finish(false, reason);
+      }, Math.max(50, Number(timeoutMs) || 4000));
+
+      video.addEventListener('seeked', onSeeked);
+      passiveEventNames.forEach((name) => video.addEventListener(name, check));
+      if (!initiallyReady) {
+        try { video.currentTime = target; } catch {
+          finish(false, 'SEEK_ASSIGNMENT_FAILED');
+          return;
+        }
+      }
+      check();
     });
   }
 
@@ -257,10 +344,7 @@
     if (typeof document === 'undefined') {
       return { success: false, error: 'NO_DOM_ENVIRONMENT', message: '当前非浏览器 DOM 环境' };
     }
-    const video = options.videoElement
-      || document.querySelector('.bpx-player-video-wrap video')
-      || document.querySelector('#movie_player video')
-      || document.querySelector('video');
+    const video = resolveVideoElement(options.videoElement || null);
 
     if (!video) {
       return { success: false, error: 'NO_VIDEO_ELEMENT', message: '未找到有效视频播放器元素' };
@@ -276,18 +360,15 @@
     const timeoutMs = Number(options.timeoutMs) || 4000;
 
     try {
-      const seeked = await seekVideoTo(video, targetSeconds, timeoutMs);
-      const currentTimeValue = Number(video.currentTime);
-      const currentTime = Number.isFinite(currentTimeValue) ? currentTimeValue : null;
-      if (!seeked) {
-        const farFromTarget = currentTime === null || Math.abs(currentTime - targetSeconds) > 1.5;
-        return {
-          success: false,
-          error: farFromTarget ? 'SEEK_TARGET_MISMATCH' : 'SEEK_TIMEOUT_UNCONFIRMED',
-          message: farFromTarget
-            ? `播放器未能定位到目标时间 ${targetSeconds}s`
-            : `播放器已接近 ${targetSeconds}s，但未确认新画面解码完成`
-        };
+      const seekResult = await seekAndWaitForFrame(video, targetSeconds, timeoutMs);
+      if (!seekResult.ok) {
+        const error = seekResult.reason || 'FRAME_NOT_DECODED';
+        const message = error === 'SEEK_TARGET_MISMATCH'
+          ? `播放器未能定位到目标时间 ${targetSeconds}s`
+          : error === 'TARGET_NOT_BUFFERED'
+            ? `目标时间 ${targetSeconds}s 尚未缓冲完成，未截取可能过期的旧画面`
+            : `播放器已到达 ${targetSeconds}s 附近，但目标画面尚未完成解码`;
+        return { success: false, error, message };
       }
 
       return captureVideoFrame(video, options);
@@ -300,8 +381,89 @@
     }
   }
 
+  async function captureStableVideoFrameOnce(video, request, options, sampleTimeoutMs) {
+    const duration = Number(video.duration);
+    const videoDuration = Number.isFinite(duration) && duration > 0 ? duration : Infinity;
+    const requestedTimestamp = Number(request.targetSec ?? request.timestamp ?? request.windowStart);
+    const fallbackTimestamp = BSE.VisualDetector?.pickOptimalTimestamp
+      ? BSE.VisualDetector.pickOptimalTimestamp({ ...request, videoDuration })
+      : (Number.isFinite(requestedTimestamp) ? requestedTimestamp : (Number(video.currentTime) || 0));
+    const candidateTimestamps = BSE.VisualDetector?.buildCandidateTimestamps
+      ? BSE.VisualDetector.buildCandidateTimestamps(request, videoDuration, 3)
+      : [fallbackTimestamp];
+    /** @type {Array<import('../types/bse').VisualFrameCandidate>} */
+    const candidates = [];
+    let lastSeekFailure = '';
+
+    for (const timestamp of candidateTimestamps) {
+      const seekResult = await seekAndWaitForFrame(video, timestamp, sampleTimeoutMs);
+      if (!seekResult.ok) {
+        lastSeekFailure = seekResult.reason || 'NO_STABLE_FRAME';
+        // 相邻候选通常共享同一缓冲段。第一个点尚未缓冲时继续逐点等超时只会放大卡顿，
+        // 交给外层统一做一次更宽超时的重试即可。
+        if (!candidates.length && TRANSIENT_CAPTURE_ERRORS.has(lastSeekFailure)) break;
+        continue;
+      }
+      const currentTimeValue = Number(video.currentTime);
+      candidates.push({
+        timestamp: Number.isFinite(currentTimeValue) ? currentTimeValue : timestamp,
+        ...measureVisualSignature(video)
+      });
+    }
+
+    if (!candidates.length) {
+      const error = lastSeekFailure || 'NO_STABLE_FRAME';
+      const message = error === 'TARGET_NOT_BUFFERED'
+        ? '候选窗口尚未缓冲完成，未截取可能过期的旧画面'
+        : error === 'FRAME_NOT_DECODED'
+          ? '候选窗口已定位，但画面仍未完成解码'
+          : '候选窗口内未能读取可用画面';
+      return { success: false, error, message };
+    }
+
+    const hasPixelEvidence = candidates.some((candidate) => candidate.signature.length > 0);
+    const selected = hasPixelEvidence && BSE.VisualDetector?.selectBestCandidate
+      ? BSE.VisualDetector.selectBestCandidate(candidates)
+      : candidates.reduce((best, candidate) => (
+          Math.abs(candidate.timestamp - fallbackTimestamp) < Math.abs(best.timestamp - fallbackTimestamp) ? candidate : best
+        ), candidates[0]);
+    if (!selected) return { success: false, error: 'NO_STABLE_FRAME', message: '未能选择代表画面' };
+
+    const finalSeek = await seekAndWaitForFrame(video, selected.timestamp, Math.max(sampleTimeoutMs, 5000));
+    if (!finalSeek.ok) {
+      const error = finalSeek.reason === 'SEEK_TARGET_MISMATCH' ? 'FINAL_SEEK_MISMATCH' : 'FINAL_FRAME_NOT_READY';
+      return {
+        success: false,
+        error,
+        message: finalSeek.reason === 'TARGET_NOT_BUFFERED'
+          ? '代表帧已选出，但该时间点仍未缓冲完成'
+          : finalSeek.reason === 'SEEK_TARGET_MISMATCH'
+            ? '代表帧已选出，但播放器未能再次定位到该时间点进行高清编码'
+            : '代表帧时间已到达，但未确认目标画面完成解码'
+      };
+    }
+    const finalFrame = captureVideoFrame(video, options);
+    if (!finalFrame.success || !finalFrame.dataUrl) return finalFrame;
+    const finalTimestamp = Number(finalFrame.timestamp);
+
+    return {
+      ...finalFrame,
+      selection: {
+        strategy: hasPixelEvidence ? 'visual' : 'time-fallback',
+        sampledTimestamps: candidateTimestamps,
+        selectedTimestamp: Number.isFinite(finalTimestamp) ? finalTimestamp : selected.timestamp,
+        visualScore: selected.visualScore,
+        stabilityScore: selected.stabilityScore,
+        fingerprint: BSE.VisualDetector?.compactSignature
+          ? BSE.VisualDetector.compactSignature(selected.signature, 128)
+          : []
+      }
+    };
+  }
+
   /**
-   * 在 AI 规划窗口内只采样少量候选帧，比较像素稳定性、边缘细节与曝光，再返回一张高清代表帧。
+   * 在 AI 规划窗口内选择代表帧。网络/解码瞬态失败的有限重试属于 Media Module，
+   * 调用方不需要理解播放器的 readyState、buffered 或具体错误码。
    * 播放器只在本函数内暂时寻道，结束后统一恢复原时间与播放状态。
    * @param {import('../types/bse').AiVisualRequest} request
    * @param {import('../types/bse').CaptureFrameOptions} [options]
@@ -311,82 +473,24 @@
     if (typeof document === 'undefined') {
       return { success: false, error: 'NO_DOM_ENVIRONMENT', message: '当前非浏览器 DOM 环境' };
     }
-    const video = options.videoElement
-      || /** @type {HTMLVideoElement | null} */ (document.querySelector('.bpx-player-video-wrap video'))
-      || /** @type {HTMLVideoElement | null} */ (document.querySelector('#movie_player video'))
-      || /** @type {HTMLVideoElement | null} */ (document.querySelector('video'));
+    const video = resolveVideoElement(options.videoElement || null);
     if (!video) {
       return { success: false, error: 'NO_VIDEO_ELEMENT', message: '未找到有效视频播放器元素' };
     }
 
     const originalTime = Number(video.currentTime) || 0;
     const wasPaused = Boolean(video.paused);
-    const duration = Number(video.duration);
-    const videoDuration = Number.isFinite(duration) && duration > 0 ? duration : Infinity;
-    const fallbackTimestamp = BSE.VisualDetector?.pickOptimalTimestamp
-      ? BSE.VisualDetector.pickOptimalTimestamp({ ...request, videoDuration })
-      : Number(request.targetSec ?? request.timestamp ?? request.windowStart) || originalTime;
-    const candidateTimestamps = BSE.VisualDetector?.buildCandidateTimestamps
-      ? BSE.VisualDetector.buildCandidateTimestamps(request, videoDuration, 3)
-      : [fallbackTimestamp];
-    /** @type {Array<import('../types/bse').VisualFrameCandidate>} */
-    const candidates = [];
+    const sampleTimeoutMs = Math.max(100, Math.min(6000, Number(options.timeoutMs) || 2500));
 
     try {
       if (!wasPaused && typeof video.pause === 'function') video.pause();
-      const sampleTimeoutMs = Math.min(3000, Number(options.timeoutMs) || 2500);
-      for (const timestamp of candidateTimestamps) {
-        const seeked = await seekVideoTo(video, timestamp, sampleTimeoutMs);
-        if (!seeked) continue;
-        const currentTimeValue = Number(video.currentTime);
-        candidates.push({
-          timestamp: Number.isFinite(currentTimeValue) ? currentTimeValue : timestamp,
-          ...measureVisualSignature(video)
-        });
+      let result = await captureStableVideoFrameOnce(video, request, options, sampleTimeoutMs);
+      if (!result.success && TRANSIENT_CAPTURE_ERRORS.has(String(result.error || ''))) {
+        const retryTimeoutMs = Math.min(8000, Math.max(sampleTimeoutMs * 2, sampleTimeoutMs + 750));
+        result = await captureStableVideoFrameOnce(video, request, options, retryTimeoutMs);
+        if (result.success) result.warning = 'RETRIED_AFTER_BUFFERING';
       }
-
-      if (!candidates.length) {
-        return { success: false, error: 'NO_STABLE_FRAME', message: '候选窗口内未能读取可用画面' };
-      }
-
-      const hasPixelEvidence = candidates.some((candidate) => candidate.signature.length > 0);
-      const selected = hasPixelEvidence && BSE.VisualDetector?.selectBestCandidate
-        ? BSE.VisualDetector.selectBestCandidate(candidates)
-        : candidates.reduce((best, candidate) => (
-            Math.abs(candidate.timestamp - fallbackTimestamp) < Math.abs(best.timestamp - fallbackTimestamp) ? candidate : best
-          ), candidates[0]);
-      if (!selected) return { success: false, error: 'NO_STABLE_FRAME', message: '未能选择代表画面' };
-
-      const finalSeeked = await seekVideoTo(video, selected.timestamp, sampleTimeoutMs);
-      const finalCurrentTimeValue = Number(video.currentTime);
-      const finalCurrentTime = Number.isFinite(finalCurrentTimeValue) ? finalCurrentTimeValue : null;
-      if (!finalSeeked) {
-        const farFromTarget = finalCurrentTime === null || Math.abs(finalCurrentTime - selected.timestamp) > 1.5;
-        return {
-          success: false,
-          error: farFromTarget ? 'FINAL_SEEK_MISMATCH' : 'FINAL_SEEK_TIMEOUT_UNCONFIRMED',
-          message: farFromTarget
-            ? '代表帧已选出，但播放器未能再次定位到该时间点进行高清编码'
-            : '代表帧时间已接近目标，但未确认该画面完成解码'
-        };
-      }
-      const finalFrame = captureVideoFrame(video, options);
-      if (!finalFrame.success || !finalFrame.dataUrl) return finalFrame;
-      const finalTimestamp = Number(finalFrame.timestamp);
-
-      return {
-        ...finalFrame,
-        selection: {
-          strategy: hasPixelEvidence ? 'visual' : 'time-fallback',
-          sampledTimestamps: candidateTimestamps,
-          selectedTimestamp: Number.isFinite(finalTimestamp) ? finalTimestamp : selected.timestamp,
-          visualScore: selected.visualScore,
-          stabilityScore: selected.stabilityScore,
-          fingerprint: BSE.VisualDetector?.compactSignature
-            ? BSE.VisualDetector.compactSignature(selected.signature, 128)
-            : []
-        }
-      };
+      return result;
     } finally {
       if (Math.abs((Number(video.currentTime) || 0) - originalTime) > 0.3) video.currentTime = originalTime;
       if (!wasPaused && typeof video.play === 'function') video.play().catch(() => {});

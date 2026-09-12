@@ -25,6 +25,7 @@ export interface SubtitleTrack {
   cid?: number | string;
   page?: number;
   part?: string;
+  duration?: number;
   isTranslatable?: boolean;
   isTranslated?: boolean;
   sourceLan?: string;
@@ -62,7 +63,8 @@ export interface DiagnosticEvent {
 export interface DiagnosticStore {
   append(input: Partial<DiagnosticEvent> | string): DiagnosticEvent | null;
   replaceSession(scope: DiagnosticScope, sessionId: string): void;
-  events(filter?: { scope?: DiagnosticScope; sessionId?: string; minLevel?: DiagnosticLevel }): DiagnosticEvent[];
+  events(filter?: { scope?: DiagnosticScope; sessionId?: string; minLevel?: DiagnosticLevel; excludeCodeSuffix?: string }): DiagnosticEvent[];
+  count(filter?: { scope?: DiagnosticScope; sessionId?: string; minLevel?: DiagnosticLevel; excludeCodeSuffix?: string }): number;
   clear(filter?: { scope?: DiagnosticScope; sessionId?: string }): void;
 }
 
@@ -101,6 +103,7 @@ export interface DiagnosticPresenter {
   statusItem(event: DiagnosticEvent): { id: string; tone: 'success' | 'running' | 'warning' | 'error' | 'info'; title: string; detail: string; time: string };
   summarizeState(state: Partial<AppState>): { tone: 'success' | 'running' | 'warning' | 'error' | 'info'; label: string; title: string; detail: string };
   technicalEvents(): DiagnosticEvent[];
+  technicalCount(): number;
   clearSelected(): void;
   copySelected(header?: string): string;
   copyTechnical(header?: string): string;
@@ -277,20 +280,12 @@ export interface FormatOptions {
   withTimestamp?: boolean;
 }
 
-export interface AiPromptPreset {
-  id: string;
-  icon: string;
-  text: string;
-  desc?: string;
-  prompt: string | ((metadata?: Record<string, any>) => string);
-}
-
 type SidepanelButtonKey =
-  | 'refresh' | 'settingsToggle' | 'tabTimestamp' | 'tabPlain' | 'tabAi' | 'searchPrev' | 'searchNext'
-  | 'follow' | 'copy' | 'download' | 'batchButton' | 'aiSettingsToggle' | 'aiBtnTestConn'
-  | 'aiBtnSaveSettings' | 'aiBtnGenerate' | 'aiBtnSnipFrame' | 'aiBtnCopyNote' | 'aiBtnExportZip'
+  | 'refresh' | 'settingsToggle' | 'tabSubtitle' | 'tabLearn' | 'tabReview' | 'tabTimestamp' | 'tabPlain' | 'searchPrev' | 'searchNext'
+  | 'follow' | 'copy' | 'download' | 'batchButton' | 'aiSettingsToggle' | 'aiModelBadge' | 'aiBtnTestConn'
+  | 'aiBtnSaveSettings' | 'aiBtnGenerate' | 'aiBtnSnipFrame' | 'aiBtnExternalToggle' | 'aiBtnCopyNote' | 'aiBtnExportZip'
   | 'btnClearManualTray' | 'btnCopyStitchedTray' | 'btnDownloadTrayImages' | 'aiBtnCopyPlanPrompt'
-  | 'aiBtnCopySynthPrompt' | 'aiBtnOpenImportModal' | 'aiBtnCloseImportModal' | 'aiBtnCancelImport'
+  | 'aiBtnImportPlan' | 'aiBtnCopySynthPrompt' | 'aiBtnOpenImportModal' | 'aiBtnCloseImportModal' | 'aiBtnCancelImport'
   | 'aiBtnConfirmImport' | 'emptyTranscribe' | 'copyDiagnostic' | 'batchCloseBtn' | 'batchTreeBtnAll'
   | 'batchTreeBtnCur' | 'batchTreeBtnNone' | 'batchTreeBtnInvert' | 'batchQuickApplyBtn' | 'batchStartBtn'
   | 'batchPauseBtn' | 'batchCancelBtn' | 'tabTracker' | 'trackerSubscribeUpBtn' | 'trackerSubscribeSeasonBtn'
@@ -299,7 +294,7 @@ type SidepanelButtonKey =
   | 'queueBtnClearDone' | 'queueBatchSubmit' | 'queueBatchCancel' | 'queueCapabilityRefresh';
 
 type SidepanelInputKey =
-  | 'search' | 'aiInputEndpoint' | 'aiInputApiKey' | 'aiInputModel' | 'batchQuickStart' | 'batchQuickEnd'
+  | 'search' | 'aiInputEndpoint' | 'aiInputApiKey' | 'aiInputLearnModel' | 'aiInputReviewModel' | 'batchQuickStart' | 'batchQuickEnd'
   | 'trackerSearchInput' | 'trackerImportFile';
 
 type SidepanelSelectKey =
@@ -317,12 +312,30 @@ export type SidepanelElements = Record<string, HTMLElement | null>
   & { [K in SidepanelDetailsKey]: HTMLDetailsElement | null };
 
 // Global BSE namespace
+export interface SubtitleCorrectionPatch {
+  index: number;
+  from: number;
+  to: number;
+  originalContent: string;
+  content: string;
+}
+
+export interface SubtitleCorrectionEntry {
+  trackId: string;
+  cueCount: number;
+  patches: SubtitleCorrectionPatch[];
+  updatedAt: number;
+}
+
 export interface SubtitleCacheRecord {
   mediaKey: string;
   title: string;
   author: string;
+  trackId?: string;
+  trackSource?: string;
   language: string;
   langDoc: string;
+  corrections?: Record<string, SubtitleCorrectionEntry>;
   cues: Cue[];
   cueCount: number;
   plainText?: string;
@@ -337,13 +350,18 @@ export interface BSEUtilsNamespace {
   getBvid(url?: string): string | null;
   getBilibiliPage(url?: string): number;
   getActiveCidFromDom(): string | null;
+  rememberBilibiliMediaIdentity(identity?: { bvid?: string; cid?: string | number; page?: number; pageCount?: number }): string | null;
   getMediaKey(platform?: Platform | null, url?: string): string | null;
+  getArtifactKey(platform?: Platform | null, url?: string, mediaKey?: string): string | null;
   mediaStateMatchesUrl(candidateState: { mediaKey?: string | null; url?: string | null } | null | undefined, targetUrl: string): boolean;
   delay(ms: number, signal?: AbortSignal): Promise<void>;
   fetchWithTimeout(url: string, options?: RequestInit, timeoutMs?: number): Promise<Response>;
   formatClock(seconds: number): string;
   escapeHtml(value: unknown): string;
   sanitizeFilename(value: string): string;
+  normalizeImageUrl(value: unknown): string;
+  subtitleFingerprint(cues?: Cue[]): string;
+  buildSubtitlePatchToken(mediaKey: string, trackId: string, cues?: Cue[], knownFingerprint?: string): string;
   findActiveCueIndex(cues: Cue[], time: number, previousIndex?: number): number;
   downloadBlob(blob: Blob, filename: string): void;
   downloadText(text: string, filename: string, mime?: string): void;
@@ -356,11 +374,13 @@ export interface BSEUtilsNamespace {
     saveSnapshot(mediaKey: string, data: Record<string, any>): void;
   };
   UnifiedSubtitleCache: {
-    get(mediaKey: string): Promise<SubtitleCacheRecord | null>;
-    getMany(mediaKeys: string[]): Promise<Record<string, SubtitleCacheRecord>>;
+    get(mediaKey: string, options?: { includePlainText?: boolean; applyCorrections?: boolean }): Promise<SubtitleCacheRecord | null>;
+    getMany(mediaKeys: string[], options?: { includePlainText?: boolean; applyCorrections?: boolean }): Promise<Record<string, SubtitleCacheRecord>>;
     set(mediaKey: string, payload: {
       title?: string;
       author?: string;
+      trackId?: string;
+      trackSource?: string;
       language?: string;
       lang?: string;
       langDoc?: string;
@@ -368,10 +388,13 @@ export interface BSEUtilsNamespace {
       markdown?: string;
       cueCount?: number;
       cues?: Cue[];
-    }): Promise<void>;
+      corrections?: Record<string, SubtitleCorrectionEntry>;
+    }): Promise<boolean>;
     setMany(entries: Array<{ mediaKey: string; payload: {
       title?: string;
       author?: string;
+      trackId?: string;
+      trackSource?: string;
       language?: string;
       lang?: string;
       langDoc?: string;
@@ -379,7 +402,11 @@ export interface BSEUtilsNamespace {
       markdown?: string;
       cueCount?: number;
       cues?: Cue[];
-    } }>): Promise<void>;
+      corrections?: Record<string, SubtitleCorrectionEntry>;
+    } }>): Promise<number>;
+    recordCorrections(mediaKey: string, trackId: string, baseCues: Cue[], patches: Array<{ index: number; content: string }>, payload?: Record<string, any>): Promise<boolean>;
+    remove(mediaKey: string): Promise<boolean>;
+    applyCorrections(mediaKey: string, trackId: string, cues: Cue[], cachedRecord?: SubtitleCacheRecord | null): Promise<{ cues: Cue[]; appliedCount: number; conflictCount: number }>;
   };
 }
 
@@ -460,8 +487,7 @@ export interface BSEFormattersNamespace {
   toMergedMarkdown(tree: BilibiliTree, results: any, stats?: any, options?: FormatOptions): string;
   toMergedText(tree: BilibiliTree, results: any, stats?: any, options?: FormatOptions): string;
   buildBatchManifest(tree: BilibiliTree, selectedItems: BilibiliItem[], results: any, stats?: any, config?: any): any;
-  AI_PROMPTS: AiPromptPreset[];
-  generateAiPrompt(promptIdOrText: string, cues: Cue[], withTimestamp?: boolean, metadata?: Record<string, any>): string;
+  generateSubtitlePolishPrompt(cues: Cue[], withTimestamp?: boolean, metadata?: Record<string, any>): string;
   buildFrameReference(timeStr: string, label?: string): string;
   resolveFrameEntry(imagesMap?: Record<string, AiNoteFrame>, reference?: { seconds?: number; timeStr?: string; maxDistance?: number }): { frame: AiNoteFrame; distance: number } | null;
   transformFrameReferences(markdown: string, transform: (reference: { raw: string; timeStr: string; seconds: number; label: string }) => string): string;
@@ -620,7 +646,7 @@ export interface BSEMediaContextNamespace {
   fromYouTubeDetails(params?: { videoId?: string; videoDetails?: Record<string, any>; microformat?: Record<string, any> }): MediaContextPack;
   fetchBilibiliTags(bvid: string, options?: { signal?: AbortSignal }): Promise<string[]>;
   buildASRContext(mediaContext?: MediaContextPack | null): ASRContextHint;
-  formatMetadataBlock(mediaContext?: MediaContextPack | null, options?: { sourceLanguage?: string; targetLanguage?: string }): string;
+  formatPromptContext(mediaContext?: MediaContextPack | null, options?: { title?: string; sourceLanguage?: string; targetLanguage?: string }): string;
   buildTranslationContext(params?: { mediaContext?: MediaContextPack | null; cues?: Cue[]; startIndex?: number; endIndex?: number; sourceLanguage?: string; targetLanguage?: string; neighborCount?: number }): string;
 }
 
@@ -638,6 +664,39 @@ export interface QueueItemSubtitle {
   /** Optional user-facing engine label; routing must never depend on this value. */
   engineLabel?: string;
   captionKind?: 'manual' | 'auto' | 'translated' | 'transcript';
+}
+
+export interface QueueListProjectionSubtitle {
+  language: string;
+  langDoc: string;
+  cueCount: number;
+  source?: 'platform' | 'native';
+  engine?: string;
+  engineLabel?: string;
+  captionKind?: 'manual' | 'auto' | 'translated' | 'transcript';
+}
+
+export interface QueueListProjection {
+  id: string;
+  url: string;
+  platform: Platform;
+  targetId: string;
+  title: string;
+  author: string;
+  cover?: string;
+  duration?: number | string;
+  stage: QueueStage;
+  progress: number;
+  stageHint?: string;
+  error?: string;
+  errorCode?: string;
+  errorHint?: string;
+  retriable?: boolean;
+  sourceLanguage?: string;
+  processingIntent?: 'auto' | 'local-asr';
+  addedAt: number;
+  completedAt?: number;
+  subtitle?: QueueListProjectionSubtitle;
 }
 
 export interface QueueItem {
@@ -745,7 +804,10 @@ export interface QueueInput {
 
 export interface BSEQueueNamespace {
   setDiagnosticReporter(reporter: ((event: Partial<DiagnosticEvent>) => void) | null): void;
-  getQueue(): Promise<QueueItem[]>;
+  toListProjection(item: QueueItem | QueueListProjection): QueueListProjection | null;
+  getQueue(options?: { hydrateText?: boolean }): Promise<QueueItem[]>;
+  getQueueProjection(): Promise<QueueListProjection[]>;
+  getQueueSummary(): Promise<{ total: number; pending: number; updatedAt: number }>;
   saveQueue(items: QueueItem[]): Promise<QueueItem[]>;
   getItem(id: string): Promise<QueueItem | null>;
   addToQueue(urlsOrIds: string | QueueInput | Array<string | QueueInput>, options?: { title?: string; author?: string; cover?: string; sourceLanguage?: string; processingIntent?: 'auto' | 'local-asr' }): Promise<QueueItem[]>;
@@ -793,6 +855,8 @@ export interface NativeHostTranscriptionRequest {
   title?: string;
   duration?: number;
   platformLanguage?: string;
+  /** Exact browser-owned media identity, e.g. bili:<BVID>:cid<CID> or yt:<videoId>. */
+  mediaKey?: string;
   asrContext?: ASRContextHint;
   source: NativeHostSource;
 }
@@ -813,6 +877,8 @@ export interface NativeHostYouTubeCaptionResult {
 
 export interface NativeHostTranscriptionResult {
   cues: Cue[];
+  /** Echoed media identity. Protocol v2 clients use it to reject cross-media results. */
+  mediaKey?: string;
   /** Opaque diagnostic identifier. SparkSub must not route on this value. */
   engine?: string;
   engineLabel?: string;
@@ -901,7 +967,12 @@ export interface AiMessage {
 export interface AiSettings {
   endpoint: string;
   apiKey: string;
+  /** General-purpose fallback used by subtitle polishing and legacy settings. */
   model: string;
+  /** Canonical model for Learn workspace tasks. Old stored settings inherit `model` on read. */
+  learnModel: string;
+  /** Canonical model for Review workspace tasks. Old stored settings inherit `model` on read. */
+  reviewModel: string;
   timeoutMs: number;
 }
 
@@ -924,6 +995,7 @@ export interface AiModelTestResult extends AiProbeResult {
 
 export interface AiVisualRequest {
   id?: string;
+  chapterId?: string;
   label?: string;
   reason?: string;
   evidenceGoal?: string;
@@ -961,34 +1033,54 @@ export interface BSEAsrPolisherNamespace {
     messages?: AiMessage[] | null;
     images?: Array<string | AiImageInput>;
     model?: string;
+    scope?: 'default' | 'learn' | 'review';
     endpoint?: string;
     apiKey?: string;
     temperature?: number;
     timeoutMs?: number;
+    signal?: AbortSignal | null;
   }): Promise<{ text: string; model: string; usage?: object | null; raw?: any }>;
   getAiSettings(): Promise<AiSettings>;
   saveAiSettings(settings?: Partial<AiSettings>): Promise<AiSettings>;
+  resolveAiModel(settings: Partial<AiSettings> | null | undefined, scope?: 'default' | 'learn' | 'review'): string;
+  aiScopeForMode(mode?: string): 'learn' | 'review';
   buildPolishingPrompt(title: string, cues: Cue[], mediaContext?: MediaContextPack | null): string;
   buildTranslationPrompt(params?: { cues?: Cue[]; startIndex?: number; endIndex?: number; mediaContext?: MediaContextPack | null; sourceLanguage?: string; targetLanguage?: string }): string;
+  applyPolishResult(cues: Cue[], polishedText: string, options?: { expectedTaskToken?: string; materializeCues?: boolean }): { cues: Cue[]; patches: Array<{ index: number; lineId: string; content: string }>; matchedCount: number; changedCount: number; mode: 'empty' | 'no_changes' | 'indexed' | 'positional' | 'unmatched' | 'token_missing' | 'token_mismatch'; ignoredCount: number; taskToken?: string };
   alignPolishedCues(cues: Cue[], polishedText: string): Cue[];
   extractKeyframeTimestamps(cues: Cue[], maxCount?: number): Array<{ timestamp: number; label: string }>;
-  buildPlanningPrompt(params?: { title?: string; author?: string; cues?: Cue[]; manualFrames?: AiVisualRequest[] }): string;
+  buildPlanningPrompt(params?: { title?: string; cues?: Cue[]; mediaContext?: MediaContextPack | null; manualFrames?: AiVisualRequest[] }): string;
   extractJsonFromText(rawText: string): any;
+  normalizePlanChapters(parsed: any): Array<{ id: string; title: string; windowStart?: number; windowEnd?: number; coreConcept?: string }>;
   normalizeSamplingWindows(parsed: any): AiVisualRequest[];
   planVisualEvidence(params?: {
     title?: string;
-    author?: string;
     cues?: Cue[];
+    mediaContext?: MediaContextPack | null;
     manualFrames?: AiVisualRequest[];
     videoDuration?: number;
     endpoint?: string;
     apiKey?: string;
     model?: string;
     onProgress?: (message: string) => void;
+    signal?: AbortSignal | null;
   }): Promise<AiVisualPlanResult>;
   buildCourseNotePrompt(params?: Record<string, any>): string;
-  generateCourseNotes(params?: Record<string, any>): Promise<any>;
-  polishCues(cues: Cue[], options?: Record<string, any>): Promise<{ cues: Cue[]; modelUsed?: string; elapsedMs?: number }>;
+  generateCourseNotes(params?: {
+    title?: string;
+    cues?: Cue[];
+    mediaContext?: MediaContextPack | null;
+    screenshots?: string[];
+    capturedFrames?: Array<AiImageInput & AiVisualRequest>;
+    videoIR?: any;
+    mode?: string;
+    endpoint?: string;
+    apiKey?: string;
+    model?: string;
+    onProgress?: (message: string) => void;
+    signal?: AbortSignal | null;
+  }): Promise<{ markdown: string; modelUsed?: string; mode?: string }>;
+  polishCues(cues: Cue[], options?: Record<string, any>): Promise<{ cues: Cue[]; modelUsed?: string; elapsedMs?: number; changedCount?: number; alignmentMode?: string }>;
   DEFAULT_CONFIG: Readonly<AiSettings>;
   DEFAULT_ENDPOINT: string;
 }
@@ -1010,17 +1102,22 @@ export interface AiNoteFrame {
   timeStr?: string;
   label?: string;
   reason?: string;
+  chapterId?: string;
+  expectedSurface?: string;
   evidenceGoal?: string;
   importance?: string;
   source?: 'manual' | 'planned' | 'auto';
   selection?: CapturedFrame['selection'];
 }
 
+export type AiArtifactMode = 'course_notes' | 'keypoints' | 'concept_deep' | 'summary' | 'deep_qa' | 'error_check';
+
 export interface BSEAiNoteCacheNamespace {
-  save(note: { mediaKey: string; markdown: string; imagesMap?: Record<string, AiNoteFrame> | Map<string, AiNoteFrame>; mode?: 'course_notes' | 'summary' | 'deep_qa'; title?: string }): Promise<boolean>;
-  load(mediaKey: string, mode?: 'course_notes' | 'summary' | 'deep_qa'): Promise<{ markdown: string; mode: string; title: string; mediaKey: string; imagesMap: Record<string, AiNoteFrame>; updatedAt?: number } | null>;
-  listModes(mediaKey: string): Promise<Array<{ mode: string; updatedAt: number; title: string }>>;
-  remove(mediaKey: string, options?: { updateIndex?: boolean; mode?: 'course_notes' | 'summary' | 'deep_qa' }): Promise<void>;
+  save(note: { mediaKey: string; markdown: string; imagesMap?: Record<string, AiNoteFrame> | Map<string, AiNoteFrame>; mode?: AiArtifactMode; title?: string; sourceUrl?: string; sourceCueFingerprint?: string }): Promise<boolean>;
+  load(mediaKey: string, mode?: AiArtifactMode, options?: { signal?: AbortSignal | null }): Promise<{ markdown: string; mode: AiArtifactMode; title: string; mediaKey: string; sourceUrl?: string; sourceCueFingerprint?: string; imagesMap: Record<string, AiNoteFrame>; updatedAt?: number } | null>;
+  listModes(mediaKey: string): Promise<Array<{ mode: AiArtifactMode; updatedAt: number; title: string }>>;
+  listModesMany(mediaKeys: string[]): Promise<Record<string, Array<{ mode: AiArtifactMode; updatedAt: number; title: string }>>>;
+  remove(mediaKey: string, options?: { updateIndex?: boolean; mode?: AiArtifactMode }): Promise<void>;
   sweep(): Promise<{ evicted: number; frameBytes: number; noteCount?: number }>;
   getStats(): Promise<{ noteCount: number; frameBytes: number; maxFrameBytes?: number; maxNotes?: number }>;
   canonicalizeFrames(imagesMap?: Record<string, AiNoteFrame> | Map<string, AiNoteFrame>): AiNoteFrame[];
@@ -1030,6 +1127,7 @@ export interface BSEAiNoteCacheNamespace {
 
 export interface BSETrackerNamespace {
   getSubscriptions(): Promise<TrackedSubscription[]>;
+  getTrackerSummary(): Promise<{ total: number; unread: number; updatedAt: number }>;
   getSubscription(id: string): Promise<TrackedSubscription | null>;
   addSubscription(sub: Partial<TrackedSubscription>): Promise<TrackedSubscription>;
   removeSubscription(id: string): Promise<boolean>;
@@ -1044,6 +1142,7 @@ export interface BSETrackerNamespace {
   saveSettings(settings: Partial<TrackerSettings>): Promise<TrackerSettings>;
   getStorageStats(subscriptions?: TrackedSubscription[]): { subscriptionCount: number; itemCount: number; cachedSubtitleCount: number; evictedCount: number; approximateBytes: number };
   saveSubscriptions(subscriptions: TrackedSubscription[]): Promise<boolean>;
+  repairSubscriptionMetadata(sub: TrackedSubscription, options?: { signal?: AbortSignal; activeBvid?: string; persist?: boolean }): Promise<{ checked: boolean; updated: boolean; avatar?: string; error?: string }>;
   checkSubscriptionUpdates(sub: TrackedSubscription, options?: { signal?: AbortSignal; activeBvid?: string; persist?: boolean }): Promise<{ checked: boolean; initialized?: boolean; updated: boolean; newItems: TrackedItem[]; error?: string }>;
   checkAllUpdates(): Promise<{ totalUnread: number; updatedSubs: Array<{ id: string; title: string; newItemCount: number }> }>;
   fetchItemSubtitle(item: TrackedItem, options?: { signal?: AbortSignal }): Promise<TrackedItemSubtitle>;

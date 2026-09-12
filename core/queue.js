@@ -6,9 +6,11 @@
 
   const STORAGE_KEY_QUEUE = 'bse_transcription_queue_v1';
   const STORAGE_KEY_ITEM_PREFIX = `${STORAGE_KEY_QUEUE}:item:`;
+  const STORAGE_KEY_PROJECTION_PREFIX = `${STORAGE_KEY_QUEUE}:projection:`;
   const STORAGE_KEY_INDEX = `${STORAGE_KEY_QUEUE}:index`;
   const STORAGE_KEY_SCHEMA = `${STORAGE_KEY_QUEUE}:schema`;
-  const QUEUE_STORAGE_SCHEMA_VERSION = 2;
+  const STORAGE_KEY_SUMMARY = `${STORAGE_KEY_QUEUE}:summary`;
+  const QUEUE_STORAGE_SCHEMA_VERSION = 3;
   const STORAGE_KEY_SETTINGS = 'bse_queue_settings_v1';
   const LEASE_DURATION_MS = 5 * 60 * 1000;
   const EXECUTION_LEASE_MS = LEASE_DURATION_MS;
@@ -355,6 +357,52 @@
     return `${STORAGE_KEY_ITEM_PREFIX}${encodeURIComponent(id)}`;
   }
 
+  function projectionStorageKey(id) {
+    return `${STORAGE_KEY_PROJECTION_PREFIX}${encodeURIComponent(id)}`;
+  }
+
+  function projectionStorageKeyFromItemKey(key) {
+    if (typeof key !== 'string' || !key.startsWith(STORAGE_KEY_ITEM_PREFIX)) return '';
+    return `${STORAGE_KEY_PROJECTION_PREFIX}${key.slice(STORAGE_KEY_ITEM_PREFIX.length)}`;
+  }
+
+  function queueListProjection(item) {
+    if (!item?.id) return null;
+    const subtitle = item.subtitle && typeof item.subtitle === 'object'
+      ? {
+          language: String(item.subtitle.language || 'auto'),
+          langDoc: String(item.subtitle.langDoc || item.subtitle.language || ''),
+          cueCount: Math.max(0, Number(item.subtitle.cueCount) || (Array.isArray(item.subtitle.cues) ? item.subtitle.cues.length : 0)),
+          ...(item.subtitle.source ? { source: item.subtitle.source } : {}),
+          ...(item.subtitle.engine ? { engine: item.subtitle.engine } : {}),
+          ...(item.subtitle.engineLabel ? { engineLabel: item.subtitle.engineLabel } : {}),
+          ...(item.subtitle.captionKind ? { captionKind: item.subtitle.captionKind } : {})
+        }
+      : undefined;
+    return {
+      id: String(item.id),
+      url: String(item.url || ''),
+      platform: item.platform,
+      targetId: String(item.targetId || item.id),
+      title: String(item.title || ''),
+      author: String(item.author || ''),
+      cover: String(item.cover || ''),
+      ...(item.duration != null ? { duration: item.duration } : {}),
+      stage: String(item.stage || 'queued'),
+      progress: Math.max(0, Math.min(100, Number(item.progress) || 0)),
+      stageHint: String(item.stageHint || '').slice(0, 240),
+      ...(item.error ? { error: String(item.error).slice(0, 240) } : {}),
+      ...(item.errorCode ? { errorCode: String(item.errorCode).slice(0, 80) } : {}),
+      ...(item.errorHint ? { errorHint: String(item.errorHint).slice(0, 240) } : {}),
+      ...(typeof item.retriable === 'boolean' ? { retriable: item.retriable } : {}),
+      ...(item.sourceLanguage ? { sourceLanguage: String(item.sourceLanguage) } : {}),
+      ...(item.processingIntent ? { processingIntent: item.processingIntent } : {}),
+      ...(Number.isFinite(Number(item.addedAt)) ? { addedAt: Number(item.addedAt) } : { addedAt: 0 }),
+      ...(Number.isFinite(Number(item.completedAt)) ? { completedAt: Number(item.completedAt) } : {}),
+      ...(subtitle ? { subtitle } : {})
+    };
+  }
+
   function normalizeQueueIndex(value) {
     if (!Array.isArray(value)) return null;
     return [...new Set(value.filter((key) => typeof key === 'string' && key.startsWith(STORAGE_KEY_ITEM_PREFIX)))];
@@ -421,24 +469,38 @@
         }
       }
     }
-    item.subtitle.plainText = item.subtitle.plainText || processed.plainText;
-    item.subtitle.markdown = item.subtitle.markdown || processed.markdown;
-    item.subtitle.srt = item.subtitle.srt || processed.srt;
-    item.subtitle.cueCount = item.subtitle.cueCount || processed.cueCount;
-    return item;
+    return {
+      ...item,
+      subtitle: {
+        ...item.subtitle,
+        plainText: item.subtitle.plainText || processed.plainText,
+        markdown: item.subtitle.markdown || processed.markdown,
+        srt: item.subtitle.srt || processed.srt,
+        cueCount: item.subtitle.cueCount || processed.cueCount
+      }
+    };
   }
 
   function sortQueue(items) {
     return items.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
   }
 
-  async function readQueueFromStorage() {
+  function queueSummary(items = []) {
+    const list = Array.isArray(items) ? items : [];
+    return {
+      total: list.length,
+      pending: list.reduce((sum, item) => sum + (!['done', 'failed'].includes(item?.stage) ? 1 : 0), 0),
+      updatedAt: Date.now()
+    };
+  }
+
+  async function readQueueFromStorage({ hydrateText = true } = {}) {
     const storage = getStorageArea();
     if (!storage) {
       const items = Object.values(globalThis.__BSE_MEMORY_QUEUE_ITEMS__ || {});
       const sanitized = items.map(sanitizeQueueItemForPersistence);
       globalThis.__BSE_MEMORY_QUEUE_ITEMS__ = Object.fromEntries(sanitized.map((item) => [item.id, item]));
-      return sanitized.map(hydrateQueueItemForRuntime);
+      return hydrateText ? sanitized.map(hydrateQueueItemForRuntime) : sanitized;
     }
     try {
       const meta = await storage.get([STORAGE_KEY_INDEX, STORAGE_KEY_QUEUE, STORAGE_KEY_SCHEMA]);
@@ -480,18 +542,90 @@
         const indexKeys = runtimeItems.map((item) => itemStorageKey(item.id));
         const values = {
           [STORAGE_KEY_INDEX]: indexKeys,
-          [STORAGE_KEY_SCHEMA]: QUEUE_STORAGE_SCHEMA_VERSION
+          [STORAGE_KEY_SCHEMA]: QUEUE_STORAGE_SCHEMA_VERSION,
+          [STORAGE_KEY_SUMMARY]: queueSummary(runtimeItems)
         };
-        runtimeItems.forEach((item) => { values[itemStorageKey(item.id)] = item; });
+        runtimeItems.forEach((item) => {
+          values[itemStorageKey(item.id)] = item;
+          values[projectionStorageKey(item.id)] = queueListProjection(item);
+        });
         await storage.set(values);
         if (isLegacyArray && storage.remove) await storage.remove(STORAGE_KEY_QUEUE);
       } else if (indexNeedsRepair) {
         await storage.set({ [STORAGE_KEY_INDEX]: itemKeys });
       }
-      return runtimeItems.map(hydrateQueueItemForRuntime);
+      return hydrateText ? runtimeItems.map(hydrateQueueItemForRuntime) : runtimeItems;
     } catch {
       return [];
     }
+  }
+
+  async function readQueueProjectionFromStorage() {
+    const storage = getStorageArea();
+    if (!storage) {
+      return Object.values(globalThis.__BSE_MEMORY_QUEUE_ITEMS__ || {})
+        .map(queueListProjection)
+        .filter(Boolean);
+    }
+
+    const meta = await storage.get([STORAGE_KEY_INDEX, STORAGE_KEY_QUEUE, STORAGE_KEY_SCHEMA]);
+    const itemKeys = normalizeQueueIndex(meta?.[STORAGE_KEY_INDEX]);
+    const schemaVersion = Number(meta?.[STORAGE_KEY_SCHEMA] || 0);
+    const requiresMigration = itemKeys === null
+      || schemaVersion < QUEUE_STORAGE_SCHEMA_VERSION
+      || Array.isArray(meta?.[STORAGE_KEY_QUEUE]);
+
+    if (requiresMigration) {
+      // v1/v2 stored no list projection. Pay the full-item read exactly once,
+      // persist v3 item projections in the same migration write, and only expose
+      // lightweight records to list consumers afterwards.
+      const migratedItems = await readQueueFromStorage({ hydrateText: false });
+      return migratedItems.map(queueListProjection).filter(Boolean);
+    }
+
+    if (!itemKeys.length) return [];
+    const projectionKeys = itemKeys.map(projectionStorageKeyFromItemKey);
+    const records = await storage.get(projectionKeys);
+    const projections = [];
+    const missingItemKeys = [];
+
+    for (let index = 0; index < itemKeys.length; index += 1) {
+      const itemKey = itemKeys[index];
+      const projectionKey = projectionKeys[index];
+      const rawProjection = records?.[projectionKey];
+      const projection = queueListProjection(rawProjection);
+      if (projection?.id) {
+        projections.push(projection);
+      } else {
+        missingItemKeys.push(itemKey);
+      }
+    }
+
+    if (missingItemKeys.length) {
+      // Self-heal isolated projection loss without rereading healthy completed
+      // items. This path is exceptional; normal v3 list reads never touch item records.
+      const missingItems = await storage.get(missingItemKeys);
+      const repairValues = {};
+      const deadItemKeys = [];
+      for (const itemKey of missingItemKeys) {
+        const item = missingItems?.[itemKey];
+        const projection = queueListProjection(item);
+        if (!projection?.id) {
+          deadItemKeys.push(itemKey);
+          continue;
+        }
+        projections.push(projection);
+        repairValues[projectionStorageKey(projection.id)] = projection;
+      }
+      if (deadItemKeys.length) {
+        const deadSet = new Set(deadItemKeys);
+        repairValues[STORAGE_KEY_INDEX] = itemKeys.filter((itemKey) => !deadSet.has(itemKey));
+        repairValues[STORAGE_KEY_SUMMARY] = queueSummary(projections);
+      }
+      if (Object.keys(repairValues).length) await storage.set(repairValues);
+    }
+
+    return projections;
   }
 
   function safeClone(obj) {
@@ -508,13 +642,15 @@
     return Array.isArray(obj) ? [...obj] : { ...obj };
   }
 
-  async function writeItems(items, replace = false) {
+  async function writeItems(items, replace = false, fullQueue = null) {
     const snapshots = (items || []).map(sanitizeQueueItemForPersistence);
+    const summary = Array.isArray(fullQueue) ? queueSummary(fullQueue) : null;
     const storage = getStorageArea();
     if (!storage) {
       const next = replace ? {} : { ...(globalThis.__BSE_MEMORY_QUEUE_ITEMS__ || {}) };
       snapshots.forEach((item) => { next[item.id] = item; });
       globalThis.__BSE_MEMORY_QUEUE_ITEMS__ = next;
+      globalThis.__BSE_MEMORY_QUEUE_SUMMARY__ = summary || queueSummary(Object.values(next));
       return;
     }
 
@@ -522,7 +658,10 @@
     const oldKeys = normalizeQueueIndex(meta?.[STORAGE_KEY_INDEX]) || [];
     const values = {};
     const writtenKeys = snapshots.map((item) => itemStorageKey(item.id));
-    snapshots.forEach((item) => { values[itemStorageKey(item.id)] = item; });
+    snapshots.forEach((item) => {
+      values[itemStorageKey(item.id)] = item;
+      values[projectionStorageKey(item.id)] = queueListProjection(item);
+    });
 
     const nextKeys = replace
       ? writtenKeys
@@ -533,9 +672,15 @@
       || !schemaIsCurrent;
     if (indexChanged) values[STORAGE_KEY_INDEX] = nextKeys;
     if (!schemaIsCurrent) values[STORAGE_KEY_SCHEMA] = QUEUE_STORAGE_SCHEMA_VERSION;
+    if (summary) values[STORAGE_KEY_SUMMARY] = summary;
 
     const removed = replace ? oldKeys.filter((key) => !values[key]) : [];
-    if (removed.length && storage.remove) await storage.remove(removed);
+    if (removed.length && storage.remove) {
+      await storage.remove([
+        ...removed,
+        ...removed.map(projectionStorageKeyFromItemKey).filter(Boolean)
+      ]);
+    }
     await storage.set(values);
     // Remove the old whole-array representation after migration without scanning unrelated storage.
     if (storage.remove && Array.isArray(meta?.[STORAGE_KEY_QUEUE])) {
@@ -543,32 +688,185 @@
     }
   }
 
-  // Every queue mutation in this context enters here. Items are stored independently,
-  // so executors in other extension contexts cannot overwrite unrelated jobs.
-  let mutationTail = Promise.resolve();
-  function serializeQueueMutation(mutator) {
-    const operation = mutationTail.then(async () => {
-      const queue = sortQueue(await readQueueFromStorage());
-      return mutator(queue);
-    });
-    mutationTail = operation.catch(() => {});
-    return operation;
+  async function removeQueueItemsByIds(ids, remainingQueueProjection = []) {
+    const uniqueIds = [...new Set((ids || []).map((id) => String(id || '')).filter(Boolean))];
+    if (!uniqueIds.length) return 0;
+    const storage = getStorageArea();
+    if (!storage) {
+      const next = { ...(globalThis.__BSE_MEMORY_QUEUE_ITEMS__ || {}) };
+      let removed = 0;
+      for (const id of uniqueIds) {
+        if (next[id]) {
+          delete next[id];
+          removed += 1;
+        }
+      }
+      globalThis.__BSE_MEMORY_QUEUE_ITEMS__ = next;
+      globalThis.__BSE_MEMORY_QUEUE_SUMMARY__ = queueSummary(remainingQueueProjection);
+      return removed;
+    }
+
+    const removeItemKeys = uniqueIds.map(itemStorageKey);
+    const nextKeys = (remainingQueueProjection || [])
+      .map((item) => itemStorageKey(item?.id))
+      .filter(Boolean);
+    const values = {
+      [STORAGE_KEY_INDEX]: nextKeys,
+      [STORAGE_KEY_SCHEMA]: QUEUE_STORAGE_SCHEMA_VERSION,
+      [STORAGE_KEY_SUMMARY]: queueSummary(remainingQueueProjection)
+    };
+    // Publish the smaller authoritative index first. If cleanup is interrupted,
+    // stale unindexed records are harmless; the inverse order can leave dangling index entries.
+    await storage.set(values);
+    if (storage.remove) {
+      await storage.remove([
+        ...removeItemKeys,
+        ...uniqueIds.map(projectionStorageKey)
+      ]);
+    }
+    return uniqueIds.length;
   }
 
-  async function getQueue() {
+  async function readQueueItemsByIds(ids) {
+    const uniqueIds = [...new Set((ids || []).map((id) => String(id || '')).filter(Boolean))];
+    if (!uniqueIds.length) return [];
+    const storage = getStorageArea();
+    if (!storage) {
+      return uniqueIds
+        .map((id) => globalThis.__BSE_MEMORY_QUEUE_ITEMS__?.[id])
+        .filter((item) => item?.id);
+    }
+    const keys = uniqueIds.map(itemStorageKey);
+    const records = await storage.get(keys.length === 1 ? keys[0] : keys).catch(() => ({}));
+    return keys.map((key) => records?.[key]).filter((item) => item?.id);
+  }
+
+  // Every queue mutation in this context enters the same serial tail. Most v3
+  // mutations use projections or targeted item records; the full-queue variant
+  // remains only for compatibility paths that genuinely require every item body.
+  let mutationTail = Promise.resolve();
+  function serializeQueueOperation(operation) {
+    const queued = mutationTail.then(operation);
+    mutationTail = queued.catch(() => {});
+    return queued;
+  }
+
+  function serializeQueueMutation(mutator) {
+    return serializeQueueOperation(async () => {
+      const queue = sortQueue(await readQueueFromStorage({ hydrateText: false }));
+      return mutator(queue);
+    });
+  }
+
+  function serializeQueueProjectionMutation(mutator) {
+    return serializeQueueOperation(async () => {
+      const queue = sortQueue(await readQueueProjectionFromStorage());
+      return mutator(queue);
+    });
+  }
+
+  async function getQueue({ hydrateText = true } = {}) {
     await mutationTail;
-    return sortQueue(await readQueueFromStorage());
+    return sortQueue(await readQueueFromStorage({ hydrateText }));
+  }
+
+  async function getQueueProjection() {
+    await mutationTail;
+    return sortQueue(await readQueueProjectionFromStorage());
+  }
+
+  async function getQueueSummary() {
+    await mutationTail;
+    const storage = getStorageArea();
+    if (!storage) {
+      return globalThis.__BSE_MEMORY_QUEUE_SUMMARY__
+        || queueSummary(Object.values(globalThis.__BSE_MEMORY_QUEUE_ITEMS__ || {}));
+    }
+    const result = await storage.get(STORAGE_KEY_SUMMARY).catch(() => ({}));
+    const stored = result?.[STORAGE_KEY_SUMMARY];
+    const total = Number(stored?.total);
+    const pending = Number(stored?.pending);
+    if (Number.isInteger(total) && total >= 0 && Number.isInteger(pending) && pending >= 0 && pending <= total) {
+      return { total, pending, updatedAt: Number(stored?.updatedAt) || 0 };
+    }
+
+    // One-time compatibility fallback for installations created before the summary projection.
+    const queue = await getQueueProjection();
+    const summary = queueSummary(queue);
+    await storage.set({ [STORAGE_KEY_SUMMARY]: summary }).catch(() => {});
+    return summary;
   }
 
   async function saveQueue(items) {
-    return serializeQueueMutation(async () => {
-      await writeItems(items, true);
+    return serializeQueueOperation(async () => {
+      await writeItems(items, true, items);
       return items;
     });
   }
 
+  function validQueueSummary(value) {
+    const total = Number(value?.total);
+    const pending = Number(value?.pending);
+    return Number.isInteger(total) && total >= 0
+      && Number.isInteger(pending) && pending >= 0 && pending <= total;
+  }
+
+  async function trySaveItemTargeted(itemSnapshot) {
+    const storage = getStorageArea();
+    if (!storage || !itemSnapshot?.id) return null;
+    const key = itemStorageKey(itemSnapshot.id);
+    const nextTerminal = itemSnapshot.stage === 'done' || itemSnapshot.stage === 'failed';
+    const lookupKeys = nextTerminal
+      ? [key, STORAGE_KEY_SCHEMA, STORAGE_KEY_SUMMARY]
+      : [key, STORAGE_KEY_SCHEMA];
+    const stored = await storage.get(lookupKeys).catch(() => null);
+    if (!stored || Number(stored?.[STORAGE_KEY_SCHEMA] || 0) < QUEUE_STORAGE_SCHEMA_VERSION) return null;
+    const current = stored[key];
+    if (!current?.id) return null;
+    const currentTerminal = current.stage === 'done' || current.stage === 'failed';
+    // A stale non-terminal snapshot must never resurrect a completed/failed item.
+    // Explicit retries use retryItem(), which updates the summary from projections.
+    if (currentTerminal && !nextTerminal) return false;
+    if (itemSnapshot.leaseOwner && current.leaseOwner !== itemSnapshot.leaseOwner) return false;
+
+    if (itemSnapshot.leaseOwner && !nextTerminal) {
+      itemSnapshot.leaseExpiresAt = Date.now() + LEASE_DURATION_MS;
+    } else if (itemSnapshot.stage === 'done' || itemSnapshot.stage === 'failed') {
+      delete itemSnapshot.leaseOwner;
+      delete itemSnapshot.leaseExpiresAt;
+    }
+
+    const transitionChangesPending = currentTerminal !== nextTerminal;
+    const storedSummary = stored?.[STORAGE_KEY_SUMMARY];
+    if (transitionChangesPending && !validQueueSummary(storedSummary)) return null;
+
+    const persisted = sanitizeQueueItemForPersistence(itemSnapshot);
+    const values = {
+      [key]: persisted,
+      [projectionStorageKey(itemSnapshot.id)]: queueListProjection(persisted)
+    };
+    if (transitionChangesPending) {
+      const delta = nextTerminal ? -1 : 1;
+      values[STORAGE_KEY_SUMMARY] = {
+        total: Number(storedSummary.total),
+        pending: Math.max(0, Math.min(Number(storedSummary.total), Number(storedSummary.pending) + delta)),
+        updatedAt: Date.now()
+      };
+    }
+    await storage.set(values);
+    return true;
+  }
+
   async function saveItem(updatedItem) {
     const itemSnapshot = safeClone(updatedItem);
+    const fastOperation = mutationTail.then(() => trySaveItemTargeted(itemSnapshot));
+    mutationTail = fastOperation.catch(() => {});
+    const fastResult = await fastOperation;
+    if (fastResult !== null) {
+      if (fastResult) broadcastQueueUpdate(itemSnapshot);
+      return fastResult;
+    }
+
     const success = await serializeQueueMutation(async (queue) => {
       const index = queue.findIndex((i) => i.id === itemSnapshot.id);
       if (index >= 0) {
@@ -582,13 +880,14 @@
           delete itemSnapshot.leaseOwner;
           delete itemSnapshot.leaseExpiresAt;
         }
-        await writeItems([itemSnapshot], false);
+        queue[index] = itemSnapshot;
+        await writeItems([itemSnapshot], false, queue);
         return true;
       }
       return false;
     });
     if (success) {
-      broadcastQueueUpdate();
+      broadcastQueueUpdate(itemSnapshot);
     }
     return success;
   }
@@ -835,10 +1134,6 @@
     if (!completeCues.length) {
       throw nativeError('RESULT_INCOMPLETE', '字幕结果不完整。', '未收到有效且非空的字幕内容。');
     }
-    const processed = formatCuesToStructured(completeCues, item.title, item.author, item.url);
-    if (!processed.cueCount || !processed.plainText.trim()) {
-      throw nativeError('RESULT_INCOMPLETE', '字幕结果不完整。', '未收到有效且非空的字幕内容。');
-    }
     item.subtitle = {
       language: details.language || 'auto',
       langDoc: details.langDoc || details.language || '自动识别',
@@ -846,11 +1141,8 @@
       engine: details.engine,
       ...(details.engineLabel ? { engineLabel: details.engineLabel } : {}),
       ...(details.captionKind ? { captionKind: details.captionKind } : {}),
-      cueCount: processed.cueCount,
-      plainText: processed.plainText,
-      markdown: processed.markdown,
-      srt: processed.srt,
-      cues: processed.cues
+      cueCount: completeCues.length,
+      cues: completeCues
     };
     delete item.error;
     delete item.errorCode;
@@ -892,6 +1184,8 @@
     };
 
     let result;
+    let expectedNativeMediaKey = '';
+    let requireNativeMediaEcho = false;
     try {
       const titleText = item.title || item.metaCache?.title || '';
       const chineseMatches = titleText.match(/[\u4e00-\u9fa5]/g);
@@ -901,6 +1195,7 @@
         ? item.sourceLanguage
         : (inferredLang || 'auto');
       const capabilities = await BSE.NativeHost.getCapabilities();
+      requireNativeMediaEcho = Number(capabilities?.protocolVersion) === 2;
       const canTranscribe = BSE.LanguageRouting?.localASRSupport
         ? BSE.LanguageRouting.localASRSupport(capabilities, effectiveSourceLanguage, inferredLang)
         : capabilities?.features?.localASR?.available === true;
@@ -916,6 +1211,7 @@
       const asrContext = BSE.MediaContext?.buildASRContext?.(item.mediaContext || null) || {};
       const jobId = nextNativeJobId(item, 'asr');
       const mediaKey = String(item.mediaContext?.mediaKey || item.expectedMediaKey || '').trim();
+      expectedNativeMediaKey = mediaKey;
       const contextTopic = asrContext.topic || '—';
       const contextTerms = Array.isArray(asrContext.terms) && asrContext.terms.length ? asrContext.terms.join(', ') : '—';
       emitDiagnostic({
@@ -949,6 +1245,25 @@
     } finally {
       await writeTail;
     }
+
+    const returnedMediaKey = String(result?.mediaKey || '').trim();
+    if (expectedNativeMediaKey && returnedMediaKey && returnedMediaKey !== expectedNativeMediaKey) {
+      throw nativeError(
+        'RESULT_INCOMPLETE',
+        'SparkScribe 返回了其他视频的转录结果。',
+        '已阻止跨视频字幕写入；请在当前视频重新发起本机转录。',
+        true
+      );
+    }
+    if (expectedNativeMediaKey && requireNativeMediaEcho && !returnedMediaKey) {
+      throw nativeError(
+        'RESULT_INCOMPLETE',
+        'SparkScribe 未返回媒体身份确认。',
+        '已阻止无法证明属于当前视频的转录结果；请更新 SparkScribe 后重试。',
+        true
+      );
+    }
+
     const cues = normalizeCompleteCues(result?.cues);
     if (!cues.length) {
       throw nativeError('RESULT_INCOMPLETE', '本机转录结果不完整。', '本机服务没有返回有效的字幕内容。');
@@ -1074,8 +1389,25 @@
   }
 
   async function getItem(id) {
-    const queue = await getQueue();
-    return queue.find((i) => i.id === id) || null;
+    await mutationTail;
+    const targetId = String(id || '');
+    if (!targetId) return null;
+    const storage = getStorageArea();
+    if (!storage) {
+      const item = globalThis.__BSE_MEMORY_QUEUE_ITEMS__?.[targetId] || null;
+      return item ? hydrateQueueItemForRuntime(item) : null;
+    }
+
+    const key = itemStorageKey(targetId);
+    const stored = await storage.get([key, STORAGE_KEY_SCHEMA]).catch(() => ({}));
+    if (Number(stored?.[STORAGE_KEY_SCHEMA] || 0) < QUEUE_STORAGE_SCHEMA_VERSION) {
+      // Complete the one-time v1/v2 projection migration before serving details.
+      const migratedItems = await readQueueFromStorage({ hydrateText: false });
+      const migratedItem = migratedItems.find((item) => String(item.id) === targetId) || null;
+      return migratedItem ? hydrateQueueItemForRuntime(migratedItem) : null;
+    }
+    const item = stored?.[key] || null;
+    return item ? hydrateQueueItemForRuntime(item) : null;
   }
 
   async function getSettings() {
@@ -1105,13 +1437,17 @@
    * 阶段级异常自愈（Stage-based Recovery）
    * 检测因浏览器关闭/崩溃而停留在中间态的任务，平滑重置为可继续执行的状态
    */
-  async function recoverStaleJobs() {
-    return serializeQueueMutation(async (queue) => {
+  async function recoverStaleJobsInternal(returnFullQueue = false) {
+    const recoveredCandidates = await serializeQueueProjectionMutation(async (queueProjection) => {
       const runningStages = ['resolving', 'fetching_caption', 'fetching_audio', 'transcribing', 'postprocessing'];
+      const candidateIds = queueProjection
+        .filter((item) => runningStages.includes(item.stage) || item.stage === 'queued')
+        .map((item) => item.id);
+      const candidates = await readQueueItemsByIds(candidateIds);
       const changed = [];
       const now = Date.now();
 
-      for (const item of queue) {
+      for (const item of candidates) {
         const leaseExpiresAt = item.leaseExpiresAt ?? item.executionLease?.expiresAt ?? 0;
         const isLeaseActive = leaseExpiresAt > now;
         if (runningStages.includes(item.stage) && !isLeaseActive) {
@@ -1130,10 +1466,16 @@
           changed.push(item);
         }
       }
-      if (changed.length) await writeItems(changed);
+      if (changed.length) await writeItems(changed, false, null);
       if (changed.length) broadcastQueueUpdate();
-      return queue;
+      return candidates;
     });
+    if (!returnFullQueue) return recoveredCandidates;
+    return getQueue({ hydrateText: false });
+  }
+
+  async function recoverStaleJobs() {
+    return recoverStaleJobsInternal(true);
   }
 
   /**
@@ -1146,7 +1488,10 @@
     const rawList = Array.isArray(urlsOrIds) ? urlsOrIds : [urlsOrIds];
     const addedItems = [];
     const settings = await getSettings();
-    await serializeQueueMutation(async (queue) => {
+    await serializeQueueProjectionMutation(async (queueProjection) => {
+      const projectionById = new Map(queueProjection.map((item) => [item.id, item]));
+      const workingItemsById = new Map();
+      const itemsToWrite = new Map();
       for (const raw of rawList) {
         const rawString = typeof raw === 'object' && raw ? (raw.url || raw.targetId || raw.cleanUrl || '') : String(raw || '');
         const opt = typeof raw === 'object' && raw ? { ...options, ...raw } : options;
@@ -1161,20 +1506,26 @@
         const processingIntent = opt.processingIntent === 'local-asr' ? 'local-asr' : 'auto';
         const localBilibiliIdentityIsCoarse = processingIntent === 'local-asr'
           && parsed.platform === 'bilibili'
-          && Boolean(suppliedMediaKey)
+          && Boolean(expectedMediaKey)
           && !/^bili:BV[a-zA-Z0-9]+:cid[^:]+$/i.test(expectedMediaKey);
-        if (suppliedMediaKey && (!expectedMediaKey || localBilibiliIdentityIsCoarse)) {
+        const localIntentMissingIdentity = processingIntent === 'local-asr' && !expectedMediaKey;
+        if ((suppliedMediaKey && !expectedMediaKey) || localBilibiliIdentityIsCoarse || localIntentMissingIdentity) {
           throw nativeError(
             'INVALID_REQUEST',
             '页面视频身份正在切换，未加入离线转录。',
-            '请等待当前视频的 BVID/CID 加载稳定后重新点击离线转录。',
+            parsed.platform === 'bilibili'
+              ? '请等待当前视频的 BVID/CID 加载稳定后重新点击离线转录。'
+              : '请等待当前视频 ID 加载稳定后重新点击离线转录。',
             true
           );
         }
 
-        const existingIndex = queue.findIndex((item) => item.id === itemId);
-        if (existingIndex >= 0) {
-          const existing = queue[existingIndex];
+        let existing = workingItemsById.get(itemId) || null;
+        if (!existing && projectionById.has(itemId)) {
+          existing = (await readQueueItemsByIds([itemId]))[0] || null;
+          if (existing) workingItemsById.set(itemId, existing);
+        }
+        if (existing) {
           const identityChanged = Boolean(expectedMediaKey)
             && Boolean(existing.expectedMediaKey)
             && existing.expectedMediaKey !== expectedMediaKey;
@@ -1183,6 +1534,14 @@
           const explicitLocalRerun = processingIntent === 'local-asr' && existing.stage === 'done';
           const intentRequiresReset = intentChanged && existing.stage !== 'done';
           const isActive = ACTIVE_QUEUE_STAGES.has(existing.stage);
+          if (isActive && expectedMediaKey && existing.expectedMediaKey !== expectedMediaKey) {
+            throw nativeError(
+              'BUSY',
+              '当前视频已有另一条媒体身份不一致的任务正在运行。',
+              '已阻止复用旧任务；请等待或移除旧任务后，再对当前视频发起离线转录。',
+              true
+            );
+          }
           // Same queue ID with a different page/media identity is not reusable.
           // Explicit local ASR also means "run ASR now", not "return an older
           // platform-caption result". Never mutate the policy of an in-flight job.
@@ -1198,6 +1557,9 @@
             existing.page = parsed.page || existing.page || 1;
             existing.url = parsed.cleanUrl;
           }
+          workingItemsById.set(itemId, existing);
+          itemsToWrite.set(itemId, existing);
+          projectionById.set(itemId, queueListProjection(existing));
           addedItems.push(existing);
           continue;
         }
@@ -1228,10 +1590,14 @@
           }
         };
 
-        queue.push(newItem);
+        workingItemsById.set(itemId, newItem);
+        itemsToWrite.set(itemId, newItem);
+        projectionById.set(itemId, queueListProjection(newItem));
         addedItems.push(newItem);
       }
-      if (addedItems.length > 0) await writeItems(addedItems);
+      if (itemsToWrite.size > 0) {
+        await writeItems([...itemsToWrite.values()], false, [...projectionById.values()]);
+      }
     });
     if (addedItems.length > 0) {
       broadcastQueueUpdate();
@@ -1243,10 +1609,11 @@
 
   async function removeFromQueue(id) {
     cancelInFlight(id);
-    const removed = await serializeQueueMutation(async (queue) => {
-      if (!queue.some((item) => item.id === id)) return false;
-      await writeItems(queue.filter((item) => item.id !== id), true);
-      return true;
+    const removed = await serializeQueueProjectionMutation(async (queueProjection) => {
+      const targetId = String(id || '');
+      if (!queueProjection.some((item) => item.id === targetId)) return false;
+      const nextQueue = queueProjection.filter((item) => item.id !== targetId);
+      return (await removeQueueItemsByIds([targetId], nextQueue)) > 0;
     });
     if (removed) {
       broadcastQueueUpdate();
@@ -1256,11 +1623,11 @@
   }
 
   async function clearCompleted() {
-    const removedCount = await serializeQueueMutation(async (queue) => {
-      const nextQueue = queue.filter((i) => i.stage !== 'done');
-      const count = queue.length - nextQueue.length;
-      if (count) await writeItems(nextQueue, true);
-      return count;
+    const removedCount = await serializeQueueProjectionMutation(async (queueProjection) => {
+      const completedIds = queueProjection.filter((item) => item.stage === 'done').map((item) => item.id);
+      if (!completedIds.length) return 0;
+      const nextQueue = queueProjection.filter((item) => item.stage !== 'done');
+      return removeQueueItemsByIds(completedIds, nextQueue);
     });
     if (removedCount > 0) {
       broadcastQueueUpdate();
@@ -1270,17 +1637,25 @@
 
   async function clearAll() {
     cancelAllInFlight();
-    await saveQueue([]);
+    await serializeQueueProjectionMutation(async (queueProjection) => {
+      if (!queueProjection.length) return;
+      await removeQueueItemsByIds(queueProjection.map((item) => item.id), []);
+    });
     broadcastQueueUpdate();
   }
 
   async function retryItem(id) {
     cancelInFlight(id);
-    const item = await serializeQueueMutation(async (queue) => {
-      const target = queue.find((i) => i.id === id);
+    const item = await serializeQueueProjectionMutation(async (queueProjection) => {
+      const targetId = String(id || '');
+      const projectionIndex = queueProjection.findIndex((entry) => entry.id === targetId);
+      if (projectionIndex < 0) return null;
+      const target = (await readQueueItemsByIds([targetId]))[0] || null;
       if (!target) return null;
       resetForRetry(target);
-      await writeItems([target]);
+      const nextProjection = [...queueProjection];
+      nextProjection[projectionIndex] = queueListProjection(target);
+      await writeItems([target], false, nextProjection);
       return target;
     });
     if (!item) return null;
@@ -1289,15 +1664,29 @@
     return item;
   }
 
-  function broadcastQueueUpdate() {
+  function queueUpdateProjection(item) {
+    if (!item?.id) return null;
+    return {
+      id: String(item.id),
+      stage: String(item.stage || 'queued'),
+      progress: Math.max(0, Math.min(100, Number(item.progress) || 0)),
+      stageHint: String(item.stageHint || '').slice(0, 240)
+    };
+  }
+
+  function broadcastQueueUpdate(item = null) {
+    const projection = queueUpdateProjection(item);
+    const message = projection
+      ? { type: 'BSE_QUEUE_UPDATED', item: projection }
+      : { type: 'BSE_QUEUE_UPDATED' };
     if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-      chrome.runtime.sendMessage({ type: 'BSE_QUEUE_UPDATED' }).catch(() => {});
+      chrome.runtime.sendMessage(message).catch(() => {});
     }
     if (typeof chrome !== 'undefined' && chrome.tabs?.query) {
-      chrome.tabs.query({}).then((tabs) => {
+      chrome.tabs.query({ url: ['*://*.youtube.com/*', '*://*.bilibili.com/*'] }).then((tabs) => {
         for (const tab of tabs) {
           if (tab?.id) {
-            chrome.tabs.sendMessage(tab.id, { type: 'BSE_QUEUE_UPDATED' }).catch(() => {});
+            chrome.tabs.sendMessage(tab.id, message).catch(() => {});
           }
         }
       }).catch(() => {});
@@ -1316,11 +1705,15 @@
    * @returns {Promise<string>}
    */
   async function exportQueueMergedMarkdown(itemIds) {
-    const queue = await getQueue();
-    const completed = queue.filter((item) => item.stage === 'done' && item.subtitle?.plainText);
-    const targetItems = itemIds && itemIds.length
-      ? completed.filter((item) => itemIds.includes(item.id))
-      : completed;
+    const projection = await getQueueProjection();
+    const requestedIds = itemIds && itemIds.length ? new Set(itemIds.map(String)) : null;
+    const targetIds = projection
+      .filter((item) => item.stage === 'done' && (!requestedIds || requestedIds.has(String(item.id))))
+      .map((item) => item.id);
+    const selectedItems = await readQueueItemsByIds(targetIds);
+    const targetItems = selectedItems
+      .filter((item) => item.stage === 'done' && (item.subtitle?.cues?.length || item.subtitle?.plainText || item.subtitle?.markdown))
+      .map((item) => hydrateQueueItemForRuntime(item));
 
     if (!targetItems.length) return '';
 
@@ -1599,7 +1992,7 @@
     // 0. 优先检查当前已打开的标签页是否已有该视频解析好的字幕数据（直接复用，0延迟，无需重复请求）
     if (!subtitles.length && !captionBody && typeof chrome !== 'undefined' && chrome.tabs?.query) {
       try {
-        const tabs = await chrome.tabs.query({}).catch(() => []);
+        const tabs = await chrome.tabs.query({ url: ['*://*.bilibili.com/*'] }).catch(() => []);
         for (const t of tabs) {
           if (t.url && (t.url.includes(bvid) || (item.url && t.url.includes(item.url)))) {
             const tabState = await chrome.tabs.sendMessage(t.id, { type: 'BSE_GET_STATE' }).catch(() => null);
@@ -1633,7 +2026,9 @@
                 }
 
                 captionBody = tabState.cues;
-                const activeTrack = tabState.currentTrack || (tabState.tracks?.length ? tabState.tracks[0] : null);
+                const activeTrack = Array.isArray(tabState.tracks)
+                  ? (tabState.tracks.find((track) => String(track.id) === String(tabState.selectedTrackId)) || tabState.tracks[0] || null)
+                  : null;
                 subtitles = (Array.isArray(tabState.tracks) && tabState.tracks.length)
                   ? tabState.tracks
                   : [{
@@ -2232,7 +2627,10 @@
     // Auto-apply transcribed cues to active matching tabs
     try {
       if (typeof chrome !== 'undefined' && chrome.tabs?.query && Array.isArray(cues) && cues.length) {
-        const tabs = await chrome.tabs.query({});
+        const targetUrlPatterns = item.platform === 'youtube'
+          ? ['*://*.youtube.com/*']
+          : ['*://*.bilibili.com/*'];
+        const tabs = await chrome.tabs.query({ url: targetUrlPatterns });
         for (const tab of tabs) {
           if (tab.id != null && tab.url && (tab.url.includes(item.id) || (item.url && tab.url === item.url))) {
             await chrome.tabs.sendMessage(tab.id, {
@@ -2262,13 +2660,13 @@
     isProcessingJobs = true;
 
     try {
-      await recoverStaleJobs();
+      await recoverStaleJobsInternal(false);
       const settings = await getSettings();
       const maxConcurrency = Math.max(1, Math.min(4, settings.maxConcurrency || 3));
 
       while (true) {
-        const queue = await getQueue();
-        const pendingItems = queue.filter((i) => i.stage === 'queued');
+        const queueProjection = await getQueueProjection();
+        const pendingItems = queueProjection.filter((i) => i.stage === 'queued');
 
         if (!pendingItems.length) {
           break;
@@ -2276,11 +2674,11 @@
 
         const candidates = pendingItems.slice(0, maxConcurrency);
         const claim = async () => {
-          return serializeQueueMutation(async (queue) => {
+          return serializeQueueOperation(async () => {
+            const candidateItems = await readQueueItemsByIds(candidates.map((candidate) => candidate.id));
             const claimed = [];
             const now = Date.now();
-            for (const candidate of candidates) {
-              const item = queue.find((entry) => entry.id === candidate.id);
+            for (const item of candidateItems) {
               if (!item || item.stage !== 'queued') continue;
               const leaseExpiresAt = item.leaseExpiresAt ?? item.executionLease?.expiresAt ?? 0;
               const isLockedByOther = item.leaseOwner && item.leaseOwner !== EXECUTOR_ID && leaseExpiresAt > now;
@@ -2293,10 +2691,10 @@
                 acquiredAt: now,
                 expiresAt: now + EXECUTION_LEASE_MS
               };
-              await writeItems([item], false);
-              claimed.push(safeClone(item));
+              claimed.push(item);
             }
-            return claimed;
+            if (claimed.length) await writeItems(claimed, false, null);
+            return claimed.map(safeClone);
           });
         };
         // Web Locks is shared by extension execution contexts and makes the
@@ -2355,7 +2753,10 @@
       diagnosticReporter = typeof reporter === 'function' ? reporter : null;
     },
     normalizeVideoUrl,
+    toListProjection: queueListProjection,
     getQueue,
+    getQueueProjection,
+    getQueueSummary,
     saveQueue,
     saveItem,
     getItem,

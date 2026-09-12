@@ -554,6 +554,40 @@
    * @param {(stats: import('../types/bse').BatchProgressStats, currentItem: import('../types/bse').BilibiliItem | null, phase: string, task: import('../types/bse').BatchControlTask) => void} [onProgress]
    * @param {import('../types/bse').BatchControlTask} [taskControl]
    */
+  async function fetchBatchNativeCaptions(payload, signal) {
+    if (signal?.aborted) throw signal.reason || new DOMException('请求已取消', 'AbortError');
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+      throw createTrackError('NATIVE_PROXY_UNAVAILABLE', '本机字幕代理不可用');
+    }
+    const jobId = String(payload?.jobId || '').trim();
+    let rejectAbort = null;
+    const abortPromise = new Promise((_, reject) => { rejectAbort = reject; });
+    const onAbort = () => {
+      if (jobId) chrome.runtime.sendMessage({ type: 'BSE_NATIVE_CANCEL', jobId }).catch(() => {});
+      rejectAbort?.(signal?.reason || new DOMException('请求已取消', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      const response = await Promise.race([
+        chrome.runtime.sendMessage({
+          type: 'BSE_FETCH_NATIVE_YOUTUBE_CAPTIONS',
+          payload
+        }),
+        abortPromise
+      ]);
+      if (signal?.aborted) throw signal.reason || new DOMException('请求已取消', 'AbortError');
+      if (!response?.success || !response.result) {
+        const message = typeof response?.error === 'string'
+          ? response.error
+          : (response?.error?.message || '本机字幕服务未返回结果');
+        throw createTrackError('NATIVE_CAPTION_FAILED', message);
+      }
+      return response.result;
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+    }
+  }
+
   async function runBatchExport(tree, config, onProgress, taskControl = {}) {
     const diagnostic = taskControl.diagnostic;
     const selectedItems = BSE.BatchExport.selectItems(tree, config);
@@ -603,30 +637,30 @@
           let cues = null;
           let track = null;
 
-          // 1. 优先通过本机服务 Native Host fetchYouTubeCaptions (yt-dlp) 直取
-          if (BSE.NativeHost?.fetchYouTubeCaptions) {
-            try {
-              const nativeRes = await BSE.NativeHost.fetchYouTubeCaptions({
-                jobId: `batch-${item.bvid}-${Date.now()}`,
-                sourceLanguage: 'auto',
-                subtitlePreference: config.preference || 'manual-first',
-                source: { kind: 'youtube', url: ytUrl }
-              }, { signal: controller.signal });
-              if (nativeRes?.cues && nativeRes.cues.length > 0) {
-                cues = nativeRes.cues;
-                const label = nativeRes.langDoc || nativeRes.language || '字幕';
-                track = {
-                  label,
-                  lan_doc: label,
-                  lan: nativeRes.language || 'unknown',
-                  language: nativeRes.language || 'unknown',
-                  isAI: nativeRes.kind === 'auto'
-                };
-              }
-            } catch (nativeErr) {
-              if (controlTask.cancelled || controller.signal.aborted || nativeErr?.code === 'CANCELLED' || nativeErr?.name === 'AbortError') return;
-              console.warn('[YouTube Batch] 本机服务提取失败:', nativeErr);
+          // 1. Native Messaging is owned by the Service Worker. UI/content
+          // contexts use the proxy so only one process owns the native port and
+          // cancellation contract.
+          try {
+            const nativeRes = await fetchBatchNativeCaptions({
+              jobId: `batch-${item.bvid}-${Date.now()}`,
+              sourceLanguage: 'auto',
+              subtitlePreference: config.preference || 'manual-first',
+              source: { kind: 'youtube', url: ytUrl }
+            }, controller.signal);
+            if (nativeRes?.cues && nativeRes.cues.length > 0) {
+              cues = nativeRes.cues;
+              const label = nativeRes.langDoc || nativeRes.language || '字幕';
+              track = {
+                label,
+                lan_doc: label,
+                lan: nativeRes.language || 'unknown',
+                language: nativeRes.language || 'unknown',
+                isAI: nativeRes.kind === 'auto'
+              };
             }
+          } catch (nativeErr) {
+            if (controlTask.cancelled || controller.signal.aborted || nativeErr?.code === 'CANCELLED' || nativeErr?.name === 'AbortError') return;
+            console.warn('[YouTube Batch] 本机服务提取失败:', nativeErr);
           }
 
           if (cues && cues.length) {

@@ -200,7 +200,8 @@
       activityEvents,
       statusItem,
       summarizeState,
-      technicalEvents() { return store.events({ minLevel: 'debug' }).filter((event) => !/_HINT$/.test(event.code)); },
+      technicalEvents() { return store.events({ minLevel: 'debug', excludeCodeSuffix: '_HINT' }); },
+      technicalCount() { return store.count({ minLevel: 'debug', excludeCodeSuffix: '_HINT' }); },
       clearSelected() {
         const filter = selectedFilter();
         delete filter.minLevel;

@@ -5,7 +5,8 @@
 (() => {
   'use strict';
 
-  const BSE = globalThis.BSE;
+  if (window.__BSE_FEED_INJECTOR_INSTALLED__) return;
+  window.__BSE_FEED_INJECTOR_INSTALLED__ = true;
 
   // Inject feed styles once
   function ensureFeedStyles() {
@@ -149,31 +150,68 @@
   }
 
   let queueCache = new Map();
+  let queueAliasCache = new Map();
   let queueSyncPromise = null;
   let queueSyncFollowUpRequested = false;
   let queueSyncTimer = null;
+  let lastObservedUrl = location.href;
+  let videoRuntimeRequestTimer = null;
+
+  function isVideoRuntimeUrl(url = location.href) {
+    return /(^https?:\/\/)(www\.|m\.)?(youtube\.com\/(watch|shorts|embed|live)|youtu\.be\/)/i.test(url)
+      || /(^https?:\/\/)(www\.|m\.)?bilibili\.com\/(video|festival|blackboard|list|bangumi\/play|medialist\/play)/i.test(url)
+      || (/(^https?:\/\/)(www\.|m\.)?bilibili\.com/i.test(url) && /[?&]bvid=BV/i.test(url));
+  }
+
+  function isStaticBilibiliVideoPath(url = location.href) {
+    return /(^https?:\/\/)(www\.|m\.)?bilibili\.com\/(video|festival|blackboard|list|bangumi\/play|medialist\/play)/i.test(url);
+  }
+
+  function requestVideoRuntime(url, delay = 40) {
+    const supportedHost = location.hostname.includes('bilibili.com') || location.hostname.includes('youtube.com');
+    if (!supportedHost || !isVideoRuntimeUrl(url) || typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
+    if (videoRuntimeRequestTimer) clearTimeout(videoRuntimeRequestTimer);
+    videoRuntimeRequestTimer = setTimeout(() => {
+      videoRuntimeRequestTimer = null;
+      chrome.runtime.sendMessage({ type: 'BSE_ENSURE_VIDEO_RUNTIME', url }).catch(() => {});
+    }, delay);
+  }
+
+  function requestVideoRuntimeForRouteChange() {
+    const nextUrl = location.href;
+    if (nextUrl === lastObservedUrl) return;
+    lastObservedUrl = nextUrl;
+    // Feed/search pages stay lightweight. A same-document route into an actual
+    // playback URL asks the worker to ensure the heavy video runtime once; the
+    // worker pings the page first so watch-to-watch SPA navigation does not
+    // reparse the runtime.
+    requestVideoRuntime(nextUrl);
+  }
+
+  function replaceQueueCache(items) {
+    const list = Array.isArray(items) ? items : [];
+    queueCache = new Map();
+    queueAliasCache = new Map();
+    for (const item of list) {
+      if (!item?.id) continue;
+      queueCache.set(item.id, item);
+      const aliases = [item.targetId, item.id];
+      for (const alias of aliases) {
+        const key = String(alias || '').trim();
+        if (key && !queueAliasCache.has(key)) queueAliasCache.set(key, item);
+      }
+    }
+  }
 
   async function performQueueSync() {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
     try {
-      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-        const res = await chrome.runtime.sendMessage({ type: 'BSE_QUEUE_GET' }).catch(() => null);
-        if (res?.ok && Array.isArray(res.queue)) {
-          queueCache = new Map(res.queue.map((i) => [i.id, i]));
-          updateAllButtons();
-          return;
-        }
+      const res = await chrome.runtime.sendMessage({ type: 'BSE_QUEUE_GET', hydrateText: false }).catch(() => null);
+      if (res?.ok && Array.isArray(res.queue)) {
+        replaceQueueCache(res.queue);
+        updateAllButtons();
       }
     } catch {}
-
-    if (BSE.Queue?.getQueue) {
-      try {
-        const queue = await BSE.Queue.getQueue();
-        if (Array.isArray(queue)) {
-          queueCache = new Map(queue.map((i) => [i.id, i]));
-          updateAllButtons();
-        }
-      } catch {}
-    }
   }
 
   async function syncQueueState() {
@@ -203,9 +241,30 @@
 
   function findQueueItem(itemId) {
     if (!itemId) return null;
-    return queueCache.get(itemId)
-      || Array.from(queueCache.values()).find((i) => i.id === itemId || i.targetId === itemId || (typeof i.id === 'string' && i.id.startsWith(`${itemId}:`)))
-      || null;
+    const key = String(itemId);
+    return queueCache.get(key) || queueAliasCache.get(key) || null;
+  }
+
+  async function loadQueueItemDetail(itemId) {
+    const projection = findQueueItem(itemId);
+    const canonicalId = String(projection?.id || itemId || '').trim();
+    if (!canonicalId || typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return null;
+    const response = await chrome.runtime.sendMessage({ type: 'BSE_QUEUE_GET_ITEM', id: canonicalId }).catch(() => null);
+    return response?.ok && response.item ? response.item : null;
+  }
+
+  function applyQueueRuntimeUpdate(update) {
+    const id = String(update?.id || '').trim();
+    if (!id) return false;
+    const existing = queueCache.get(id);
+    if (!existing || String(existing.stage || '') !== String(update.stage || '')) return false;
+    const merged = { ...existing, ...update };
+    queueCache.set(id, merged);
+    for (const [alias, item] of queueAliasCache) {
+      if (item?.id === id) queueAliasCache.set(alias, merged);
+    }
+    updateButtonsForQueueItem(merged);
+    return true;
   }
 
   function updateButtonState(btn, itemId) {
@@ -234,6 +293,19 @@
       btn.textContent = `转录中 ${item.progress || 0}%`;
       btn.title = item.stageHint || '正在后台提取转录中…';
     }
+  }
+
+  function updateButtonsForQueueItem(item) {
+    const aliases = [...new Set([item?.id, item?.targetId].map((value) => String(value || '').trim()).filter(Boolean))];
+    if (!aliases.length) return;
+    const selector = aliases
+      .map((alias) => `button.sparksub-feed-btn[data-item-id="${CSS.escape(alias)}"]`)
+      .join(',');
+    const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll(selector));
+    buttons.forEach((btn) => {
+      const itemId = btn.dataset.itemId;
+      if (itemId) updateButtonState(btn, itemId);
+    });
   }
 
   function updateAllButtons() {
@@ -268,12 +340,19 @@
       e.stopPropagation();
 
       const currentItem = findQueueItem(itemId);
-      if (currentItem?.stage === 'done' && (currentItem.subtitle?.markdown || currentItem.subtitle?.plainText)) {
-        // One-click copy formatted markdown
+      if (currentItem?.stage === 'done' && Number(currentItem.subtitle?.cueCount || 0) > 0) {
+        // Queue cards cache metadata only. Fetch the one canonical item only after
+        // the user explicitly clicks the completed feed action.
         try {
-          const textToCopy = currentItem.subtitle.markdown || currentItem.subtitle.plainText;
+          const detail = await loadQueueItemDetail(itemId);
+          const textToCopy = detail?.subtitle?.markdown
+            || detail?.subtitle?.plainText
+            || (Array.isArray(detail?.subtitle?.cues)
+              ? detail.subtitle.cues.map((cue) => String(cue?.content || '').trim()).filter(Boolean).join('\n')
+              : '');
+          if (!textToCopy) throw new Error('empty transcript');
           await navigator.clipboard.writeText(textToCopy);
-          showToast(`已复制《${currentItem.title}》转录字幕`);
+          showToast(`已复制《${detail?.title || currentItem.title}》转录字幕`);
           btn.textContent = '已复制';
           setTimeout(() => updateButtonState(btn, itemId), 1500);
         } catch {
@@ -287,42 +366,28 @@
       btn.textContent = '排队中';
 
       try {
-        let enqueued = false;
-        let returnedItem = null;
-        try {
-          const res = await chrome.runtime.sendMessage({
-            type: 'BSE_QUEUE_ENQUEUE',
-            urls: targetUrl,
-            options: { title, author, cover }
-          });
-          if (res?.ok) {
-            enqueued = true;
-            returnedItem = res.items?.[0] || null;
-          }
-        } catch {}
-
-        if (!enqueued && BSE.Queue?.addToQueue) {
-          // Direct fallback via shared storage
-          const added = await BSE.Queue.addToQueue(targetUrl, { title, author, cover });
-          enqueued = true;
-          returnedItem = added?.[0] || null;
-        }
+        const res = await chrome.runtime.sendMessage({
+          type: 'BSE_QUEUE_ENQUEUE',
+          urls: targetUrl,
+          options: { title, author, cover }
+        }).catch(() => null);
+        const enqueued = Boolean(res?.ok);
+        const returnedItem = res?.items?.[0] || null;
 
         if (enqueued) {
           if (returnedItem?.stage === 'done') {
-            queueCache.set(itemId, returnedItem);
+            queueCache.set(returnedItem.id || itemId, returnedItem);
+            queueAliasCache.set(String(returnedItem.targetId || itemId), returnedItem);
             updateButtonState(btn, itemId);
             showToast(`《${title}》字幕已就绪`);
           } else {
             showToast(`已将《${title}》加入后台转录队列`);
-            queueCache.set(itemId, returnedItem || { id: itemId, stage: 'queued', title, author, cover, progress: 0 });
+            const queuedItem = returnedItem || { id: itemId, targetId: itemId, stage: 'queued', title, author, cover, progress: 0 };
+            queueCache.set(queuedItem.id || itemId, queuedItem);
+            queueAliasCache.set(String(queuedItem.targetId || itemId), queuedItem);
             updateButtonState(btn, itemId);
           }
           syncQueueState();
-          // Trigger orchestrator notify
-          if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-            chrome.runtime.sendMessage({ type: 'BSE_ORCHESTRATOR_NOTIFY' }).catch(() => {});
-          }
         } else {
           throw new Error('未能加入转录队列');
         }
@@ -430,6 +495,7 @@
   }
 
   const observer = new MutationObserver((records) => {
+    requestVideoRuntimeForRouteChange();
     for (const record of records) {
       record.addedNodes.forEach((node) => {
         if (node instanceof Element) scheduleCardScan(node);
@@ -441,28 +507,25 @@
     ensureFeedStyles();
     scanAllCards();
     syncQueueState();
+    // YouTube video routes are lazy by design to keep home/search cheap.
+    // Query-only Bilibili playback URLs are not covered by the heavy static
+    // manifest match, so they use the same on-demand seam on first load.
+    const needsInitialRuntime = location.hostname.includes('youtube.com')
+      ? isVideoRuntimeUrl(location.href)
+      : (location.hostname.includes('bilibili.com') && isVideoRuntimeUrl(location.href) && !isStaticBilibiliVideoPath(location.href));
+    if (needsInitialRuntime) requestVideoRuntime(location.href, 0);
 
     observer.observe(document.body || document.documentElement, {
       childList: true,
       subtree: true
     });
+    window.addEventListener('popstate', requestVideoRuntimeForRouteChange, { passive: true });
+    window.addEventListener('yt-navigate-finish', requestVideoRuntimeForRouteChange, { passive: true });
 
     if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
       chrome.runtime.onMessage.addListener((message) => {
         if (message?.type === 'BSE_QUEUE_UPDATED') {
-          scheduleQueueSync();
-        }
-      });
-    }
-
-    if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
-      chrome.storage.onChanged.addListener((changes, area) => {
-        if (area !== 'local' || !changes) return;
-        const hasQueueChange = Object.keys(changes).some(
-          (k) => k === 'bse_transcription_queue_v1' || k.startsWith('bse_transcription_queue_v1:item:')
-        );
-        if (hasQueueChange) {
-          scheduleQueueSync();
+          if (!applyQueueRuntimeUpdate(message.item)) scheduleQueueSync();
         }
       });
     }

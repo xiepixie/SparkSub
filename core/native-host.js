@@ -450,7 +450,8 @@
         chunks: new Map(),
         metadata,
         engine: isNonEmptyString(message.engine) ? message.engine.slice(0, 120) : null,
-        engineLabel: isNonEmptyString(message.engineLabel) ? message.engineLabel.slice(0, 120) : null
+        engineLabel: isNonEmptyString(message.engineLabel) ? message.engineLabel.slice(0, 120) : null,
+        mediaKey: isNonEmptyString(message.mediaKey) ? message.mediaKey.slice(0, MAX_MEDIA_KEY_CHARS) : null
       };
       armRequestTimeout(message.requestId, pending);
       return;
@@ -499,7 +500,8 @@
         : {
             cues,
             ...(result.engine ? { engine: result.engine } : {}),
-            ...(result.engineLabel ? { engineLabel: result.engineLabel } : {})
+            ...(result.engineLabel ? { engineLabel: result.engineLabel } : {}),
+            ...(result.mediaKey ? { mediaKey: result.mediaKey } : {})
           });
     }
   }

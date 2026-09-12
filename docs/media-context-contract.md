@@ -1,6 +1,6 @@
 # Media Context Contract
 
-Updated: 2026-09-10
+Updated: 2026-09-11
 
 SparkSub treats **media identity** and **AI semantic context** as two different contracts.
 
@@ -12,6 +12,8 @@ SparkSub treats **media identity** and **AI semantic context** as two different 
 Bilibili queue work is bound to an exact `BVID + CID` once `/x/web-interface/view` has resolved the requested page. Caption artifacts, open-tab reuse and result application must prove that same identity before being accepted.
 
 The enqueue path may additionally carry the page's current `mediaKey`. A conflicting BVID or page is rejected rather than guessed. Every Bilibili job re-resolves the authoritative BVID-to-CID mapping before using cached metadata or downloading audio.
+
+A Bilibili content page may begin with a provisional `bili:<BVID>:p<N>` identity before the player DOM exposes a CID. Once `/x/web-interface/view` proves the current page's CID, the runtime identity should refine to `bili:<BVID>:cid<CID>` even when a single-P video has no active episode DOM node. This refinement is still fail-closed: for multi-P pages without an explicit `?p=N`, an actual active-page DOM node must prove the page before a CID is remembered; the default P1 fallback is never sufficient evidence.
 
 YouTube work is bound to the exact 11-character video ID. Open-tab resolution must match both the tab URL and the returned `videoId`.
 

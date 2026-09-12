@@ -13,10 +13,8 @@
     "sidePanel",
     "scripting",
     "downloads",
-    "offscreen",
     "contextMenus",
-    "nativeMessaging",
-    "cookies"
+    "nativeMessaging"
   ],
   "host_permissions": [
     "https://www.youtube.com/*",
@@ -66,23 +64,27 @@
       "matches": [
         "*://www.youtube.com/*",
         "*://m.youtube.com/*",
-        "*://*.youtube.com/*"
+        "*://*.youtube.com/*",
+        "*://*.bilibili.com/*"
       ],
-      "js": ["content/main-world-bridge.js"],
-      "run_at": "document_start",
-      "world": "MAIN"
+      "js": ["content/feed-injector.js"],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
     },
     {
       "matches": [
-        "*://www.youtube.com/*",
-        "*://m.youtube.com/*",
-        "*://*.youtube.com/*",
-        "*://*.bilibili.com/*",
-        "*://www.bilibili.com/*",
-        "*://search.bilibili.com/*",
-        "*://space.bilibili.com/*",
-        "*://t.bilibili.com/*",
-        "*://live.bilibili.com/*"
+        "*://www.bilibili.com/video/*",
+        "*://m.bilibili.com/video/*",
+        "*://www.bilibili.com/festival/*",
+        "*://m.bilibili.com/festival/*",
+        "*://www.bilibili.com/blackboard/*",
+        "*://m.bilibili.com/blackboard/*",
+        "*://www.bilibili.com/list/*",
+        "*://m.bilibili.com/list/*",
+        "*://www.bilibili.com/bangumi/play/*",
+        "*://m.bilibili.com/bangumi/play/*",
+        "*://www.bilibili.com/medialist/play/*",
+        "*://m.bilibili.com/medialist/play/*"
       ],
       "js": [
         "core/namespace.js",
@@ -95,17 +97,24 @@
         "core/media-context.js",
         "core/formatters.js",
         "core/batch-export.js",
-        "core/asr-polisher.js",
-        "core/tracker.js",
-        "core/queue.js",
-        "platform/youtube.js",
         "platform/bilibili.js",
         "content/rolling-panel.js",
-        "content/feed-injector.js",
         "content/app.js"
       ],
       "run_at": "document_idle",
       "world": "ISOLATED"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "core/fonts/*",
+        "core/katex.min.css"
+      ],
+      "matches": [
+        "*://*.youtube.com/*",
+        "*://*.bilibili.com/*"
+      ]
     }
   ]
 }

@@ -116,6 +116,58 @@
     );
   }
 
+  function assertViewIdentity(viewData, expectedBvid, stage = '视频信息接口') {
+    const returnedBvid = String(viewData?.bvid || '').trim();
+    const requestedBvid = String(expectedBvid || '').trim();
+    if (returnedBvid && requestedBvid && returnedBvid.toLowerCase() !== requestedBvid.toLowerCase()) {
+      throw createError(
+        'BILI_VIEW_MEDIA_MISMATCH',
+        `${stage}返回了其他视频：请求 ${requestedBvid}，返回 ${returnedBvid}`,
+        '已阻止跨视频元数据进入当前字幕加载事务，请重新刷新。'
+      );
+    }
+    return viewData;
+  }
+
+  function assertPlayerIdentity(payload, { bvid, cid, stage = '播放器接口' } = {}) {
+    const data = payload?.data || {};
+    const expectedBvid = String(bvid || '').trim();
+    const expectedCid = String(cid ?? '').trim();
+    const returnedBvid = String(data.bvid || '').trim();
+    const returnedCid = String(data.cid ?? '').trim();
+    const bvidMismatch = returnedBvid && expectedBvid && returnedBvid.toLowerCase() !== expectedBvid.toLowerCase();
+    const cidMismatch = returnedCid && expectedCid && returnedCid !== expectedCid;
+    if (bvidMismatch || cidMismatch) {
+      throw createError(
+        'BILI_PLAYER_MEDIA_MISMATCH',
+        `${stage}返回了其他媒体：请求 ${expectedBvid || 'unknown'} / cid ${expectedCid || 'unknown'}，返回 ${returnedBvid || 'unknown'} / cid ${returnedCid || 'unknown'}`,
+        '已阻止错误字幕轨道进入当前视频；播放器接口返回身份与请求不一致。'
+      );
+    }
+    return payload;
+  }
+
+  function assertTrackStillCurrent(track, stage = '字幕轨道') {
+    const trackBvid = String(track?.bvid || '').trim();
+    const trackCid = String(track?.cid ?? '').trim();
+    const trackPage = Math.max(0, Number(track?.page) || 0);
+    const currentBvid = String(getBvid() || '').trim();
+    const currentKey = String(BSE.Utils?.getMediaKey?.(BSE.PLATFORM.BILIBILI) || '').trim();
+    const exact = currentKey.match(/^bili:(BV[a-zA-Z0-9]+):cid([^:]+)$/i);
+    const provisional = currentKey.match(/^bili:(BV[a-zA-Z0-9]+):p(\d+)$/i);
+    const bvidMismatch = trackBvid && currentBvid && trackBvid.toLowerCase() !== currentBvid.toLowerCase();
+    const cidMismatch = Boolean(exact && trackCid && String(exact[2]) !== trackCid);
+    const pageMismatch = Boolean(provisional && trackPage > 0 && Number(provisional[2]) !== trackPage);
+    if (bvidMismatch || cidMismatch || pageMismatch) {
+      throw createError(
+        'BILI_TRACK_MEDIA_CHANGED',
+        `${stage}已不属于当前媒体：track=${trackBvid || 'unknown'} / cid ${trackCid || 'unknown'} / p${trackPage || '?'} · current=${currentKey || currentBvid || 'unknown'}`,
+        '视频或分P已切换，旧字幕请求已被丢弃。'
+      );
+    }
+    return true;
+  }
+
   function normalizeTracks(rawTracks, context) {
     const seen = new Set();
     return (rawTracks || []).map((track, index) => {
@@ -174,7 +226,7 @@
           `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
           { signal, diagnostic, stage: '视频语境' }
         ), '视频语境接口');
-        viewData = view?.data;
+        viewData = assertViewIdentity(view?.data, bvid, '视频语境接口');
       } catch (error) {
         if (error?.name === 'AbortError') throw error;
         return null;
@@ -186,7 +238,15 @@
       || {};
     const cid = pageInfo?.cid || viewData?.cid;
     if (!cid) return null;
-    const mediaKey = `bili:${bvid}:cid${cid}`;
+    const resolvedPage = Number(pageInfo?.page) || page;
+    const mediaKey = BSE.Utils.rememberBilibiliMediaIdentity?.({
+      bvid,
+      cid,
+      page: resolvedPage,
+      pageCount: Array.isArray(viewData?.pages) && viewData.pages.length
+        ? viewData.pages.length
+        : Math.max(0, Number(viewData?.videos) || 0)
+    }) || `bili:${bvid}:cid${cid}`;
     let tags = BSE.MediaContext.sameOwner(lastMediaContext, { mediaKey }) ? lastMediaContext.tags : [];
     if (!tags?.length) {
       try {
@@ -197,7 +257,7 @@
         tags = [];
       }
     }
-    const context = BSE.MediaContext.fromBilibiliView({ bvid, cid, page, viewData, tags });
+    const context = BSE.MediaContext.fromBilibiliView({ bvid, cid, page: resolvedPage, viewData, tags });
     lastResolvedView = { bvid, viewData };
     lastMediaContext = context;
     return context;
@@ -220,7 +280,7 @@
         `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
         { signal, diagnostic, stage: '视频信息' }
       ), '视频信息接口');
-      viewData = view?.data;
+      viewData = assertViewIdentity(view?.data, bvid, '视频信息接口');
     }
     if (!viewData) throw createError('VIEW_DATA_EMPTY', '视频信息接口缺少数据', '接口数据结构可能已更新。');
     lastResolvedView = { bvid, viewData };
@@ -240,45 +300,47 @@
     }
 
     if (domCid) {
-      diagnostic?.('实验特性/BPX探测', `检测到当前视频活跃选集 · 快速锁定 CID: ${domCid}`);
-      try {
-        const player = assertApiSuccess(await requestApiJson(
-          `https://api.bilibili.com/x/player/v2?cid=${encodeURIComponent(domCid)}&bvid=${encodeURIComponent(bvid)}`,
-          { signal, diagnostic, stage: '实验特性/BPX字幕接口' }
-        ), '实验特性/BPX字幕接口');
-        const tracks = normalizeTracks(player.data?.subtitle?.subtitles, {
-          bvid,
-          cid: domCid,
-          page: getBilibiliPage(location.href)
-        });
-        if (tracks.length) {
-          diagnostic?.('查找字幕', `[实验特性/BPX] 快速通道返回 ${tracks.length} 条字幕轨道`);
-          return tracks;
-        }
-      } catch (bpxErr) {
-        if (bpxErr?.name === 'AbortError') throw bpxErr;
-        diagnostic?.('实验特性/BPX降级', `BPX 快速通道未返回可用字幕 (${bpxErr.message})，平滑回退到常规接口`);
-      }
+      diagnostic?.('实验特性/BPX探测', `检测到当前视频活跃选集 · 锁定 CID: ${domCid}`);
     }
 
+    // BPX only contributes the active CID hint. Track discovery stays on one
+    // authoritative player path below, avoiding two competing sources of
+    // subtitle_url for the same media identity.
     const page = getBilibiliPage(location.href);
-    const pageInfo = viewData.pages?.find((p) => p.page === page) || viewData.pages?.[Math.max(0, page - 1)] || viewData.pages?.[0] || {};
-    const cid = pageInfo.cid || viewData.cid;
+    const pageInfo = (domCid
+      ? viewData.pages?.find((p) => String(p.cid || '') === String(domCid))
+      : null)
+      || viewData.pages?.find((p) => Number(p.page) === Number(page))
+      || viewData.pages?.[Math.max(0, page - 1)]
+      || viewData.pages?.[0]
+      || {};
+    const cid = domCid || pageInfo.cid || viewData.cid;
     const aid = viewData.aid;
     if (!cid) throw createError('CID_NOT_FOUND', '视频信息中未找到 CID', `BV 号：${bvid}，分P：${page}`);
-    diagnostic?.('视频定位', `已定位视频 · 分P: P${page} · CID: ${cid}`);
+    const resolvedPage = Number(pageInfo.page) || page;
+    const resolvedMediaKey = BSE.Utils.rememberBilibiliMediaIdentity?.({
+      bvid,
+      cid,
+      page: resolvedPage,
+      pageCount: Array.isArray(viewData.pages) && viewData.pages.length
+        ? viewData.pages.length
+        : Math.max(0, Number(viewData.videos) || 0)
+    });
+    diagnostic?.('视频定位', `已定位视频 · 分P: P${resolvedPage} · CID: ${cid}`);
+    if (resolvedMediaKey) diagnostic?.('视频身份', `已确认精确媒体身份 · ${resolvedMediaKey}`);
 
     try {
-      const player = assertApiSuccess(await requestApiJson(
+      const player = assertPlayerIdentity(assertApiSuccess(await requestApiJson(
         `https://api.bilibili.com/x/player/wbi/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`,
         { signal, diagnostic, stage: '播放器信息/WBI' }
-      ), '播放器信息/WBI');
+      ), '播放器信息/WBI'), { bvid, cid, stage: '播放器信息/WBI' });
       const tracks = normalizeTracks(player.data?.subtitle?.subtitles, {
         bvid,
         aid,
         cid,
-        page,
-        part: pageInfo.part || ''
+        page: resolvedPage,
+        part: pageInfo.part || '',
+        duration: Number(pageInfo.duration || viewData.duration) || 0
       });
       diagnostic?.('查找字幕', `WBI 播放器接口返回 ${tracks.length} 条字幕轨道`);
       return tracks;
@@ -286,16 +348,17 @@
       if (wbiError?.name === 'AbortError') throw wbiError;
       diagnostic?.('通道切换', `WBI 接口不可用 (${wbiError.message})，尝试兼容接口`);
       try {
-        const player = assertApiSuccess(await requestApiJson(
+        const player = assertPlayerIdentity(assertApiSuccess(await requestApiJson(
           `https://api.bilibili.com/x/player/v2?aid=${encodeURIComponent(aid || '')}&bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`,
           { signal, diagnostic, stage: '播放器信息/兼容' }
-        ), '播放器信息/兼容');
+        ), '播放器信息/兼容'), { bvid, cid, stage: '播放器信息/兼容' });
         const tracks = normalizeTracks(player.data?.subtitle?.subtitles, {
           bvid,
           aid,
           cid,
-          page,
-          part: pageInfo.part || ''
+          page: resolvedPage,
+          part: pageInfo.part || '',
+          duration: Number(pageInfo.duration || viewData.duration) || 0
         });
         diagnostic?.('查找字幕', `兼容播放器接口返回 ${tracks.length} 条字幕轨道`);
         return tracks;
@@ -316,6 +379,7 @@
     if (!track?.subtitleUrl) {
       throw createError('SUBTITLE_URL_EMPTY', '字幕轨道缺少正文地址', '接口数据结构可能已更新。');
     }
+    assertTrackStillCurrent(track, '字幕正文请求前');
     const cleanUrl = track.subtitleUrl.startsWith('//')
       ? `https:${track.subtitleUrl}`
       : track.subtitleUrl.replace(/^http:\/\//i, 'https://');
@@ -336,6 +400,7 @@
       }
     }
 
+    assertTrackStillCurrent(track, '字幕正文返回后');
     const rawBody = Array.isArray(data?.body) ? data.body : [];
     const cues = BSE.Parsers.normalize(rawBody);
     diagnostic?.('解析字幕', `原始字幕 ${rawBody.length} 条 · 解析有效 ${cues.length} 条`);
@@ -344,6 +409,22 @@
         'SUBTITLE_BODY_EMPTY',
         '字幕正文已返回，但没有可用条目',
         `JSON 顶层字段：${Object.keys(data || {}).slice(0, 8).join(', ') || '无'}`
+      );
+    }
+    const knownDuration = Math.max(0, Number(track.duration) || 0);
+    const maxCueTo = Math.max(0, Number(cues[cues.length - 1]?.to) || 0);
+    if (knownDuration > 10 && maxCueTo > knownDuration + 8) {
+      throw createError(
+        'BILI_SUBTITLE_DURATION_MISMATCH',
+        `字幕时长与当前视频严重不符：视频 ${Math.round(knownDuration)}s / 字幕 ${Math.round(maxCueTo)}s`,
+        '已阻止疑似其他视频的字幕正文覆盖当前视频。'
+      );
+    }
+    if (knownDuration >= 90 && maxCueTo < knownDuration * 0.35 && cues.length < 20) {
+      throw createError(
+        'BILI_SUBTITLE_INCOMPLETE',
+        `字幕只覆盖当前视频前 ${Math.round(maxCueTo)}s，疑似残缺或错误正文`,
+        '已保留当前字幕；可稍后重试或使用本地转录。'
       );
     }
     return cues;
@@ -672,8 +753,16 @@
       isAI: isAiSubtitleTrack(chosen)
     };
     try {
-      const cues = await loadTrack(trackObj, { signal, diagnostic });
+      let cues = await loadTrack(trackObj, { signal, diagnostic });
       if (!cues || !cues.length) return { status: 'no_subtitle', item, track: trackObj, reason: '字幕内容为空' };
+      const stableSubtitleKey = item.bvid && Number(item.page) > 0 ? `bili:${item.bvid}:p${Number(item.page)}` : '';
+      if (stableSubtitleKey && BSE.Utils?.UnifiedSubtitleCache?.applyCorrections) {
+        const corrected = await BSE.Utils.UnifiedSubtitleCache.applyCorrections(stableSubtitleKey, trackObj.id, cues);
+        cues = corrected.cues;
+        if (corrected.appliedCount > 0) {
+          diagnostic?.('批量字幕校对', `P${item.page || item.globalIndex} 已复用 ${corrected.appliedCount} 条已保存字幕修正`);
+        }
+      }
       return { status: 'success', item, track: trackObj, body: cues };
     } catch (trackErr) {
       if (trackErr?.name === 'AbortError') throw trackErr;

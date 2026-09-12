@@ -195,30 +195,23 @@ export async function runOrchestratorTests() {
 
   const selfWakingWorker = createServiceWorkerHarness();
   const storageFirstDrain = deferred();
-  const storageFollowUpDrain = deferred();
   let activeDrains = 0;
   let maxActiveDrains = 0;
-  let storageDrainRuns = 0;
   selfWakingWorker.setQueueDrain(() => {
-    storageDrainRuns += 1;
     activeDrains += 1;
     maxActiveDrains = Math.max(maxActiveDrains, activeDrains);
-    const pending = storageDrainRuns === 1 ? storageFirstDrain : storageFollowUpDrain;
-    return pending.promise.finally(() => { activeDrains -= 1; });
+    return storageFirstDrain.promise.finally(() => { activeDrains -= 1; });
   });
   await selfWakingWorker.runStorageChange({ bse_transcription_queue_v1: { newValue: [] } });
   await tick();
   await Promise.all(Array.from({ length: 4 }, () => selfWakingWorker.runStorageChange({
     'bse_transcription_queue_v1:item:job-1': { newValue: { stage: 'resolving' } }
   })));
-  assert.equal(selfWakingWorker.drainCalls, 1, 'storage writes during an active drain must not start concurrent drains');
+  assert.equal(selfWakingWorker.drainCalls, 1, 'per-item progress persistence must not wake a running executor through storage changes');
   storageFirstDrain.resolve();
   await waitForWorker();
-  assert.equal(selfWakingWorker.drainCalls, 2, 'multiple active storage writes must coalesce to one follow-up drain');
-  assert.equal(maxActiveDrains, 1, 'storage self-wakes must remain single-flight');
-  storageFollowUpDrain.resolve();
-  await waitForWorker();
-  assert.equal(selfWakingWorker.drainCalls, 2, 'storage self-wake drain must stop after the coalesced follow-up');
+  assert.equal(selfWakingWorker.drainCalls, 1, 'per-item progress writes must not add a redundant follow-up drain after transcription settles');
+  assert.equal(maxActiveDrains, 1, 'legacy storage wake must remain single-flight');
 
   const worker = createServiceWorkerHarness();
 

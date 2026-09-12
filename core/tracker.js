@@ -5,6 +5,7 @@
 
   const STORAGE_KEYS = Object.freeze({
     SUBSCRIPTIONS: 'bse_subscriptions',
+    SUMMARY: 'bse_tracker_summary_v1',
     SETTINGS: 'bse_tracker_settings',
     BACKOFF: 'bse_tracker_backoff'
   });
@@ -284,15 +285,20 @@
   }
 
   async function setStorageItem(key, value, areaName = 'local') {
+    return setStorageItems({ [key]: value }, areaName);
+  }
+
+  async function setStorageItems(values, areaName = 'local') {
+    const entries = values && typeof values === 'object' ? values : {};
     const area = typeof chrome !== 'undefined' ? chrome?.storage?.[areaName] : null;
     if (area) {
       try {
-        await area.set({ [key]: value });
+        await area.set(entries);
       } catch (error) {
         throw new Error(`无法写入 ${areaName} 存储：${error?.message || error}`);
       }
     }
-    _memoryStorage.set(key, value);
+    Object.entries(entries).forEach(([key, value]) => _memoryStorage.set(key, value));
   }
 
   function isItemRead(sub, item, itemIndex = 0) {
@@ -345,7 +351,9 @@
 
   function mergeCachedSubtitleBody(item, cached) {
     const metadata = item?.subtitle || null;
-    if (metadata?.markdown || metadata?.plainText) return metadata;
+    // UnifiedSubtitleCache is the current transcript body source. Old tracker
+    // snapshots may still carry embedded markdown/plainText, but those are only
+    // a migration fallback and must not shadow a newer corrected cue cache.
     if (cached && (cached.markdown || cached.plainText)) {
       return {
         ...metadata,
@@ -358,6 +366,7 @@
         plainText: cached.plainText || ''
       };
     }
+    if (metadata?.markdown || metadata?.plainText) return metadata;
     if (metadata?.status === 'ready') {
       return {
         ...metadata,
@@ -426,8 +435,9 @@
           ? Math.min(...subscribedCandidates)
           : (Number(newer.subscribedAt) || Date.now()),
         lastCheckedAt: Math.max(Number(existing.lastCheckedAt) || 0, Number(raw.lastCheckedAt) || 0),
-        items: dedupeTrackedItems([...(existing.items || []), ...(raw.items || [])])
+        items: []
       };
+      merged.items = dedupeTrackedItems([...(existing.items || []), ...(raw.items || [])]);
       normalizeSubscriptionReadState(merged);
       unique.set(key, merged);
     }
@@ -487,6 +497,32 @@
     };
   }
 
+  function trackerSummary(subs = []) {
+    const list = Array.isArray(subs) ? subs : [];
+    return {
+      total: list.length,
+      unread: list.reduce((sum, sub) => sum + Math.max(0, Number(sub?.unreadCount) || 0), 0),
+      updatedAt: Date.now()
+    };
+  }
+
+  async function getTrackerSummary() {
+    const stored = await getStorageItem(STORAGE_KEYS.SUMMARY, null);
+    const total = Number(stored?.total);
+    const unread = Number(stored?.unread);
+    if (Number.isInteger(total) && total >= 0 && Number.isInteger(unread) && unread >= 0) {
+      return { total, unread, updatedAt: Number(stored?.updatedAt) || 0 };
+    }
+
+    // One-time migration fallback for installs that predate the lightweight
+    // projection. Explicit per-item isRead remains the source of truth; this
+    // summary is only a navigation/badge projection.
+    const subscriptions = await getSubscriptions();
+    const summary = trackerSummary(subscriptions);
+    await setStorageItem(STORAGE_KEYS.SUMMARY, summary).catch(() => {});
+    return summary;
+  }
+
   function getStorageStats(subs = []) {
     const compacted = compactSubscriptions(subs);
     return {
@@ -525,12 +561,18 @@
     }
     if (legacyBodies.length && BSE.Utils?.UnifiedSubtitleCache?.getMany && BSE.Utils?.UnifiedSubtitleCache?.setMany) {
       const cached = await BSE.Utils.UnifiedSubtitleCache.getMany(legacyBodies.map((entry) => entry.mediaKey));
-      const missing = legacyBodies.filter((entry) => !cached[entry.mediaKey]);
+      const missing = legacyBodies.filter((entry) => {
+        const existing = cached[entry.mediaKey];
+        return !existing || !(existing.markdown || existing.plainText || existing.cues?.length);
+      });
       if (missing.length) await BSE.Utils.UnifiedSubtitleCache.setMany(missing);
     }
 
     const { subscriptions: sanitized } = compactSubscriptions(subs);
-    await setStorageItem(STORAGE_KEYS.SUBSCRIPTIONS, sanitized);
+    await setStorageItems({
+      [STORAGE_KEYS.SUBSCRIPTIONS]: sanitized,
+      [STORAGE_KEYS.SUMMARY]: trackerSummary(sanitized)
+    });
     return true;
   }
 
@@ -765,6 +807,120 @@
     return match ? match[1] : '';
   }
 
+  function mergeBilibiliOwnerMetadata(sub, owner = {}) {
+    if (!sub || !owner) return false;
+    let changed = false;
+    const avatar = BSE.Utils?.normalizeImageUrl?.(owner.face) || '';
+    const ownerId = String(owner.mid || '').trim();
+    const ownerName = String(owner.name || '').trim();
+
+    if (avatar && avatar !== sub.avatar) {
+      sub.avatar = avatar;
+      changed = true;
+    }
+    if (ownerId && ownerId !== String(sub.ownerId || '')) {
+      sub.ownerId = ownerId;
+      changed = true;
+    }
+    if (ownerName && ownerName !== sub.author) {
+      sub.author = ownerName;
+      changed = true;
+    }
+    if (sub.type === 'up' && ownerName && (!sub.title || /^(?:UP|UP主|B站 UP 主)$/i.test(sub.title))) {
+      sub.title = ownerName;
+      changed = true;
+    }
+    return changed;
+  }
+
+  function collectBilibiliViewCandidates(sub, activeBvid = '') {
+    const values = [sub?.latestBvid, sub?.targetId];
+    for (const item of (sub?.items || []).slice(0, 8)) {
+      values.push(item?.id, item?.url);
+    }
+    values.push(sub?.bvid, sub?.sourceUrl, activeBvid);
+    const unique = new Set();
+    for (const value of values) {
+      const bvid = extractTrackedBvid(value);
+      if (bvid) unique.add(bvid);
+    }
+    return [...unique];
+  }
+
+  function bilibiliViewMatchesSubscription(sub, data) {
+    if (!sub || !data) return false;
+    const ownerMid = String(data.owner?.mid || '').trim();
+    const expectedOwner = String(sub.ownerId || (sub.type === 'up' ? sub.targetId : '') || '').trim();
+    if (/^\d+$/.test(expectedOwner) && ownerMid && ownerMid !== expectedOwner) return false;
+
+    if (sub.type === 'season') {
+      const targetId = String(sub.targetId || '').trim();
+      const seasonId = String(data.ugc_season?.id || data.ugc_season?.season_id || '').trim();
+      if (/^\d+$/.test(targetId)) return Boolean(seasonId && seasonId === targetId);
+      const targetBvid = extractTrackedBvid(targetId);
+      if (targetBvid) return String(data.bvid || '').toLowerCase() === targetBvid.toLowerCase();
+    }
+    return true;
+  }
+
+  async function fetchBilibiliView(bvid, signal) {
+    try {
+      const resp = await BSE.Utils.fetchWithTimeout(
+        `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
+        { signal, credentials: 'include', cache: 'no-store' },
+        6000
+      );
+      const json = await resp.json();
+      if (json?.code !== 0 || !json?.data) {
+        return { ok: false, error: `Bilibili 视频信息接口失败 (code ${json?.code ?? 'unknown'})` };
+      }
+      return { ok: true, data: json.data };
+    } catch (err) {
+      if (err?.name === 'AbortError') throw err;
+      return { ok: false, error: err?.message || String(err) };
+    }
+  }
+
+  async function repairSubscriptionMetadata(sub, options = {}) {
+    const signal = options?.signal;
+    if (!sub?.id || sub.platform !== BSE.PLATFORM.BILIBILI) {
+      return { checked: false, updated: false, error: '当前订阅无需修复 B站作者元数据' };
+    }
+    const candidates = collectBilibiliViewCandidates(sub, options.activeBvid);
+    if (!candidates.length) return { checked: false, updated: false, error: '缺少可用于恢复作者信息的 BV 号' };
+
+    let lastError = '';
+    for (const candidateBvid of candidates) {
+      const result = await fetchBilibiliView(candidateBvid, signal);
+      if (!result.ok) {
+        lastError = result.error || lastError;
+        continue;
+      }
+      if (!bilibiliViewMatchesSubscription(sub, result.data)) {
+        lastError = `视频 ${candidateBvid} 不属于当前追踪源`;
+        continue;
+      }
+
+      let updated = mergeBilibiliOwnerMetadata(sub, result.data.owner || {});
+      if (sub.type === 'season' && sub.bvid !== candidateBvid) {
+        sub.bvid = candidateBvid;
+        updated = true;
+      }
+      if (sub.type === 'season' && sub.latestBvid !== candidateBvid) {
+        sub.latestBvid = candidateBvid;
+        updated = true;
+      }
+      if (!sub.sourceUrl) {
+        sub.sourceUrl = `https://www.bilibili.com/video/${candidateBvid}`;
+        updated = true;
+      }
+      if (updated && options.persist !== false) await updateStoredSubscription(sub);
+      return { checked: true, updated, avatar: sub.avatar || '', bvid: candidateBvid };
+    }
+
+    return { checked: false, updated: false, error: lastError || '没有找到仍然有效的 B站视频用于恢复作者信息' };
+  }
+
   async function fetchBilibiliNavWbiKeys(signal) {
     try {
       const resp = await BSE.Utils.fetchWithTimeout('https://api.bilibili.com/x/web-interface/nav', {
@@ -832,100 +988,91 @@
             duration: Number(v.length) || 0,
             author: v.author || sub.author || ''
           }));
+          if (!sub.avatar && vlist[0]?.bvid) {
+            await repairSubscriptionMetadata(sub, { signal, activeBvid: vlist[0].bvid, persist: false });
+          }
         } else if (type === 'season') {
           // B站 专区/合集与分P连载增量查询 (优先使用 BVID 直连视频拓扑，100%覆盖全量 sections 与 episodes)
           const targetId = String(sub.targetId || '').trim();
-          // `latestBvid` is a navigation/root hint, never a tracked-item key.
-          // Older builds accidentally persisted values such as BV...:p1 here;
-          // strip any page suffix before making the next view API request.
-          let candidateBvid = extractTrackedBvid(sub.latestBvid)
-            || extractTrackedBvid(sub.bvid)
-            || extractTrackedBvid(targetId)
-            || extractTrackedBvid(sub.sourceUrl)
-            || extractTrackedBvid(sub.items?.[0]?.id)
-            || extractTrackedBvid(sub.items?.[0]?.url)
-            || extractTrackedBvid(options.activeBvid);
-
+          // A subscription can outlive the specific BV that originally opened it.
+          // Try every known root/item candidate before falling back to the weaker
+          // collection APIs. This also lets owner/avatar metadata recover when an
+          // old latestBvid was deleted after a rapid re-upload.
+          const candidateBvids = collectBilibiliViewCandidates(sub, options.activeBvid);
           let bvidSuccess = false;
-          if (candidateBvid) {
-            try {
-              const resp = await BSE.Utils.fetchWithTimeout(
-                `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(candidateBvid)}`,
-                { signal },
-                6000
-              );
-              const resJson = await resp.json();
-              if (resJson?.code === 0 && resJson?.data) {
-                const ugc = resJson.data.ugc_season;
-                const pages = resJson.data.pages || [];
+          for (const candidateBvid of candidateBvids) {
+            const viewResult = await fetchBilibiliView(candidateBvid, signal);
+            if (!viewResult.ok || !bilibiliViewMatchesSubscription(sub, viewResult.data)) continue;
 
-                if (ugc?.sections?.length) {
-                  // A. UGC 合集：从所有 section 中精准提取全量 episodes。
-                  // A nested multi-P episode uses BV:pN for *every* page,
-                  // including p1. A one-page episode keeps the plain BV id.
-                  const epList = [];
-                  for (const sec of ugc.sections) {
-                    for (const ep of (sec.episodes || [])) {
-                      const epBvid = ep.bvid || ep.arc?.bvid;
-                      if (!epBvid) continue;
-                      const explicitPages = Array.isArray(ep.pages) && ep.pages.length ? ep.pages : null;
-                      const fallbackPage = ep.page && typeof ep.page === 'object' ? ep.page : null;
-                      const epPages = explicitPages || [fallbackPage || {
-                        cid: ep.cid || ep.arc?.cid,
-                        page: 1,
-                        part: ep.title || ep.arc?.title || '',
-                        duration: ep.arc?.duration || 0
-                      }];
-                      const isMultiPage = epPages.length > 1;
-                      for (let pageIndex = 0; pageIndex < epPages.length; pageIndex++) {
-                        const page = epPages[pageIndex] || {};
-                        const pageNumber = Number(page.page) || pageIndex + 1;
-                        const baseTitle = String(ep.title || ep.arc?.title || '').trim();
-                        const partTitle = String(page.part || '').trim();
-                        epList.push({
-                          id: isMultiPage ? `${epBvid}:p${pageNumber}` : epBvid,
-                          cid: page.cid || ep.cid || ep.arc?.cid,
-                          title: isMultiPage && partTitle ? `${baseTitle} · P${pageNumber} ${partTitle}` : (baseTitle || partTitle),
-                          url: `https://www.bilibili.com/video/${epBvid}${isMultiPage ? `?p=${pageNumber}` : ''}`,
-                          pubdate: (Number(ep.arc?.pubdate) || 0) * 1000,
-                          duration: Number(page.duration || ep.arc?.duration) || 0,
-                          author: ugc.title || sub.title || ''
-                        });
-                      }
-                    }
+            const viewData = viewResult.data;
+            mergeBilibiliOwnerMetadata(sub, viewData.owner || {});
+            const ugc = viewData.ugc_season;
+            const pages = viewData.pages || [];
+
+            if (ugc?.sections?.length) {
+              // A. UGC 合集：从所有 section 中精准提取全量 episodes。
+              // A nested multi-P episode uses BV:pN for *every* page,
+              // including p1. A one-page episode keeps the plain BV id.
+              const epList = [];
+              for (const sec of ugc.sections) {
+                for (const ep of (sec.episodes || [])) {
+                  const epBvid = ep.bvid || ep.arc?.bvid;
+                  if (!epBvid) continue;
+                  const explicitPages = Array.isArray(ep.pages) && ep.pages.length ? ep.pages : null;
+                  const fallbackPage = ep.page && typeof ep.page === 'object' ? ep.page : null;
+                  const epPages = explicitPages || [fallbackPage || {
+                    cid: ep.cid || ep.arc?.cid,
+                    page: 1,
+                    part: ep.title || ep.arc?.title || '',
+                    duration: ep.arc?.duration || 0
+                  }];
+                  const isMultiPage = epPages.length > 1;
+                  for (let pageIndex = 0; pageIndex < epPages.length; pageIndex++) {
+                    const page = epPages[pageIndex] || {};
+                    const pageNumber = Number(page.page) || pageIndex + 1;
+                    const baseTitle = String(ep.title || ep.arc?.title || '').trim();
+                    const partTitle = String(page.part || '').trim();
+                    epList.push({
+                      id: isMultiPage ? `${epBvid}:p${pageNumber}` : epBvid,
+                      cid: page.cid || ep.cid || ep.arc?.cid,
+                      title: isMultiPage && partTitle ? `${baseTitle} · P${pageNumber} ${partTitle}` : (baseTitle || partTitle),
+                      url: `https://www.bilibili.com/video/${epBvid}${isMultiPage ? `?p=${pageNumber}` : ''}`,
+                      pubdate: (Number(ep.arc?.pubdate) || 0) * 1000,
+                      duration: Number(page.duration || ep.arc?.duration) || 0,
+                      author: ugc.title || sub.title || ''
+                    });
                   }
-                  if (epList.length > 0) {
-                    epList.sort((a, b) => (b.pubdate || 0) - (a.pubdate || 0));
-                    fetchedItems = epList;
-                    sub.latestBvid = extractTrackedBvid(epList[0].id) || candidateBvid;
-                    sub.bvid = candidateBvid;
-                    if (!sub.sourceUrl) sub.sourceUrl = `https://www.bilibili.com/video/${candidateBvid}`;
-                    if (!sub.title || sub.title === '视频合集' || sub.title === '合集') {
-                      sub.title = ugc.title;
-                    }
-                    bvidSuccess = true;
-                  }
-                } else if (pages.length > 1) {
-                  // B. 多 P 视频连载：提取所有分 P
-                  const pubdate = (Number(resJson.data.pubdate) || 0) * 1000 || Date.now();
-                  fetchedItems = pages.map((p) => ({
-                    id: `${candidateBvid}:p${p.page}`,
-                    title: p.part || `第${p.page}P`,
-                    url: `https://www.bilibili.com/video/${candidateBvid}?p=${p.page}`,
-                    pubdate,
-                    duration: Number(p.duration) || 0,
-                    author: sub.title || resJson.data.title || ''
-                  }));
-                  sub.latestBvid = candidateBvid;
-                  sub.bvid = candidateBvid;
-                  if (!sub.sourceUrl) sub.sourceUrl = `https://www.bilibili.com/video/${candidateBvid}`;
-                  bvidSuccess = true;
                 }
               }
-            } catch (bvidErr) {
-              if (bvidErr?.name === 'AbortError') throw bvidErr;
-              console.warn('[BSE Tracker] 通过 BVID 解析合集拓扑未命中，尝试备用接口:', bvidErr);
+              if (epList.length > 0) {
+                epList.sort((a, b) => (b.pubdate || 0) - (a.pubdate || 0));
+                fetchedItems = epList;
+                sub.latestBvid = extractTrackedBvid(epList[0].id) || candidateBvid;
+                sub.bvid = candidateBvid;
+                if (!sub.sourceUrl) sub.sourceUrl = `https://www.bilibili.com/video/${candidateBvid}`;
+                if (!sub.title || sub.title === '视频合集' || sub.title === '合集') {
+                  sub.title = ugc.title;
+                }
+                bvidSuccess = true;
+              }
+            } else if (pages.length > 1) {
+              // B. 多 P 视频连载：提取所有分 P
+              const pubdate = (Number(viewData.pubdate) || 0) * 1000 || Date.now();
+              fetchedItems = pages.map((p) => ({
+                id: `${candidateBvid}:p${p.page}`,
+                title: p.part || `第${p.page}P`,
+                url: `https://www.bilibili.com/video/${candidateBvid}?p=${p.page}`,
+                pubdate,
+                duration: Number(p.duration) || 0,
+                author: sub.title || viewData.title || ''
+              }));
+              sub.latestBvid = candidateBvid;
+              sub.bvid = candidateBvid;
+              if (!sub.sourceUrl) sub.sourceUrl = `https://www.bilibili.com/video/${candidateBvid}`;
+              bvidSuccess = true;
             }
+
+            if (bvidSuccess) break;
           }
 
           if (!bvidSuccess) {
@@ -948,7 +1095,7 @@
                 duration: Number(v.duration) || 0,
                 author: sub.title || ''
               }));
-            } else if (!candidateBvid) {
+            } else {
               throw new Error(`Bilibili 合集接口失败 (code ${resJson?.code ?? 'unknown'})`);
             }
           }
@@ -1314,6 +1461,8 @@
           BSE.Utils?.UnifiedSubtitleCache?.set(unifiedMediaKey, {
             title: viewTitle || item.title,
             author: item.author,
+            trackId: String(chosenSub.id || chosenSub.lan || ''),
+            trackSource: 'platform',
             language: chosenSub.lan,
             langDoc: chosenSub.lan_doc || '中文',
             cues,
@@ -1396,13 +1545,14 @@
               const tabRes = await chrome.tabs.sendMessage(tabs[0].id, { type: 'BSE_GET_STATE' });
               if (tabRes?.state?.cues?.length) {
                 const cues = tabRes.state.cues;
+                const activeTrack = (tabRes.state.tracks || []).find((track) => String(track.id) === String(tabRes.state.selectedTrackId)) || tabRes.state.tracks?.[0] || null;
                 const plainText = cues.map((c) => c.content).join(' ');
                 const markdown = formatCuesToMarkdown(item.title, item.author, ytUrl, cues);
                 /** @type {import('../types/bse').TrackedItemSubtitle} */
                 const tabResult = {
                   status: 'ready',
-                  language: tabRes.state.track?.lan || 'zh',
-                  langDoc: tabRes.state.track?.lanDoc || '字幕',
+                  language: activeTrack?.lan || activeTrack?.language || 'zh',
+                  langDoc: activeTrack?.lanDoc || activeTrack?.langDoc || '字幕',
                   cueCount: cues.length,
                   fetchedAt: Date.now(),
                   plainText,
@@ -1412,8 +1562,10 @@
                   BSE.Utils?.UnifiedSubtitleCache?.set(unifiedMediaKey, {
                     title: item.title,
                     author: item.author,
-                    language: tabRes.state.track?.lan || 'zh',
-                    langDoc: tabRes.state.track?.lanDoc || '字幕',
+                    trackId: String(activeTrack?.id || ''),
+                    trackSource: activeTrack?.source || 'page',
+                    language: activeTrack?.lan || activeTrack?.language || 'zh',
+                    langDoc: activeTrack?.lanDoc || activeTrack?.langDoc || '字幕',
                     cues,
                     plainText,
                     markdown
@@ -1641,6 +1793,7 @@
     calculateWbiSign,
     parseYouTubeRssFeed,
     getSubscriptions,
+    getTrackerSummary,
     saveSubscriptions,
     getSubscription,
     addSubscription,
@@ -1655,6 +1808,7 @@
     getSettings,
     saveSettings,
     getStorageStats,
+    repairSubscriptionMetadata,
     checkSubscriptionUpdates,
     checkAllUpdates,
     fetchItemSubtitle,
