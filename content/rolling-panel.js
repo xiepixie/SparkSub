@@ -329,32 +329,77 @@
 
           /* Settings Drawer (Top) */
           .settings-drawer {
-            flex-shrink:0; padding:10px 12px;
-            display:flex; flex-direction:column; gap:9px;
+            flex-shrink:0; padding:7px 10px 9px;
+            display:flex; flex-direction:column; gap:7px;
             border-bottom:1px solid var(--border);
             background:var(--surface-2);
             animation:slideDown .18s cubic-bezier(0.16, 1, 0.3, 1);
           }
-          .settings-grid {
-            display:grid; grid-template-columns:repeat(2, 1fr); gap:6px 8px;
+          .settings-group {
+            border:1px solid var(--border); border-radius:7px;
+            background:var(--card); overflow:hidden;
+            box-shadow:0 1px 2px rgba(0,0,0,0.08);
           }
+          .settings-row-split {
+            display:grid; grid-template-columns:repeat(2, minmax(0, 1fr));
+            min-height:30px; background:transparent;
+          }
+          .settings-row-split:not(:last-child) {
+            border-bottom:1px solid var(--border);
+          }
+          .settings-col,
           .settings-card {
-            padding:5px 8px; border:1px solid var(--border); border-radius:7px;
-            background:var(--card); display:flex; flex-direction:column; gap:2px;
-            transition:border-color .16s ease, background-color .16s ease;
+            min-width:0; padding:3px 8px;
+            display:flex; align-items:center; justify-content:space-between; gap:6px;
+            background:transparent; border:none;
+            transition:background-color .15s ease;
           }
-          .settings-card:hover { border-color:var(--border-focus); background:var(--surface-2); }
-          .settings-card:focus-within { border-color:var(--primary); }
+          .settings-row-split > .settings-col:not(:first-child),
+          .settings-row-split > .settings-card:not(:first-child) {
+            border-left:1px solid var(--border);
+          }
+          .settings-col:hover,
+          .settings-card:hover {
+            background-color:var(--surface-2);
+          }
           .settings-card-label {
-            font-size:9.5px; font-weight:600; color:var(--dim);
+            flex:0 0 auto; font-size:11px; font-weight:500; color:var(--text);
+            line-height:1.3; user-select:none; white-space:nowrap;
           }
-          .settings-card select {
-            width:100%; height:22px; padding:0 14px 0 0;
-            border:0; outline:none; background:transparent;
-            color:var(--text); font-size:11px; font-weight:500; cursor:pointer;
+          .settings-card select,
+          .settings-select {
+            flex:1 1 auto; min-width:0; max-width:160px; height:24px;
+            padding:0 18px 0 6px; border:1px solid var(--border); border-radius:5px;
+            background-color:var(--surface-2); color:var(--text);
+            font-size:10.5px; font-weight:500; cursor:pointer; outline:none;
             -webkit-appearance:none; appearance:none;
+            text-overflow:ellipsis; white-space:nowrap;
             background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 24 24' fill='none' stroke='rgba(128,128,128,0.7)' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-            background-repeat:no-repeat; background-position:right center;
+            background-repeat:no-repeat; background-position:right 6px center;
+            transition:border-color .16s ease, background-color .16s ease, box-shadow .16s ease;
+          }
+          .settings-card select:hover,
+          .settings-select:hover {
+            border-color:var(--border-focus); background-color:var(--bg);
+          }
+          .settings-card select:focus,
+          .settings-select:focus {
+            border-color:var(--primary);
+            box-shadow:0 0 0 2px color-mix(in srgb, var(--primary) 18%, transparent);
+          }
+          @media (min-width: 410px) {
+            .settings-row-split-pref {
+              grid-template-columns:1.28fr 0.72fr;
+            }
+          }
+          @media (max-width: 409px) {
+            .settings-row-split-pref {
+              display:flex; flex-direction:column;
+            }
+            .settings-row-split-pref > .settings-col:not(:first-child),
+            .settings-row-split-pref > .settings-card:not(:first-child) {
+              border-left:none; border-top:1px solid var(--border);
+            }
           }
 
           /* Bottom Footer Toolbar */
@@ -728,41 +773,45 @@
             <button class="icon-btn-sm search-close" title="关闭搜索">×</button>
           </div>
           <div class="settings-drawer" id="rp-settings-drawer" hidden>
-            <div class="settings-grid">
-              <div class="settings-card">
-                <span class="settings-card-label" id="rp-label-theme">主题</span>
-                <select id="rp-menu-theme" name="rp-menu-theme" class="settings-select menu-theme" aria-label="主题">
-                  <option value="auto">自动</option>
-                  <option value="dark">暗曜</option>
-                  <option value="light">浅色</option>
-                  <option value="bilibili">哔哩碧蓝</option>
-                  <option value="youtube">油管猩红</option>
-                </select>
+            <div class="settings-group">
+              <div class="settings-row-split">
+                <div class="settings-card settings-col">
+                  <label class="settings-card-label" id="rp-label-theme" for="rp-menu-theme">主题</label>
+                  <select id="rp-menu-theme" name="rp-menu-theme" class="settings-select menu-theme" aria-label="主题">
+                    <option value="auto">自动</option>
+                    <option value="dark">暗曜</option>
+                    <option value="light">浅色</option>
+                    <option value="bilibili">哔哩碧蓝</option>
+                    <option value="youtube">油管猩红</option>
+                  </select>
+                </div>
+                <div class="settings-card settings-col">
+                  <label class="settings-card-label" id="rp-label-lang" for="rp-menu-lang">语言</label>
+                  <select id="rp-menu-lang" name="rp-menu-lang" class="settings-select menu-lang" aria-label="语言">
+                    <option value="auto">自动</option>
+                    <option value="zh-CN">简体中文</option>
+                    <option value="zh-TW">繁體中文</option>
+                    <option value="en">English</option>
+                  </select>
+                </div>
               </div>
-              <div class="settings-card">
-                <span class="settings-card-label" id="rp-label-lang">语言</span>
-                <select id="rp-menu-lang" name="rp-menu-lang" class="settings-select menu-lang" aria-label="语言">
-                  <option value="auto">自动</option>
-                  <option value="zh-CN">简体中文</option>
-                  <option value="zh-TW">繁體中文</option>
-                  <option value="en">English</option>
-                </select>
-              </div>
-              <div class="settings-card">
-                <span class="settings-card-label" id="rp-label-pref">默认字幕策略</span>
-                <select id="rp-menu-pref" name="rp-menu-pref" class="settings-select menu-pref" aria-label="默认字幕策略">
-                  <option value="manual-first">人工字幕优先，AI 字幕兜底</option>
-                  <option value="manual-only">仅人工字幕</option>
-                  <option value="ai-first">AI 字幕优先</option>
-                </select>
-              </div>
-              <div class="settings-card">
-                <span class="settings-card-label" id="rp-label-size">正文字号</span>
-                <select id="rp-menu-size" name="rp-menu-size" class="settings-select menu-size" aria-label="正文字号">
-                  <option value="13">小 (13px)</option>
-                  <option value="14.5" selected>中 (14.5px)</option>
-                  <option value="16.5">大 (16.5px)</option>
-                </select>
+              <div class="settings-row-split settings-row-split-pref">
+                <div class="settings-card settings-col">
+                  <label class="settings-card-label" id="rp-label-pref" for="rp-menu-pref">默认字幕策略</label>
+                  <select id="rp-menu-pref" name="rp-menu-pref" class="settings-select menu-pref" aria-label="默认字幕策略">
+                    <option value="manual-first">人工字幕优先，AI 字幕兜底</option>
+                    <option value="manual-only">仅人工字幕</option>
+                    <option value="ai-first">AI 字幕优先</option>
+                  </select>
+                </div>
+                <div class="settings-card settings-col">
+                  <label class="settings-card-label" id="rp-label-size" for="rp-menu-size">正文字号</label>
+                  <select id="rp-menu-size" name="rp-menu-size" class="settings-select menu-size" aria-label="正文字号">
+                    <option value="13">小 (13px)</option>
+                    <option value="14.5" selected>中 (14.5px)</option>
+                    <option value="16.5">大 (16.5px)</option>
+                  </select>
+                </div>
               </div>
             </div>
           </div>

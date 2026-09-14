@@ -4563,6 +4563,14 @@ assert.match(taskFiveSidepanelCss, /\.workspace-nav-badge\s*\{[^}]*background:\s
 assert.match(taskFiveSidepanelCss, /@media\s*\(prefers-reduced-motion:\s*reduce\)/, '侧边栏交互动画必须尊重系统减少动态效果设置');
 assert.doesNotMatch(taskFiveSidepanelCss, /\.note-image-wrap\s*\{[^}]*max-height:\s*220px[^}]*overflow:\s*hidden/s, '最终报告图片不得以固定 220px 高度裁掉板书、文档或代码内容');
 assert.match(taskFiveSidepanelCss, /\.note-img-thumbnail\s*\{[^}]*object-fit:\s*contain/s, '最终报告图片应完整 contain 显示，而不是 cover 裁切');
+assert.match(taskFiveSidepanelHtml, /<label class="drawer-card-label" id="label-theme" for="theme-select">主题<\/label>/, '偏好设置标签必须使用规范 label 并通过 for 指向对应 select');
+assert.match(taskFiveSidepanelHtml, /class="drawer-group"[\s\S]+?class="drawer-row-split"/, '偏好设置必须采用分组卡片与双列紧凑布局，压缩垂直高度');
+assert.match(taskFiveSidepanelCss, /\.drawer-group\s*\{[^}]*border:\s*1px solid var\(--border\)[^}]*border-radius:\s*7px/s, '偏好设置分组必须为圆角内嵌卡片容器');
+assert.match(taskFiveSidepanelCss, /\.drawer-row-split\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/s, '偏好设置必须支持一行两个双列压缩');
+assert.match(taskFiveSidepanelCss, /\.drawer-select\s*\{[^}]*height:\s*24px[^}]*border:\s*1px solid var\(--border\)[^}]*border-radius:\s*5px/s, '偏好设置下拉框必须是具有独立边框与圆角的控件');
+assert.match(taskFiveSidepanelCss, /\.drawer-col[\s\S]*?justify-content:\s*space-between/s, '偏好设置各列必须保持左侧标签与右侧控件水平分布');
+assert.match(taskFiveRollingPanelSource, /<label class="settings-card-label" id="rp-label-theme" for="rp-menu-theme">主题<\/label>/, '滚动面板偏好设置标签必须使用规范 label 并指向对应 select');
+assert.match(taskFiveRollingPanelSource, /\.settings-row-split\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(2/s, '滚动面板偏好设置必须同样采用双列压缩布局');
 assert.match(taskFiveSidepanelSource, /openNoteImagePreview/, 'zoom-in 光标必须对应真实的原图预览行为');
 assert.match(taskFiveSidepanelHtml, /id="ai-learn-mode-shell"[\s\S]+?class="ai-modes-bar" role="tablist"/, '学习 Workspace 应使用轻量任务选择，不再混入技术型 Prompt 入口');
 assert.match(taskFiveSidepanelHtml, /id="ai-review-mode-shell"[\s\S]+?class="ai-modes-bar" role="tablist"/, '复习 Workspace 应拥有自己的任务选择，而不是被固定成单一自测模式');

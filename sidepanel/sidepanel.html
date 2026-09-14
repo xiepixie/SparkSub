@@ -38,64 +38,73 @@
 
       <div class="drawer-section">
         <div class="drawer-section-title" id="settings-general-title">通用</div>
-        <div class="drawer-grid">
-          <div class="drawer-card">
-            <span class="drawer-card-label" id="label-theme">主题</span>
-            <select id="theme-select" name="theme-select" class="drawer-select" aria-label="主题">
-              <option value="auto">自动</option>
-              <option value="dark">暗曜</option>
-              <option value="light">浅色</option>
-              <option value="bilibili">哔哩碧蓝</option>
-              <option value="youtube">油管猩红</option>
-            </select>
+        <div class="drawer-group">
+          <!-- Row 1: 主题 & 语言 (双列) -->
+          <div class="drawer-row-split">
+            <div class="drawer-card drawer-col">
+              <label class="drawer-card-label" id="label-theme" for="theme-select">主题</label>
+              <select id="theme-select" name="theme-select" class="drawer-select" aria-label="主题">
+                <option value="auto">自动</option>
+                <option value="dark">暗曜</option>
+                <option value="light">浅色</option>
+                <option value="bilibili">哔哩碧蓝</option>
+                <option value="youtube">油管猩红</option>
+              </select>
+            </div>
+            <div class="drawer-card drawer-col">
+              <label class="drawer-card-label" id="label-lang" for="lang-select">语言</label>
+              <select id="lang-select" name="lang-select" class="drawer-select" aria-label="语言">
+                <option value="auto">自动</option>
+                <option value="zh-CN">简体中文</option>
+                <option value="zh-TW">繁體中文</option>
+                <option value="en">English</option>
+              </select>
+            </div>
           </div>
-          <div class="drawer-card">
-            <span class="drawer-card-label" id="label-lang">语言</span>
-            <select id="lang-select" name="lang-select" class="drawer-select" aria-label="语言">
-              <option value="auto">自动</option>
-              <option value="zh-CN">简体中文</option>
-              <option value="zh-TW">繁體中文</option>
-              <option value="en">English</option>
-            </select>
-          </div>
-          <div class="drawer-card">
-            <span class="drawer-card-label" id="label-pref">默认字幕策略</span>
-            <select id="pref-select" name="pref-select" class="drawer-select" aria-label="默认字幕策略">
-              <option value="manual-first">人工字幕优先，AI 兜底</option>
-              <option value="manual-only">仅人工字幕</option>
-              <option value="ai-first">AI 字幕优先</option>
-            </select>
-          </div>
-          <div class="drawer-card">
-            <span class="drawer-card-label" id="label-size">正文字号</span>
-            <select id="size-select" name="size-select" class="drawer-select" aria-label="正文字号">
-              <option value="13">小 (13px)</option>
-              <option value="14.5" selected>中 (14.5px)</option>
-              <option value="16.5">大 (16.5px)</option>
-            </select>
+          <!-- Row 2: 默认字幕策略 & 正文字号 (响应式双列/单列) -->
+          <div class="drawer-row-split drawer-row-split-pref">
+            <div class="drawer-card drawer-col drawer-col-pref">
+              <label class="drawer-card-label" id="label-pref" for="pref-select">默认字幕策略</label>
+              <select id="pref-select" name="pref-select" class="drawer-select" aria-label="默认字幕策略">
+                <option value="manual-first">人工字幕优先，AI 兜底</option>
+                <option value="manual-only">仅人工字幕</option>
+                <option value="ai-first">AI 字幕优先</option>
+              </select>
+            </div>
+            <div class="drawer-card drawer-col drawer-col-size">
+              <label class="drawer-card-label" id="label-size" for="size-select">正文字号</label>
+              <select id="size-select" name="size-select" class="drawer-select" aria-label="正文字号">
+                <option value="13">小 (13px)</option>
+                <option value="14.5" selected>中 (14.5px)</option>
+                <option value="16.5">大 (16.5px)</option>
+              </select>
+            </div>
           </div>
         </div>
       </div>
 
       <div class="drawer-section">
         <div class="drawer-section-title" id="settings-tracker-title">追踪更新</div>
-        <div class="drawer-grid">
-          <div class="drawer-card">
-            <span class="drawer-card-label" id="label-interval">巡检周期</span>
-            <select id="tracker-interval-select" class="drawer-select" aria-label="巡检周期">
-              <option value="30">每 30 分钟</option>
-              <option value="60" selected>每 1 小时 (推荐)</option>
-              <option value="180">每 3 小时</option>
-              <option value="0">仅手动刷新</option>
-            </select>
-          </div>
-          <div class="drawer-card">
-            <span class="drawer-card-label" id="label-notify">更新提醒</span>
-            <select id="tracker-notify-select" class="drawer-select" aria-label="更新提醒">
-              <option value="desktop" selected>桌面通知与角标</option>
-              <option value="badge">仅角标</option>
-              <option value="off">关闭提醒</option>
-            </select>
+        <div class="drawer-group">
+          <!-- Row 1: 巡检周期 & 更新提醒 (响应式双列/单列) -->
+          <div class="drawer-row-split drawer-row-split-tracker">
+            <div class="drawer-card drawer-col">
+              <label class="drawer-card-label" id="label-interval" for="tracker-interval-select">巡检周期</label>
+              <select id="tracker-interval-select" class="drawer-select" aria-label="巡检周期">
+                <option value="30">每 30 分钟</option>
+                <option value="60" selected>每 1 小时 (推荐)</option>
+                <option value="180">每 3 小时</option>
+                <option value="0">仅手动刷新</option>
+              </select>
+            </div>
+            <div class="drawer-card drawer-col">
+              <label class="drawer-card-label" id="label-notify" for="tracker-notify-select">更新提醒</label>
+              <select id="tracker-notify-select" class="drawer-select" aria-label="更新提醒">
+                <option value="desktop" selected>桌面通知与角标</option>
+                <option value="badge">仅角标</option>
+                <option value="off">关闭提醒</option>
+              </select>
+            </div>
           </div>
         </div>
       </div>
